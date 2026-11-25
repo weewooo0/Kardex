@@ -801,8 +801,10 @@
               </div>
               <div id="geminiPresetHint" class="ai-gemini-hint" hidden>
                 <div class="ai-model-chips" role="group" aria-label="Google Gemini model choices">
-                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-2.5-flash" aria-pressed="false">2.5 Flash (Free)</button>
-                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-2.5-pro" aria-pressed="false">2.5 Pro</button>
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-3.8-flash" aria-pressed="false">3.8 Flash</button>
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-4-hydrogen" aria-pressed="false">4 Hydrogen</button>
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-4-neon" aria-pressed="false">4 Neon</button>
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-4-carbon" aria-pressed="false">4 Carbon</button>
                 </div>
                 <a class="ai-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Get free Gemini key ↗</a>
               </div>
@@ -813,7 +815,11 @@
             </div>
             <div class="field mb-10">
               <label for="model">Model</label>
-              <input id="model" placeholder="model id">
+              <div class="input-with-btn">
+                <input id="model" placeholder="e.g. gemini-3.8-flash">
+                <button type="button" id="fetchAiModelsBtn" class="btn sm-btn subtle" title="Fetch models available on your API key"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Load My Models</button>
+              </div>
+              <select id="aiLiveModelSelect" class="ai-live-model-select" aria-label="Models available on your API key" hidden></select>
             </div>
             <div class="field mb-10">
               <label for="apiKey">API key (memory only — cleared on reload)</label>
@@ -1032,7 +1038,7 @@
 
 <!-- Shift Carry-Forward Modal -->
 <div id="shiftModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="shiftModalHeading" hidden>
-  <div class="modal-box">
+  <div class="modal-box shift-modal-box">
     <div class="modal-head">
       <div>
         <h3 id="shiftModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update (Shift / Interim)</h3>
@@ -1080,39 +1086,20 @@
         </label>
       </div>
 
-      <details class="calc-override-box">
-        <summary class="calc-override-summary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-bolt"></use></svg> Quick Vitals &amp; I&amp;O Entry (Optional)</summary>
-        <div class="quick-vs-grid">
-          <div class="field">
-            <label for="shiftQuickSbp">BP (SBP/DBP)</label>
-            <div class="bp-split-inputs">
-              <input id="shiftQuickSbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="120" aria-label="Systolic BP">
-              <span class="bp-slash" aria-hidden="true">/</span>
-              <input id="shiftQuickDbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="80" aria-label="Diastolic BP">
-            </div>
-          </div>
-          <div class="field"><label for="shiftQuickHr">HR</label><input id="shiftQuickHr" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="78"></div>
-          <div class="field"><label for="shiftQuickRr">RR</label><input id="shiftQuickRr" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="18"></div>
-          <div class="field"><label for="shiftQuickTemp">Temp</label><input id="shiftQuickTemp" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="36.8C"></div>
-          <div class="field"><label for="shiftQuickO2">O2sat</label><input id="shiftQuickO2" enterkeyhint="next" autocomplete="off" placeholder="98% RA"></div>
+      <div class="shift-mode-bar">
+        <div class="shift-mode-tabs" role="tablist" aria-label="Update entry mode">
+          <button type="button" id="shiftModeFormBtn" class="mode-btn active" role="tab" aria-selected="true" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Guided Entry</button>
+          <button type="button" id="shiftModeRawBtn" class="mode-btn" role="tab" aria-selected="false" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
         </div>
-        <div class="quick-io-grid has-unit">
-          <div class="field"><label for="shiftQuickIn">Shift In</label><input id="shiftQuickIn" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="e.g. 800"></div>
-          <div class="field"><label for="shiftQuickOut">Shift Out</label><input id="shiftQuickOut" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="e.g. 650"></div>
-          <div class="field">
-            <label for="shiftQuickIoUnit">Unit</label>
-            <select id="shiftQuickIoUnit" aria-label="Shift I&amp;O unit">
-              <option value="ml" selected>mL</option>
-              <option value="L">L</option>
-            </select>
-          </div>
-          <div class="field"><label for="shiftQuickFbPreview">Calculated FB</label><input id="shiftQuickFbPreview" readonly placeholder="auto"></div>
-          <div class="field align-end"><button type="button" id="shiftApplyQuickBtn" class="btn subtle">Apply to Preview</button></div>
-        </div>
-      </details>
+        <button type="button" id="shiftEditTemplateLink" class="btn sm-btn subtle" title="Choose which sections appear in Guided Entry"><svg class="ui-ico" aria-hidden="true"><use href="#ico-template-edit"></use></svg> Customize Fields</button>
+      </div>
 
-      <label for="shiftPreviewText" class="lbl">Shift Block Preview (Editable)</label>
-      <textarea id="shiftPreviewText" rows="10" spellcheck="false"></textarea>
+      <div id="shiftGuidedForm" class="shift-guided-form"></div>
+
+      <div id="shiftRawPane" hidden>
+        <label for="shiftPreviewText" class="lbl">Shift Block Markdown Preview (Editable)</label>
+        <textarea id="shiftPreviewText" rows="12" spellcheck="false"></textarea>
+      </div>
     </div>
 
     <div class="modal-foot">

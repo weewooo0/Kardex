@@ -43,6 +43,15 @@ Thank you, doctor
 [Your Name]
 [Service / Hospital]`;
 
+export const DEFAULT_NORMAL_PE_TEXT = [
+  'Awake, NIRD',
+  'HEENT: Anicteric sclerae, pink palpebral conjunctivae',
+  'C/L: ECE, clear breath sounds',
+  'CVS: DHS, regular rate and rhythm',
+  'ABD: Soft, non-tender abdomen',
+  'EXT: Strong peripheral pulses, CRT <2 secs',
+].join('\n');
+
 export const DEFAULT_TEMPLATE_CONFIG = {
   header: 'Good day {{ap}}\n\nUpdate on your patient',
   showName: true,
@@ -134,16 +143,7 @@ export function compileTemplateConfig(config = DEFAULT_TEMPLATE_CONFIG) {
           } else if (sub.id === 'vent') {
             subBlocks.push('Vent: {{vent}}');
           } else if (sub.id === 'pe') {
-            subBlocks.push(
-              [
-                'Awake, NIRD',
-                'HEENT: Anicteric sclerae, pink palpebral conjunctivae',
-                'C/L: ECE, clear breath sounds',
-                'CVS: DHS, regular rate and rhythm',
-                'ABD: Soft, non-tender abdomen',
-                'EXT: Strong peripheral pulses, CRT <2 secs',
-              ].join('\n')
-            );
+            subBlocks.push(DEFAULT_NORMAL_PE_TEXT);
           }
         }
         blocks.push(subBlocks.length ? subBlocks.join('\n\n') : 'Objective:');
@@ -820,13 +820,14 @@ export function extractClinicalMetricsFromBlock(blockText) {
   let inLabsSection = false;
   let inPendingSection = false;
   let inServicePlans = false;
+  let inMedsSection = false;
 
   const isSectionBoundary = (trimmed) =>
     /^#{2,3}\s+/.test(trimmed) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Medications?|Meds?|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
       trimmed
     ) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
       trimmed
     ) ||
     /^(?:BP|HR|PR|RR|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
@@ -847,6 +848,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inLabsSection = false;
       inPendingSection = false;
       inServicePlans = false;
+      inMedsSection = false;
       ioContext = null;
       continue;
     }
@@ -855,6 +857,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inLabsSection = false;
       inPendingSection = true;
       inServicePlans = false;
+      inMedsSection = false;
       ioContext = null;
       continue;
     }
@@ -862,6 +865,20 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inLabsSection = false;
       inPendingSection = false;
       inServicePlans = true;
+      inMedsSection = false;
+      ioContext = null;
+      continue;
+    }
+    if (
+      /^(?:#{2,6}\s+)?(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Medications?|Meds?)(?:\s*\/\s*Drips?)?(?:\*{0,2})(?:\s*:.*|\s*)$/i.test(
+        trimmed
+      ) ||
+      /^(?:\*{0,2})Therapeutics(?:\*{0,2})\s*:/i.test(trimmed)
+    ) {
+      inLabsSection = false;
+      inPendingSection = false;
+      inServicePlans = false;
+      inMedsSection = true;
       ioContext = null;
       continue;
     }
@@ -876,6 +893,13 @@ export function extractClinicalMetricsFromBlock(blockText) {
     if (inServicePlans) {
       if (/^[-*]\s+/.test(trimmed) || /^\d+[.)]\s+/.test(trimmed)) continue;
       inServicePlans = false;
+    }
+    if (inMedsSection) {
+      if (isSectionBoundary(trimmed)) {
+        inMedsSection = false;
+      } else {
+        continue;
+      }
     }
     if (/^[-*]\s*\[[ xX]\]/.test(trimmed)) {
       inLabsSection = false;
@@ -1282,6 +1306,13 @@ export function parseChart(content, note = {}) {
     }
   }
 
+  const { medications, medicationsDate } = extractLatestMedicationsFromChart(
+    text,
+    latestDateBlock,
+    latestShiftBlock,
+    latestDate
+  );
+
   return {
     name,
     room,
@@ -1306,6 +1337,8 @@ export function parseChart(content, note = {}) {
     hgt,
     drips,
     labs,
+    medications,
+    medicationsDate,
     servicePlans,
     pending: pendingResult.pending,
   };
@@ -1532,6 +1565,161 @@ function extractServicePlansFromBlock(blockText) {
   }
 
   return plans;
+}
+
+function isMedPlaceholder(text) {
+  const clean = String(text || '').trim();
+  return !clean || /^(?:none|n\/a|na|nil|-+|\{\{(?:drips|meds)\}\})$/i.test(clean);
+}
+
+export function extractMedicationsFromBlock(blockText) {
+  const lines = String(blockText || '').split('\n');
+  const meds = [];
+  const seen = new Set();
+  let inMeds = false;
+  let blankCount = 0;
+
+  const pushMed = (raw) => {
+    const clean = String(raw || '')
+      .replace(/^[-*]\s*\[[ xX]\]\s*/, '')
+      .replace(/^(?:[-*]|\d+[.)])\s+/, '')
+      .trim();
+    if (isMedPlaceholder(clean)) return;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      meds.push(clean);
+    }
+  };
+
+  const isMedStopBoundary = (trimmed) =>
+    /^#{2,3}\s+/.test(trimmed) ||
+    /^---+$/.test(trimmed) ||
+    /^(?:\*{0,2})(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?(?:\*{0,2})\s*:/i.test(
+      trimmed
+    ) ||
+    /^(?:\*{0,2})(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Feeding|Diet|Nutrition|Greeting|Footer)\b(?:\*{0,2})(?:\s*:|$)/i.test(
+      trimmed
+    ) ||
+    /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const hdrMatch =
+      trimmed.match(
+        /^(?:#{2,6}\s+)?(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Medications?|Meds?)(?:\s*\/\s*Drips?)?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i
+      ) || trimmed.match(/^(?:\*{0,2})Therapeutics(?:\*{0,2})\s*:\s*(.*)$/i);
+
+    if (hdrMatch && !/^#{2,3}\s+/.test(trimmed)) {
+      inMeds = true;
+      blankCount = 0;
+      const inline = (hdrMatch[1] || '').trim();
+      if (inline) {
+        for (const piece of inline.split(/[|;]/)) {
+          pushMed(piece);
+        }
+      }
+      continue;
+    }
+
+    if (!inMeds) continue;
+
+    if (!trimmed) {
+      if (meds.length > 0) {
+        inMeds = false;
+      } else {
+        blankCount++;
+        if (blankCount >= 2) inMeds = false;
+      }
+      continue;
+    }
+
+    if (isMedStopBoundary(trimmed)) {
+      inMeds = false;
+      continue;
+    }
+
+    blankCount = 0;
+    if (/[|;]/.test(trimmed) && !/^(?:[-*]|\d+[.)])\s+/.test(trimmed)) {
+      for (const piece of trimmed.split(/[|;]/)) {
+        pushMed(piece);
+      }
+    } else {
+      pushMed(trimmed);
+    }
+  }
+
+  return meds;
+}
+
+function splitAnyShiftBlocks(blockText) {
+  const shiftHeadingRe = /^###\s*([^\n]+)$/gim;
+  const matches = [...String(blockText || '').matchAll(shiftHeadingRe)];
+  if (!matches.length) return [];
+  const out = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : blockText.length;
+    out.push({
+      rawShift: matches[i][1].trim(),
+      block: blockText.slice(start, end),
+    });
+  }
+  return out;
+}
+
+function splitDateBlocks(content) {
+  const dateHeadingRe =
+    /^##\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\w+\s+\d{1,2},?\s+\d{4})[^\n]*$/gim;
+  const text = String(content || '');
+  const matches = [...text.matchAll(dateHeadingRe)];
+  if (!matches.length) return [];
+  const out = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    out.push({
+      date: matches[i][1].trim().replace(/\//g, '-'),
+      block: text.slice(start, end),
+    });
+  }
+  return out;
+}
+
+function extractLatestMedicationsFromChart(content, latestDateBlock, latestShiftBlock, latestDate) {
+  const fromLatestShift = extractMedicationsFromBlock(latestShiftBlock);
+  if (fromLatestShift.length > 0) {
+    return { medications: fromLatestShift, medicationsDate: latestDate || '' };
+  }
+
+  const latestShiftsDesc = splitAnyShiftBlocks(latestDateBlock).reverse();
+  for (const s of latestShiftsDesc) {
+    const meds = extractMedicationsFromBlock(s.block);
+    if (meds.length > 0) {
+      return { medications: meds, medicationsDate: latestDate || '' };
+    }
+  }
+
+  const dateBlocksDesc = splitDateBlocks(content).reverse();
+  if (dateBlocksDesc.length > 0) {
+    for (let i = 1; i < dateBlocksDesc.length; i++) {
+      const d = dateBlocksDesc[i];
+      const shiftsDesc = splitAnyShiftBlocks(d.block).reverse();
+      for (const s of shiftsDesc) {
+        const meds = extractMedicationsFromBlock(s.block);
+        if (meds.length > 0) {
+          return { medications: meds, medicationsDate: d.date || '' };
+        }
+      }
+      const meds = extractMedicationsFromBlock(d.block);
+      if (meds.length > 0) {
+        return { medications: meds, medicationsDate: d.date || '' };
+      }
+    }
+  }
+
+  const fallbackMeds = extractMedicationsFromBlock(content);
+  return { medications: fallbackMeds, medicationsDate: fallbackMeds.length ? latestDate || '' : '' };
 }
 
 export function extractCarryForwardData(content) {
@@ -1835,6 +2023,218 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
   }
 
   return lines.join('\n') + '\n';
+}
+
+function normalizeStructuredLines(rawText, { checklist = false } = {}) {
+  return String(rawText || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((line) => {
+      if (checklist) {
+        const cb = line.match(/^[-*]?\s*\[([ xX])\]\s*(.+)$/);
+        if (cb) return `- [${cb[1].toLowerCase() === 'x' ? 'x' : ' '}] ${cb[2].trim()}`;
+        return `- [ ] ${line.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim()}`;
+      }
+      return `- ${line.replace(/^[-*]\s*\[[ xX]\]\s*/, '').replace(/^(?:[-*]|\d+[.)])\s+/, '').trim()}`;
+    });
+}
+
+function formatStructuredVitals(values = {}) {
+  const sbp = String(values.sbp || '').trim();
+  const dbp = String(values.dbp || '').trim();
+  const bp = sbp && dbp ? `${sbp}/${dbp}` : sbp || (dbp ? `/${dbp}` : '');
+  const hr = String(values.hr || '').trim();
+  const rr = String(values.rr || '').trim();
+  const temp = String(values.temp || '').trim();
+  const o2 = String(values.o2 || '').trim();
+  if (!bp && !hr && !rr && !temp && !o2) return '';
+  const parts = [];
+  if (bp) parts.push(`BP ${bp}`);
+  if (hr) parts.push(`HR ${hr}`);
+  if (rr) parts.push(`RR ${rr}`);
+  if (temp) parts.push(`T ${temp}`);
+  if (o2) parts.push(`O2sat ${o2}`);
+  return `Vitals: ${parts.join(' | ')}`;
+}
+
+function formatStructuredIo(values = {}) {
+  const unit = String(values.ioUnit || 'ml').trim() || 'ml';
+  const fmtUnit = (raw) => {
+    const clean = String(raw || '').trim();
+    if (!clean) return '';
+    return /[a-z]/i.test(clean) ? clean : `${clean}${unit}`;
+  };
+  const inVal = fmtUnit(values.ioIn);
+  const outVal = fmtUnit(values.ioOut);
+  if (!inVal && !outVal) return '';
+  const fb = inVal && outVal ? computeShiftFluidBalance(inVal, outVal) : '';
+  const parts = [];
+  if (inVal) parts.push(`In: ${inVal}`);
+  if (outVal) parts.push(`Out: ${outVal}`);
+  if (fb) parts.push(`FB: ${fb}`);
+  return `Shift I&O: ${parts.join(' | ')}`;
+}
+
+function resolveSimplePlaceholders(templateStr, parsed = {}, cleanShift = '6am', dateStr = '') {
+  const ap = parsed.ap || '';
+  const name = parsed.name && parsed.name !== 'Unknown Patient' ? parsed.name : '';
+  const ageSex = [parsed.age, parsed.sex].filter(Boolean).join('/');
+  const room = parsed.room && parsed.room !== 'Unassigned' ? parsed.room : '';
+  const map = {
+    ap,
+    attending: ap,
+    'attending physician': ap,
+    name,
+    'patient name': name,
+    patient: name,
+    age: parsed.age || '',
+    sex: parsed.sex || '',
+    weight: parsed.weight || '',
+    age_sex: ageSex,
+    'age/sex': ageSex,
+    room,
+    'room/bed': room,
+    bed: room,
+    shift: cleanShift,
+    date: dateStr || getTodayDateStrings().mmddyyyy,
+  };
+  return String(templateStr || '').replace(/\{\{\s*([^}]+?)\s*\}\}/g, (full, rawKey) => {
+    const k = rawKey.trim().toLowerCase();
+    return Object.hasOwn(map, k) ? map[k] : '';
+  });
+}
+
+export function buildStructuredShiftUpdate({
+  shift = '6am',
+  config = DEFAULT_TEMPLATE_CONFIG,
+  values = {},
+  parsed = {},
+  isInterim = false,
+  dateStr = '',
+} = {}) {
+  const cleanShift = String(shift || '6am').trim() || '6am';
+  const interimMode = Boolean(isInterim) || isInterimShift(cleanShift);
+
+  if (interimMode) {
+    const blocks = [];
+    const ev = String(values.interimEvent || '').trim();
+    if (ev) blocks.push(`Event / Update: ${ev}`);
+    const vsLine = formatStructuredVitals(values);
+    if (vsLine) blocks.push(vsLine);
+    const ventLine = String(values.vent || '').trim();
+    if (ventLine) blocks.push(`Vent: ${ventLine}`);
+    const dripsLine = String(values.drips || '').trim();
+    if (dripsLine) blocks.push(`Drips: ${dripsLine}`);
+    const labsTxt = String(values.labs || '').trim();
+    if (labsTxt) blocks.push(`Labs:\n${labsTxt}`);
+    const medLines = normalizeStructuredLines(values.meds);
+    if (medLines.length) blocks.push(`Medications:\n${medLines.join('\n')}`);
+    const pendingLines = normalizeStructuredLines(values.pending, { checklist: true });
+    if (pendingLines.length) blocks.push(`**Pending:\n${pendingLines.join('\n')}`);
+    const planLines = normalizeStructuredLines(values.servicePlans);
+    if (planLines.length) blocks.push(`Service Plans:\n${planLines.join('\n')}`);
+    return `### ${cleanShift}\n${blocks.length ? blocks.join('\n\n') : 'Event / Update: '}\n`;
+  }
+
+  const cfg = config || DEFAULT_TEMPLATE_CONFIG;
+  const blocks = [];
+
+  const rawHeader = resolveSimplePlaceholders(cfg.header || '', parsed, cleanShift, dateStr)
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .join('\n')
+    .trim();
+  if (rawHeader) blocks.push(rawHeader);
+
+  const ptLines = [];
+  if (cfg.showName !== false && parsed.name && parsed.name !== 'Unknown Patient') ptLines.push(parsed.name);
+  if (cfg.showAgeSex !== false) {
+    const ageSex = [parsed.age, parsed.sex].filter(Boolean).join('/');
+    if (ageSex) ptLines.push(ageSex);
+  }
+  if (cfg.showRoom !== false && parsed.room && parsed.room !== 'Unassigned') ptLines.push(parsed.room);
+  if (ptLines.length) blocks.push(ptLines.join('\n'));
+
+  const sections = Array.isArray(cfg.sections) ? cfg.sections : DEFAULT_TEMPLATE_CONFIG.sections;
+  for (const sec of sections) {
+    if (!sec || !sec.enabled) continue;
+    switch (sec.id) {
+      case 'labs': {
+        const labsTxt = String(values.labs || '').trim();
+        if (labsTxt) blocks.push(`Laboratory updates:\n${labsTxt}`);
+        break;
+      }
+      case 'subjective': {
+        const subjTxt = String(values.subjective || '').trim();
+        if (subjTxt) blocks.push(`Subjective:\n${subjTxt}`);
+        break;
+      }
+      case 'objective': {
+        const subs = Array.isArray(sec.subItems) ? sec.subItems : [];
+        const objParts = [];
+        const hasIoSub = subs.some((s) => s && s.enabled && s.id === 'io');
+        const io24Val = String(values.io24 || '').trim();
+        for (const sub of subs) {
+          if (!sub || !sub.enabled) continue;
+          if (sub.id === 'vitals') {
+            const vsLine = formatStructuredVitals(values);
+            if (vsLine) objParts.push(vsLine);
+          } else if (sub.id === 'io') {
+            let ioLine = formatStructuredIo(values);
+            if (ioLine && io24Val && subs.some((s) => s && s.enabled && s.id === 'io24')) {
+              ioLine = `${ioLine} (24h Net: ${io24Val})`;
+            }
+            if (ioLine) objParts.push(ioLine);
+          } else if (sub.id === 'io24') {
+            if (io24Val && (!hasIoSub || !formatStructuredIo(values))) {
+              objParts.push(`24h Net: ${io24Val}`);
+            }
+          } else if (sub.id === 'vent') {
+            const ventVal = String(values.vent || '').trim();
+            if (ventVal) objParts.push(`Vent: ${ventVal}`);
+          } else if (sub.id === 'pe') {
+            const peVal = String(values.pe || '').trim();
+            if (peVal) objParts.push(peVal);
+          }
+        }
+        if (objParts.length) blocks.push(objParts.join('\n\n'));
+        break;
+      }
+      case 'assessment': {
+        const assessTxt = String(values.assessment || '').trim();
+        if (assessTxt) {
+          blocks.push(
+            assessTxt.includes('\n') ? `Assessment:\n${assessTxt}` : `Assessment: ${assessTxt}`
+          );
+        }
+        break;
+      }
+      case 'meds': {
+        const medBlocks = [];
+        const dripsTxt = String(values.drips || '').trim();
+        if (dripsTxt) medBlocks.push(`Drips: ${dripsTxt}`);
+        const medLines = normalizeStructuredLines(values.meds);
+        if (medLines.length) medBlocks.push(`Medications:\n${medLines.join('\n')}`);
+        if (medBlocks.length) blocks.push(medBlocks.join('\n\n'));
+        break;
+      }
+      case 'plan': {
+        const planBlocks = [];
+        const spLines = normalizeStructuredLines(values.servicePlans);
+        if (spLines.length) planBlocks.push(`Service Plans:\n${spLines.join('\n')}`);
+        const pendLines = normalizeStructuredLines(values.pending, { checklist: true });
+        if (pendLines.length) planBlocks.push(`**Pending:\n${pendLines.join('\n')}`);
+        if (planBlocks.length) blocks.push(planBlocks.join('\n\n'));
+        break;
+      }
+    }
+  }
+
+  const footerTxt = resolveSimplePlaceholders(cfg.footer || '', parsed, cleanShift, dateStr).trim();
+  if (footerTxt) blocks.push(footerTxt);
+
+  return `### ${cleanShift}\n${blocks.join('\n\n')}\n`;
 }
 
 export function formatUpdateText(content, note = {}) {
@@ -2662,6 +3062,11 @@ Service Plans:
 - Continue Ceftriaxone 2g IV OD (Day 3) + Azithromycin 500mg PO OD
 - Sliding scale insulin per protocol
 - Incentive spirometry q2h while awake
+
+Medications:
+- Ceftriaxone 2g IV OD (Day 3)
+- Azithromycin 500mg tab OD
+- Sliding scale regular insulin per protocol
 `,
       updated: Date.now() - 3600000,
     },
@@ -2703,6 +3108,13 @@ Service Plans:
 - Atorvastatin 80mg tab QHS
 - Low salt, low fat cardiac diet
 - Ambulate with assistance today
+
+Medications:
+- Aspirin 80mg tab OD
+- Ticagrelor 90mg tab BID
+- Atorvastatin 80mg tab QHS
+- Losartan 50mg tab OD
+- Carvedilol 6.25mg tab BID
 `,
       updated: Date.now() - 7200000,
     },
@@ -2745,6 +3157,13 @@ Service Plans:
 - Meropenem 1g IV q12h (adjusted for CrCl)
 - Titrate Norepinephrine to maintain MAP > 65
 - Protective lung ventilation strategy (6ml/kg PBW)
+
+Medications:
+- Meropenem 1g IV q12h (renal-adjusted)
+- Norepinephrine 4mg/250mL @ 0.08 mcg/kg/min
+- Fentanyl 500mcg/50mL @ 50 mcg/hr
+- Pantoprazole 40mg IV OD
+- Enoxaparin 40mg SC OD
 `,
       updated: Date.now() - 1800000,
     },

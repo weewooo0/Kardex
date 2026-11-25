@@ -6,8 +6,10 @@
 export const GEMINI_DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta';
 
 export const GEMINI_MODELS = [
-  { id: 'gemini-2.5-flash', label: '2.5 Flash (Free)' },
-  { id: 'gemini-2.5-pro', label: '2.5 Pro' },
+  { id: 'gemini-3.8-flash', label: '3.8 Flash' },
+  { id: 'gemini-4-hydrogen', label: '4 Hydrogen' },
+  { id: 'gemini-4-neon', label: '4 Neon' },
+  { id: 'gemini-4-carbon', label: '4 Carbon' },
 ];
 
 export const AI_PRESETS = {
@@ -15,7 +17,7 @@ export const AI_PRESETS = {
     id: 'gemini',
     label: 'Google Gemini',
     endpoint: GEMINI_DEFAULT_ENDPOINT,
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3.8-flash',
     keyUrl: 'https://aistudio.google.com/apikey',
     keyPlaceholder: 'AIza... (paste Gemini API key)',
   },
@@ -229,6 +231,123 @@ export async function testAiConnection({ endpoint, model, apiKey, fetchImpl = fe
       ok: true,
       provider,
       ms: Math.max(0, Math.round(t1 - t0)),
+    };
+  } catch (err) {
+    throw new Error(sanitizeAiErrorMessage(err?.message || err, apiKey));
+  }
+}
+
+export function buildAiModelsRequest({ endpoint, apiKey }) {
+  const cleanKey = String(apiKey || '').trim();
+  if (isGeminiEndpoint(endpoint)) {
+    const base = normalizeGeminiEndpoint(endpoint);
+    return {
+      provider: 'gemini',
+      url: `${base}/models?pageSize=200&key=${encodeURIComponent(cleanKey)}`,
+      options: { method: 'GET' },
+    };
+  }
+  const base = trimTrailingSlashes(endpoint);
+  return {
+    provider: 'openai',
+    url: `${base}/models`,
+    options: {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${cleanKey}` },
+    },
+  };
+}
+
+export function isSupportedGeminiModelId(model) {
+  const clean = normalizeGeminiModel(model).toLowerCase();
+  if (!clean) return false;
+  const match = clean.match(/^gemini-(\d+)(?:\.(\d+))?(?:-|$)/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = match[2] ? Number(match[2]) : 0;
+  return major >= 4 || (major === 3 && minor >= 8);
+}
+
+function geminiModelSortKey(id) {
+  const lower = String(id || '').toLowerCase();
+  const verMatch = lower.match(/^gemini-(\d+)(?:\.(\d+))?/);
+  const major = verMatch ? Number(verMatch[1]) : 0;
+  const minor = verMatch && verMatch[2] ? Number(verMatch[2]) : 0;
+  const tier = lower.includes('carbon')
+    ? 6
+    : lower.includes('neon')
+      ? 5
+      : lower.includes('hydrogen')
+        ? 4
+        : lower.includes('ultra')
+          ? 3
+          : lower.includes('pro')
+            ? 2
+            : lower.includes('flash')
+              ? 1
+              : 0;
+  return { major, minor, tier };
+}
+
+export function parseAiModelsResponse(provider, data) {
+  if (data?.error?.message) {
+    throw new Error(data.error.message);
+  }
+  if (provider === 'gemini') {
+    const rawList = Array.isArray(data?.models) ? data.models : [];
+    const seen = new Set();
+    const out = [];
+    for (const item of rawList) {
+      const methods = Array.isArray(item?.supportedGenerationMethods)
+        ? item.supportedGenerationMethods
+        : [];
+      if (methods.length > 0 && !methods.includes('generateContent')) continue;
+      const id = normalizeGeminiModel(item?.name);
+      if (!id || seen.has(id)) continue;
+      if (!isSupportedGeminiModelId(id)) continue;
+      if (/embedding|imagen|veo|aqa|tts|audio-only|robotics|computer-use/i.test(id)) continue;
+      seen.add(id);
+      out.push({
+        id,
+        displayName: String(item?.displayName || id).trim() || id,
+      });
+    }
+    out.sort((a, b) => {
+      const ka = geminiModelSortKey(a.id);
+      const kb = geminiModelSortKey(b.id);
+      if (kb.major !== ka.major) return kb.major - ka.major;
+      if (kb.minor !== ka.minor) return kb.minor - ka.minor;
+      if (kb.tier !== ka.tier) return kb.tier - ka.tier;
+      return a.id.localeCompare(b.id);
+    });
+    return out;
+  }
+
+  const rawList = Array.isArray(data?.data) ? data.data : [];
+  const seen = new Set();
+  const out = [];
+  for (const item of rawList) {
+    const id = String(item?.id || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, displayName: id });
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
+}
+
+export async function listAiModels({ endpoint, apiKey, fetchImpl = fetch }) {
+  const { provider, url, options } = buildAiModelsRequest({ endpoint, apiKey });
+  try {
+    const res = await fetchImpl(url, options);
+    const data = await parseJsonSafe(res);
+    if (!res.ok) {
+      const apiMsg = data?.error?.message || `HTTP ${res.status}`;
+      throw new Error(apiMsg);
+    }
+    return {
+      provider,
+      models: parseAiModelsResponse(provider, data),
     };
   } catch (err) {
     throw new Error(sanitizeAiErrorMessage(err?.message || err, apiKey));

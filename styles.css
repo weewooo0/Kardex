@@ -699,6 +699,7 @@ main {
 .scut-card:hover { border-color: var(--info-border); }
 .scut-card.stale { border-left: 4px solid var(--warn); }
 .scut-card.compact .scut-metrics,
+.scut-card.compact .scut-meds-details,
 .scut-card.compact .scut-plans-details {
   display: none;
 }
@@ -874,6 +875,30 @@ main {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+.scut-meds-details {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+.scut-meds-details summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  user-select: none;
+}
+.scut-meds-list {
+  margin: 6px 0 2px;
+  padding-left: 16px;
+  color: var(--txt-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .scut-pending {
@@ -1729,10 +1754,82 @@ html.kb-open .modal-overlay {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 82px minmax(0, 1.3fr) auto;
 }
 #shiftPreviewText {
-  min-height: 200px;
+  min-height: 220px;
   font-family: ui-monospace, Menlo, monospace;
   font-size: 12.5px;
   line-height: 1.45;
+}
+.shift-modal-box {
+  max-width: 720px;
+}
+.shift-mode-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.shift-mode-tabs {
+  display: inline-flex;
+  gap: 6px;
+}
+.shift-guided-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.shift-guided-form[hidden],
+#shiftRawPane[hidden] {
+  display: none;
+}
+.shift-field-card {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.shift-field-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.shift-field-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--info-txt);
+}
+.shift-field-subgrid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.shift-sub-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mut);
+  margin-bottom: 4px;
+}
+.shift-guided-form textarea {
+  min-height: 74px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.shift-io-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 82px minmax(0, 1.1fr);
+  gap: 6px;
+}
+.shift-pe-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .handover-modal {
@@ -2135,6 +2232,17 @@ html.kb-open .modal-overlay {
 }
 .ai-key-link:hover {
   text-decoration: underline;
+}
+#fetchAiModelsBtn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ai-live-model-select {
+  width: 100%;
+  margin-top: 6px;
+}
+.ai-live-model-select[hidden] {
+  display: none;
 }
 .companion-conn-bar {
   display: flex;
@@ -3526,13 +3634,15 @@ html.kb-open .modal-overlay {
   }
   .quick-io-grid,
   .quick-io-grid.has-unit,
-  .tl-quick-edit .quick-io-grid {
+  .tl-quick-edit .quick-io-grid,
+  .shift-io-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .quick-io-grid > .field.align-end {
     grid-column: 1 / -1;
   }
   textarea { min-height: 180px; }
+  .shift-guided-form textarea { min-height: 72px; }
 }
 
 @media (max-width: 600px) {

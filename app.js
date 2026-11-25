@@ -4,8 +4,10 @@ import {
   isGeminiEndpoint,
   detectAiPreset,
   normalizeGeminiModel,
+  isSupportedGeminiModelId,
   callAiChat,
   testAiConnection,
+  listAiModels,
 } from './ai.js';
 import {
   THEME_PRESETS,
@@ -41,9 +43,11 @@ import {
 import {
   DEFAULT_MORNING_TEMPLATE,
   DEFAULT_TEMPLATE_CONFIG,
+  DEFAULT_NORMAL_PE_TEXT,
   MORNING_TEMPLATE_CONFIG,
   compileTemplateConfig,
   renderCustomShiftTemplate,
+  buildStructuredShiftUpdate,
   syncFrontmatter,
   parseChartTimeline,
   updateShiftBlockBody,
@@ -1301,6 +1305,7 @@ function getFilteredSortedRoundsPatients(parsedPatients = null) {
         p.ap,
         p.drips,
         p.labs,
+        ...(p.medications || []),
         ...(p.pending || []).map((t) => t.text),
       ]
         .join('\n')
@@ -1432,6 +1437,18 @@ function renderRounds() {
       if (pt.labs) metricPills.push(`<span class="metric-pill"><b>Labs:</b> ${esc(pt.labs)}${ageSuffix}</span>`);
       if (pt.drips) metricPills.push(`<span class="metric-pill drip"><b>Drips:</b> ${esc(pt.drips)}${ageSuffix}</span>`);
 
+      const medsAgeSuffix =
+        pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
+          ? ` <span class="metric-age">(${esc(pt.medicationsDate)})</span>`
+          : '';
+      const medsHtml =
+        pt.medications && pt.medications.length
+          ? `<details class="scut-meds-details">
+              <summary>${uiIcon('pill')} Medications (${pt.medications.length})${medsAgeSuffix}</summary>
+              <ul class="scut-meds-list">${pt.medications.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+            </details>`
+          : '';
+
       const plansHtml =
         pt.servicePlans && pt.servicePlans.length
           ? `<details class="scut-plans-details">
@@ -1443,6 +1460,7 @@ function renderRounds() {
       const compactParts = [];
       if (pt.vitals) compactParts.push(`VS: ${pt.vitals}`);
       if (pt.drips) compactParts.push(`Drips: ${pt.drips}`);
+      if (pt.medications && pt.medications.length) compactParts.push(`${pt.medications.length} meds`);
       compactParts.push(`${openPendingCount} open`);
 
       return `
@@ -1463,6 +1481,7 @@ function renderRounds() {
 
         <div class="scut-compact-line">${esc(compactParts.join(' · '))}</div>
         ${metricPills.length ? `<div class="scut-metrics">${metricPills.join('')}</div>` : ''}
+        ${medsHtml}
         ${plansHtml}
 
         <div class="scut-pending">
@@ -1603,23 +1622,17 @@ async function handleQuickAddPending(noteId, taskText) {
   toast('Added pending item');
 }
 
-/* ---------- shift carry-forward modal ---------- */
+/* ---------- shift carry-forward modal (template-driven guided entry) ---------- */
 let shiftingNoteId = null;
 let shiftingChoice = '6am';
 let shiftingSourceContent = '';
+let shiftModalMode = 'form';
+let shiftFormValues = {};
+let shiftRawEdited = false;
 
 function defaultShiftForHour(now = new Date()) {
   const refDate = typeof now === 'number' ? new Date(2026, 0, 1, now, 0, 0) : now;
   return getShiftForDate(refDate, shiftSchedule).label;
-}
-
-function formatSplitBp(sbpRaw, dbpRaw) {
-  const sbp = String(sbpRaw || '').trim();
-  const dbp = String(dbpRaw || '').trim();
-  if (sbp && dbp) return `${sbp}/${dbp}`;
-  if (sbp) return sbp;
-  if (dbp) return `/${dbp}`;
-  return '';
 }
 
 function formatIoWithUnit(rawVal, unit = 'ml') {
@@ -1628,43 +1641,13 @@ function formatIoWithUnit(rawVal, unit = 'ml') {
   return /[a-z]/i.test(val) ? val : `${val}${unit}`;
 }
 
-function updateShiftQuickFb() {
-  const unit = $('shiftQuickIoUnit')?.value || 'ml';
-  const inVal = formatIoWithUnit($('shiftQuickIn')?.value, unit);
-  const outVal = formatIoWithUnit($('shiftQuickOut')?.value, unit);
-  const prevEl = $('shiftQuickFbPreview');
-  if (prevEl) {
-    prevEl.value = inVal && outVal ? computeShiftFluidBalance(inVal, outVal) || 'check units' : '';
-  }
-}
-
-function hasPendingQuickShiftInputs() {
-  return [
-    'shiftQuickSbp',
-    'shiftQuickDbp',
-    'shiftQuickHr',
-    'shiftQuickRr',
-    'shiftQuickTemp',
-    'shiftQuickO2',
-    'shiftQuickIn',
-    'shiftQuickOut',
-  ].some((id) => Boolean($(id)?.value.trim()));
-}
-
-function clearQuickShiftInputs() {
-  [
-    'shiftQuickSbp',
-    'shiftQuickDbp',
-    'shiftQuickHr',
-    'shiftQuickRr',
-    'shiftQuickTemp',
-    'shiftQuickO2',
-    'shiftQuickIn',
-    'shiftQuickOut',
-    'shiftQuickFbPreview',
-  ].forEach((id) => {
-    if ($(id)) $(id).value = '';
-  });
+function updateGuidedIoFbPreview() {
+  const prevEl = $('sfIoFbPreview');
+  if (!prevEl) return;
+  const unit = shiftFormValues.ioUnit || 'ml';
+  const inVal = formatIoWithUnit(shiftFormValues.ioIn, unit);
+  const outVal = formatIoWithUnit(shiftFormValues.ioOut, unit);
+  prevEl.value = inVal && outVal ? computeShiftFluidBalance(inVal, outVal) || 'check units' : '';
 }
 
 function syncShiftMergeCheckbox() {
@@ -1679,77 +1662,334 @@ function syncShiftMergeCheckbox() {
   el.checked = hasShiftHeadingOnDate(shiftingSourceContent, shiftingChoice, dateStr);
 }
 
-function applyQuickVitalsIoToPreview({ silent = false } = {}) {
-  let text = $('shiftPreviewText').value;
-  const bp = formatSplitBp($('shiftQuickSbp')?.value, $('shiftQuickDbp')?.value);
-  const hr = $('shiftQuickHr').value.trim();
-  const rr = $('shiftQuickRr').value.trim();
-  const temp = $('shiftQuickTemp').value.trim();
-  const o2 = $('shiftQuickO2').value.trim();
+function getShiftingParsedNote() {
+  const note = notes.find((n) => n.id === shiftingNoteId) || {};
+  return parseChart(shiftingSourceContent, note);
+}
 
-  if (bp || hr || rr || temp || o2) {
-    const inlineVs = `Vitals: BP ${bp} | HR ${hr} | RR ${rr} | T ${temp} | O2sat ${o2}`.replace(/\s+\|/g, ' |');
-    if (/^(?:Vitals|VS):.*$/im.test(text)) {
-      text = text.replace(/^(?:Vitals|VS):.*$/im, inlineVs);
-    } else if (/^BP[ \t]*$/im.test(text)) {
-      if (bp) text = text.replace(/^BP[ \t]*$/im, `BP ${bp}`);
-      if (hr) text = text.replace(/^HR[ \t]*$/im, `HR ${hr}`);
-      if (rr) text = text.replace(/^RR[ \t]*$/im, `RR ${rr}`);
-      if (temp) text = text.replace(/^Temp[ \t]*$/im, `Temp ${temp}`);
-      if (o2) text = text.replace(/^O2[ \t]*$/im, `O2 ${o2}`);
-    } else {
-      text = text.replace(/^(###\s+[^\n]+\n)/, `$1${inlineVs}\n`);
+function populateShiftFormDefaults() {
+  const parsed = getShiftingParsedNote();
+  const cfData = extractCarryForwardData(shiftingSourceContent);
+  const carryPend = $('cfPending') ? $('cfPending').checked : true;
+  const carryPlans = $('cfServicePlans') ? $('cfServicePlans').checked : true;
+  const carryStanding = $('cfStanding') ? $('cfStanding').checked : true;
+
+  shiftFormValues = {
+    interimEvent: '',
+    labs: '',
+    subjective: '',
+    sbp: '',
+    dbp: '',
+    hr: '',
+    rr: '',
+    temp: '',
+    o2: '',
+    ioIn: '',
+    ioOut: '',
+    ioUnit: 'ml',
+    io24: '',
+    vent: carryStanding ? cfData.vent || '' : '',
+    pe: DEFAULT_NORMAL_PE_TEXT,
+    assessment: parsed.assessment || '',
+    drips: carryStanding ? cfData.drips || '' : '',
+    meds: carryStanding ? (parsed.medications || []).join('\n') : '',
+    servicePlans: carryPlans ? (cfData.servicePlans || []).join('\n') : '',
+    pending: carryPend ? (cfData.openPending || []).join('\n') : '',
+  };
+}
+
+function syncShiftPreviewFromForm({ forceRawUpdate = false } = {}) {
+  const ta = $('shiftPreviewText');
+  if (!ta) return;
+  if (shiftRawEdited && !forceRawUpdate) return;
+  const isoDate = $('shiftDateInput')?.value || getDefaultDutyIsoForShift(shiftingChoice);
+  const dateStr = isoToMmDdYyyy(isoDate) || getTodayDateStrings().mmddyyyy;
+  const effectiveShift = resolveModalShiftHeading(shiftingChoice, 'shiftInterimTimeInput');
+  const isInterim = shiftingChoice === 'interim';
+  const parsed = getShiftingParsedNote();
+
+  ta.value = buildStructuredShiftUpdate({
+    shift: effectiveShift,
+    config: templateConfig,
+    values: shiftFormValues,
+    parsed,
+    isInterim,
+    dateStr,
+  });
+  if (forceRawUpdate) shiftRawEdited = false;
+}
+
+function setShiftModalMode(mode = 'form') {
+  const next = mode === 'raw' ? 'raw' : 'form';
+  shiftModalMode = next;
+  const formEl = $('shiftGuidedForm');
+  const rawEl = $('shiftRawPane');
+  if (formEl) formEl.hidden = next !== 'form';
+  if (rawEl) rawEl.hidden = next !== 'raw';
+
+  const formBtn = $('shiftModeFormBtn');
+  const rawBtn = $('shiftModeRawBtn');
+  if (formBtn) {
+    formBtn.classList.toggle('active', next === 'form');
+    formBtn.setAttribute('aria-pressed', String(next === 'form'));
+    formBtn.setAttribute('aria-selected', String(next === 'form'));
+  }
+  if (rawBtn) {
+    rawBtn.classList.toggle('active', next === 'raw');
+    rawBtn.setAttribute('aria-pressed', String(next === 'raw'));
+    rawBtn.setAttribute('aria-selected', String(next === 'raw'));
+  }
+
+  if (next === 'raw' && !shiftRawEdited) {
+    syncShiftPreviewFromForm();
+  }
+}
+
+function renderVitalsSubHtml() {
+  return `
+    <div>
+      <span class="shift-sub-label">Vital Signs</span>
+      <div class="quick-vs-grid">
+        <div class="field">
+          <label for="sfSbp">BP (SBP/DBP)</label>
+          <div class="bp-split-inputs">
+            <input id="sfSbp" data-sf-key="sbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.sbp)}" placeholder="120" aria-label="Systolic BP">
+            <span class="bp-slash" aria-hidden="true">/</span>
+            <input id="sfDbp" data-sf-key="dbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.dbp)}" placeholder="80" aria-label="Diastolic BP">
+          </div>
+        </div>
+        <div class="field"><label for="sfHr">HR</label><input id="sfHr" data-sf-key="hr" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.hr)}" placeholder="78"></div>
+        <div class="field"><label for="sfRr">RR</label><input id="sfRr" data-sf-key="rr" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.rr)}" placeholder="18"></div>
+        <div class="field"><label for="sfTemp">Temp</label><input id="sfTemp" data-sf-key="temp" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.temp)}" placeholder="36.8C"></div>
+        <div class="field"><label for="sfO2">O2sat</label><input id="sfO2" data-sf-key="o2" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.o2)}" placeholder="98% RA"></div>
+      </div>
+    </div>`;
+}
+
+function renderShiftGuidedForm() {
+  const container = $('shiftGuidedForm');
+  if (!container) return;
+
+  const isInterim = shiftingChoice === 'interim';
+  const cards = [];
+
+  if (isInterim) {
+    cards.push(`
+      <div class="shift-field-card" data-shift-section="interimEvent">
+        <div class="shift-field-card-head"><span class="shift-field-card-title">Event / Interval Update</span></div>
+        <textarea id="sfInterimEvent" data-sf-key="interimEvent" rows="2" placeholder="Significant clinical event, stat call, or bedside assessment...">${esc(shiftFormValues.interimEvent)}</textarea>
+      </div>`);
+    cards.push(`<div class="shift-field-card" data-shift-section="vitals">${renderVitalsSubHtml()}</div>`);
+    cards.push(`
+      <div class="shift-field-card" data-shift-section="labs">
+        <div class="shift-field-card-head"><span class="shift-field-card-title">Labs / Diagnostics</span></div>
+        <textarea id="sfLabs" data-sf-key="labs" rows="2" placeholder="e.g. Na 136 | K 4.1 | Trop-I 0.82">${esc(shiftFormValues.labs)}</textarea>
+      </div>`);
+    cards.push(`
+      <div class="shift-field-card" data-shift-section="meds">
+        <div class="shift-field-card-head"><span class="shift-field-card-title">Drips &amp; Medications</span></div>
+        <div class="shift-field-subgrid">
+          <div class="field">
+            <label for="sfDrips">Active Drips / Infusions</label>
+            <input id="sfDrips" data-sf-key="drips" value="${esc(shiftFormValues.drips)}" placeholder="e.g. Norepinephrine @ 0.08 mcg/kg/min">
+          </div>
+          <div class="field">
+            <label for="sfMeds">Medications (one per line)</label>
+            <textarea id="sfMeds" data-sf-key="meds" rows="3" placeholder="New or updated medications, one per line...">${esc(shiftFormValues.meds)}</textarea>
+          </div>
+        </div>
+      </div>`);
+    cards.push(`
+      <div class="shift-field-card" data-shift-section="pending">
+        <div class="shift-field-card-head"><span class="shift-field-card-title">Pending / Action Items</span></div>
+        <textarea id="sfPending" data-sf-key="pending" rows="3" placeholder="Tasks or stat follow-ups, one per line...">${esc(shiftFormValues.pending)}</textarea>
+      </div>`);
+  } else {
+    const sections = Array.isArray(templateConfig?.sections)
+      ? templateConfig.sections
+      : DEFAULT_TEMPLATE_CONFIG.sections;
+
+    for (const sec of sections) {
+      if (!sec || !sec.enabled) continue;
+      if (sec.id === 'labs') {
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="labs">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Laboratory Updates</span></div>
+            <textarea id="sfLabs" data-sf-key="labs" rows="2" placeholder="e.g. Na 138 (136) | K 4.0 (3.8) | Cr 1.1 (1.2)">${esc(shiftFormValues.labs)}</textarea>
+          </div>`);
+      } else if (sec.id === 'subjective') {
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="subjective">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Subjective</span></div>
+            <textarea id="sfSubjective" data-sf-key="subjective" rows="2" placeholder="Patient complaints, overnight events, symptoms...">${esc(shiftFormValues.subjective)}</textarea>
+          </div>`);
+      } else if (sec.id === 'objective') {
+        const subs = Array.isArray(sec.subItems) ? sec.subItems : [];
+        const subParts = [];
+        for (const sub of subs) {
+          if (!sub || !sub.enabled) continue;
+          if (sub.id === 'vitals') {
+            subParts.push(renderVitalsSubHtml());
+          } else if (sub.id === 'io') {
+            const unit = shiftFormValues.ioUnit || 'ml';
+            subParts.push(`
+              <div>
+                <span class="shift-sub-label">Intake &amp; Output (I&amp;O)</span>
+                <div class="shift-io-grid">
+                  <div class="field"><label for="sfIoIn">Shift In</label><input id="sfIoIn" data-sf-key="ioIn" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.ioIn)}" placeholder="e.g. 800"></div>
+                  <div class="field"><label for="sfIoOut">Shift Out</label><input id="sfIoOut" data-sf-key="ioOut" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(shiftFormValues.ioOut)}" placeholder="e.g. 650"></div>
+                  <div class="field">
+                    <label for="sfIoUnit">Unit</label>
+                    <select id="sfIoUnit" data-sf-key="ioUnit" aria-label="Shift I&amp;O unit">
+                      <option value="ml"${unit === 'ml' ? ' selected' : ''}>mL</option>
+                      <option value="L"${unit === 'L' ? ' selected' : ''}>L</option>
+                    </select>
+                  </div>
+                  <div class="field"><label for="sfIoFbPreview">Calculated FB</label><input id="sfIoFbPreview" readonly placeholder="auto"></div>
+                </div>
+              </div>`);
+          } else if (sub.id === 'io24') {
+            subParts.push(`
+              <div class="field">
+                <label for="sfIo24">24h Net Fluid Balance</label>
+                <input id="sfIo24" data-sf-key="io24" value="${esc(shiftFormValues.io24)}" placeholder="e.g. +400ml">
+              </div>`);
+          } else if (sub.id === 'vent') {
+            subParts.push(`
+              <div class="field">
+                <label for="sfVent">Ventilator Settings</label>
+                <input id="sfVent" data-sf-key="vent" value="${esc(shiftFormValues.vent)}" placeholder="e.g. AC/VC Vt 420 | PEEP 8 | FiO2 40%">
+              </div>`);
+          } else if (sub.id === 'pe') {
+            subParts.push(`
+              <div class="field">
+                <div class="shift-field-card-head">
+                  <label for="sfPe">Physical Exam</label>
+                  <div class="shift-pe-actions">
+                    <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="normal">Normal PE</button>
+                    <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="clear">Clear</button>
+                  </div>
+                </div>
+                <textarea id="sfPe" data-sf-key="pe" rows="4" placeholder="Focused physical exam findings...">${esc(shiftFormValues.pe)}</textarea>
+              </div>`);
+          }
+        }
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="objective">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Objective</span></div>
+            <div class="shift-field-subgrid">${subParts.length ? subParts.join('') : '<div class="cf-meta">No Objective sub-fields enabled in Update Template.</div>'}</div>
+          </div>`);
+      } else if (sec.id === 'assessment') {
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="assessment">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Assessment / Working Impression</span></div>
+            <textarea id="sfAssessment" data-sf-key="assessment" rows="2" placeholder="Working diagnosis / problem list...">${esc(shiftFormValues.assessment)}</textarea>
+          </div>`);
+      } else if (sec.id === 'meds') {
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="meds">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Medications / Drips</span></div>
+            <div class="shift-field-subgrid">
+              <div class="field">
+                <label for="sfDrips">Active Drips / Infusions</label>
+                <input id="sfDrips" data-sf-key="drips" value="${esc(shiftFormValues.drips)}" placeholder="e.g. Norepinephrine @ 0.08 mcg/kg/min">
+              </div>
+              <div class="field">
+                <label for="sfMeds">Medication List (one per line)</label>
+                <textarea id="sfMeds" data-sf-key="meds" rows="3" placeholder="Active medications, one per line...">${esc(shiftFormValues.meds)}</textarea>
+              </div>
+            </div>
+          </div>`);
+      } else if (sec.id === 'plan') {
+        cards.push(`
+          <div class="shift-field-card" data-shift-section="plan">
+            <div class="shift-field-card-head"><span class="shift-field-card-title">Plan &amp; Pending Items</span></div>
+            <div class="shift-field-subgrid">
+              <div class="field">
+                <label for="sfServicePlans">Service Plans (one per line)</label>
+                <textarea id="sfServicePlans" data-sf-key="servicePlans" rows="3" placeholder="Standing treatment plans, one per line...">${esc(shiftFormValues.servicePlans)}</textarea>
+              </div>
+              <div class="field">
+                <label for="sfPending">Pending Items / Checklist (one per line)</label>
+                <textarea id="sfPending" data-sf-key="pending" rows="3" placeholder="Labs to follow up, consults, orders...">${esc(shiftFormValues.pending)}</textarea>
+              </div>
+            </div>
+          </div>`);
+      }
     }
   }
 
-  const ioUnit = $('shiftQuickIoUnit')?.value || 'ml';
-  const ioIn = formatIoWithUnit($('shiftQuickIn')?.value, ioUnit);
-  const ioOut = formatIoWithUnit($('shiftQuickOut')?.value, ioUnit);
-  const ioFb = ioIn && ioOut ? computeShiftFluidBalance(ioIn, ioOut) : '';
-  if (ioIn || ioOut) {
-    if (/^Shift\s+I&O:.*$/im.test(text)) {
-      const has24h = /\(\s*24h\s+Net:\s*[^)]*\)/i.exec(text);
-      const inlineIo = `Shift I&O: In: ${ioIn} | Out: ${ioOut} | FB: ${ioFb}${has24h ? ` ${has24h[0]}` : ''}`.trim();
-      text = text.replace(/^Shift\s+I&O:.*$/im, inlineIo);
-    } else if (/^I-\s*$/im.test(text)) {
-      if (ioIn) text = text.replace(/^I-[ \t]*$/im, `I- ${ioIn}`);
-      if (ioOut) text = text.replace(/^O-[ \t]*$/im, `O- ${ioOut}`);
-      if (ioFb) text = text.replace(/^Fb[ \t]*$/im, `Fb: ${ioFb}`);
-    } else {
-      text = `${text.trimEnd()}\nShift I&O: In: ${ioIn} | Out: ${ioOut} | FB: ${ioFb}\n`;
-    }
+  container.innerHTML = cards.join('');
+  updateGuidedIoFbPreview();
+
+  container.querySelectorAll('[data-sf-key]').forEach((el) => {
+    const key = el.dataset.sfKey;
+    const evtName = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(evtName, () => {
+      shiftFormValues[key] = el.value;
+      shiftPreviewDirty = true;
+      shiftRawEdited = false;
+      if (key === 'ioIn' || key === 'ioOut' || key === 'ioUnit') {
+        updateGuidedIoFbPreview();
+      }
+      syncShiftPreviewFromForm();
+    });
+  });
+
+  container.querySelectorAll('[data-sf-pe-preset]').forEach((btn) => {
+    btn.onclick = () => {
+      const nextPe = btn.dataset.sfPePreset === 'normal' ? DEFAULT_NORMAL_PE_TEXT : '';
+      shiftFormValues.pe = nextPe;
+      const peEl = $('sfPe');
+      if (peEl) peEl.value = nextPe;
+      shiftPreviewDirty = true;
+      shiftRawEdited = false;
+      syncShiftPreviewFromForm();
+    };
+  });
+}
+
+function applyCarryForwardToggleToShiftForm() {
+  const cfData = extractCarryForwardData(shiftingSourceContent);
+  const parsed = getShiftingParsedNote();
+  const carryPend = $('cfPending')?.checked !== false;
+  const carryPlans = $('cfServicePlans')?.checked !== false;
+  const carryStanding = $('cfStanding')?.checked !== false;
+
+  shiftFormValues.pending = carryPend ? (cfData.openPending || []).join('\n') : '';
+  shiftFormValues.servicePlans = carryPlans ? (cfData.servicePlans || []).join('\n') : '';
+  shiftFormValues.vent = carryStanding ? cfData.vent || '' : '';
+  shiftFormValues.drips = carryStanding ? cfData.drips || '' : '';
+  shiftFormValues.meds = carryStanding ? (parsed.medications || []).join('\n') : '';
+
+  const domMap = {
+    sfPending: shiftFormValues.pending,
+    sfServicePlans: shiftFormValues.servicePlans,
+    sfVent: shiftFormValues.vent,
+    sfDrips: shiftFormValues.drips,
+    sfMeds: shiftFormValues.meds,
+  };
+  for (const [id, val] of Object.entries(domMap)) {
+    if ($(id)) $(id).value = val;
   }
 
-  $('shiftPreviewText').value = text;
-  shiftPreviewDirty = true;
-  clearQuickShiftInputs();
-  if (!silent) toast('Applied vitals / I&O to shift preview');
+  if (shiftRawEdited) {
+    if (!confirm('You edited the raw markdown manually. Replace it with updated carry-forward options?')) {
+      return;
+    }
+    shiftRawEdited = false;
+  }
+  syncShiftPreviewFromForm({ forceRawUpdate: true });
 }
 
 function updateShiftPreview(forceRebuild = false) {
-  if (!forceRebuild && shiftPreviewDirty) {
-    if (!confirm('You edited the shift preview manually. Replace with fresh carry-forward block?')) {
+  if (!forceRebuild && shiftRawEdited) {
+    if (!confirm('You edited the raw markdown manually. Replace with fresh guided template?')) {
       return;
     }
   }
-  const isoDate = $('shiftDateInput')?.value || getDefaultDutyIsoForShift(shiftingChoice);
-  const effectiveShift = resolveModalShiftHeading(shiftingChoice, 'shiftInterimTimeInput');
-  const isInterim = shiftingChoice === 'interim';
-  const options = {
-    carryPending: $('cfPending').checked,
-    carryServicePlans: $('cfServicePlans').checked,
-    carryStanding: $('cfStanding').checked,
-    isMorningShift: !isInterim && shiftingChoice === shiftSchedule[0]?.label,
-    dateStr: isoToMmDdYyyy(isoDate) || getTodayDateStrings().mmddyyyy,
-    template: isInterim ? '' : getSavedUpdateTemplate(),
-    note: notes.find((n) => n.id === shiftingNoteId),
-  };
-  $('shiftPreviewText').value = buildCarryForwardShiftBlock(
-    shiftingSourceContent,
-    effectiveShift,
-    options
-  );
-  shiftPreviewDirty = false;
+  shiftRawEdited = false;
+  syncShiftPreviewFromForm({ forceRawUpdate: true });
 }
 
 function openShiftModal(noteId, triggerEl = null) {
@@ -1773,8 +2013,6 @@ function openShiftModal(noteId, triggerEl = null) {
   if ($('shiftDateInput')) {
     $('shiftDateInput').value = getDefaultDutyIsoForShift(shiftingChoice);
   }
-  clearQuickShiftInputs();
-  if ($('shiftQuickIoUnit')) $('shiftQuickIoUnit').value = 'ml';
   syncShiftMergeCheckbox();
 
   const cfData = extractCarryForwardData(shiftingSourceContent);
@@ -1794,18 +2032,26 @@ function openShiftModal(noteId, triggerEl = null) {
   $('cfStandingMeta').textContent = `(${standingParts || 'none'})`;
 
   shiftPreviewDirty = false;
-  updateShiftPreview(true);
-  openModalEl($('shiftModal'), triggerEl, $('shiftPreviewText'));
+  shiftRawEdited = false;
+  populateShiftFormDefaults();
+  renderShiftGuidedForm();
+  syncShiftPreviewFromForm({ forceRawUpdate: true });
+  setShiftModalMode('form');
+
+  const firstFocusTarget = $('sfSbp') || $('sfLabs') || $('sfSubjective') || $('sfAssessment') || $('shiftPreviewText');
+  openModalEl($('shiftModal'), triggerEl, firstFocusTarget);
 }
 
 function closeShiftModal(force = false) {
-  if (!force && (shiftPreviewDirty || hasPendingQuickShiftInputs())) {
-    if (!confirm('Discard unsubmitted shift block edits?')) return false;
+  if (!force && (shiftPreviewDirty || shiftRawEdited)) {
+    if (!confirm('Discard unsubmitted shift update?')) return false;
   }
   closeModalEl($('shiftModal'));
   shiftingNoteId = null;
   shiftingSourceContent = '';
   shiftPreviewDirty = false;
+  shiftRawEdited = false;
+  shiftFormValues = {};
   return true;
 }
 
@@ -1813,8 +2059,8 @@ async function commitShiftBlock(openInEditor = false) {
   const note = notes.find((n) => n.id === shiftingNoteId);
   if (!note) return;
 
-  if (hasPendingQuickShiftInputs()) {
-    applyQuickVitalsIoToPreview({ silent: true });
+  if (shiftModalMode === 'form' && !shiftRawEdited) {
+    syncShiftPreviewFromForm({ forceRawUpdate: true });
   }
   const blockText = $('shiftPreviewText').value;
   if (!blockText.trim()) return toast('Shift block cannot be empty');
@@ -3427,10 +3673,66 @@ let recordedAudioBlob = null;
 let recordTimerInterval = null;
 let recordStartTime = 0;
 let audioCtx = null;
+let audioSourceNode = null;
 let analyser = null;
 let animFrameId = null;
 let speechRecognizer = null;
 let speechTranscriptBuffer = '';
+let recordingSessionId = 0;
+let isStartingRecording = false;
+let pendingMicCleanupPromise = Promise.resolve();
+let lastMicReleaseAt = 0;
+
+const IS_ANDROID_BROWSER = /Android/i.test(navigator.userAgent || '');
+
+function pickSupportedRecorderMime() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  const mimeCandidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/mp4',
+  ];
+  return mimeCandidates.find((t) => MediaRecorder.isTypeSupported(t)) || '';
+}
+
+function stopMediaStreamTracks(stream) {
+  if (!stream) return;
+  try {
+    stream.getTracks().forEach((track) => {
+      try { track.onended = null; } catch {}
+      try { track.stop(); } catch {}
+    });
+  } catch {}
+}
+
+async function waitForMicReleaseGap(releaseTimestamp) {
+  if (!releaseTimestamp) return;
+  const elapsed = Date.now() - releaseTimestamp;
+  const remaining = 350 - elapsed;
+  if (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, remaining));
+  }
+}
+
+async function requestFreshMicStream() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+  } catch (err) {
+    if (err?.name === 'OverconstrainedError' || err?.name === 'ConstraintNotSatisfiedError') {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    throw err;
+  }
+}
 
 const WHISPER_MODEL_KEY = 'cm.whisperModel';
 const WHISPER_AUTO_KEY = 'cm.whisperAuto';
@@ -3701,6 +4003,7 @@ function startAudioVisualizer(stream) {
       audioCtx.resume().catch(() => {});
     }
     const source = audioCtx.createMediaStreamSource(stream);
+    audioSourceNode = source;
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 64;
     source.connect(analyser);
@@ -3747,12 +4050,37 @@ function stopAudioVisualizer() {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
   }
-  if (audioCtx) {
-    try {
-      audioCtx.close();
-    } catch {}
-    audioCtx = null;
+  if (audioSourceNode) {
+    try { audioSourceNode.disconnect(); } catch {}
+    audioSourceNode = null;
   }
+  if (analyser) {
+    try { analyser.disconnect(); } catch {}
+    analyser = null;
+  }
+  const ctxToClose = audioCtx;
+  audioCtx = null;
+  if (!ctxToClose) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(done, 250);
+    try {
+      Promise.resolve(ctxToClose.close())
+        .catch(() => {})
+        .finally(() => {
+          clearTimeout(timer);
+          done();
+        });
+    } catch {
+      clearTimeout(timer);
+      done();
+    }
+  });
 }
 
 function updateTimer() {
@@ -3790,13 +4118,38 @@ function startSpeechCapture() {
   } catch {}
 }
 
-function stopSpeechCapture() {
-  if (speechRecognizer) {
+function stopSpeechCapture(immediate = false) {
+  const rec = speechRecognizer;
+  speechRecognizer = null;
+  if (!rec) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { rec.onresult = null; } catch {}
+      try { rec.onerror = null; } catch {}
+      try { rec.onend = null; } catch {}
+      resolve();
+    };
+    const timer = setTimeout(finish, 250);
     try {
-      speechRecognizer.stop();
-    } catch {}
-    speechRecognizer = null;
-  }
+      rec.onresult = null;
+      rec.onerror = null;
+      rec.onend = () => {
+        clearTimeout(timer);
+        finish();
+      };
+      if (immediate && typeof rec.abort === 'function') {
+        rec.abort();
+      } else {
+        rec.stop();
+      }
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
 }
 
 function handleMicInterruption(reason = 'Recording stopped by OS/screen lock — audio saved for review') {
@@ -3807,143 +4160,245 @@ function handleMicInterruption(reason = 'Recording stopped by OS/screen lock —
 }
 
 async function startRecordingTelegram() {
+  if (isStartingRecording) return;
   if (typeof MediaRecorder === 'undefined') {
     return toast('Audio recording unsupported in this browser — use Upload Audio or keyboard mic');
   }
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (err) {
-    console.warn('getUserMedia failed:', err);
-    return toast('Microphone permission blocked. Please allow mic in URL bar.');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return toast('Microphone API unavailable — use Upload Audio or keyboard mic');
   }
 
-  audioChunks = [];
-  speechTranscriptBuffer = '';
-  voiceRecordingInterrupted = false;
-  voiceInterruptNote = '';
-  if ($('voiceAiStatus')) $('voiceAiStatus').hidden = true;
-
-  const mimeCandidates = [
-    'audio/mp4;codecs=mp4a.40.2',
-    'audio/mp4',
-    'audio/webm;codecs=opus',
-    'audio/webm',
-  ];
-  const supportedMime =
-    typeof MediaRecorder.isTypeSupported === 'function'
-      ? mimeCandidates.find((t) => MediaRecorder.isTypeSupported(t)) || ''
-      : '';
-  const options = supportedMime ? { mimeType: supportedMime } : {};
+  isStartingRecording = true;
+  const startBtn = $('startRecBtn');
+  if (startBtn) startBtn.disabled = true;
+  const sessionId = ++recordingSessionId;
+  let acquiredStream = null;
 
   try {
-    mediaRecorder = new MediaRecorder(mediaStream, options);
-  } catch (e) {
-    mediaRecorder = new MediaRecorder(mediaStream);
-  }
+    await pendingMicCleanupPromise;
+    if (sessionId !== recordingSessionId) return;
 
-  const st = whisperCtrl.getState();
-  const hasAnyLocalWhisper = st.loadedModels.length > 0 || cachedWhisperModels.size > 0;
-  const useWhisperPrimary =
-    st.loadedModels.includes(selectedWhisperModel) ||
-    (cachedWhisperModels.has(selectedWhisperModel) && whisperAutoTranscribe);
+    await waitForMicReleaseGap(lastMicReleaseAt);
+    if (sessionId !== recordingSessionId) return;
 
-  mediaStream.getAudioTracks().forEach((track) => {
-    track.onended = () => {
-      handleMicInterruption('Microphone stopped by screen lock or app switch — audio saved for review');
+    try {
+      acquiredStream = await requestFreshMicStream();
+    } catch (err) {
+      console.warn('getUserMedia failed:', err);
+      toast('Microphone permission blocked. Please allow mic in URL bar.');
+      return;
+    }
+
+    if (sessionId !== recordingSessionId) {
+      stopMediaStreamTracks(acquiredStream);
+      acquiredStream = null;
+      return;
+    }
+
+    mediaStream = acquiredStream;
+    audioChunks = [];
+    speechTranscriptBuffer = '';
+    voiceRecordingInterrupted = false;
+    voiceInterruptNote = '';
+    if ($('voiceAiStatus')) $('voiceAiStatus').hidden = true;
+
+    const supportedMime = pickSupportedRecorderMime();
+    const options = supportedMime ? { mimeType: supportedMime } : {};
+
+    let sessionRecorder;
+    try {
+      sessionRecorder = new MediaRecorder(acquiredStream, options);
+    } catch {
+      sessionRecorder = new MediaRecorder(acquiredStream);
+    }
+    mediaRecorder = sessionRecorder;
+    const sessionStream = acquiredStream;
+    const sessionChunks = [];
+    audioChunks = sessionChunks;
+
+    const st = whisperCtrl.getState();
+    const hasAnyLocalWhisper = st.loadedModels.length > 0 || cachedWhisperModels.size > 0;
+    const useWhisperPrimary =
+      st.loadedModels.includes(selectedWhisperModel) ||
+      (cachedWhisperModels.has(selectedWhisperModel) && whisperAutoTranscribe);
+
+    sessionStream.getAudioTracks().forEach((track) => {
+      track.onended = () => {
+        if (sessionId !== recordingSessionId) return;
+        handleMicInterruption('Microphone stopped by screen lock or app switch — audio saved for review');
+      };
+    });
+
+    sessionRecorder.ondataavailable = (e) => {
+      if (sessionId !== recordingSessionId) return;
+      if (e.data && e.data.size > 0) sessionChunks.push(e.data);
     };
-  });
 
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) audioChunks.push(e.data);
-  };
-
-  mediaRecorder.onerror = (ev) => {
-    clearInterval(recordTimerInterval);
-    stopAudioVisualizer();
-    stopSpeechCapture();
-    releaseScreenWakeLock();
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((track) => track.stop());
-      mediaStream = null;
-    }
-    $('recIdleState').hidden = false;
-    $('recActiveState').hidden = true;
-    const errTxt = ev?.error?.message || 'Microphone recorder error — try again or use keyboard mic';
-    const aiStatus = $('voiceAiStatus');
-    if (aiStatus) {
-      aiStatus.hidden = false;
-      aiStatus.className = 'voice-ai-status error';
-      aiStatus.textContent = errTxt;
-    }
-    toast(errTxt);
-  };
-
-  mediaRecorder.onstop = () => {
-    const blobType = mediaRecorder?.mimeType || audioChunks[0]?.type || '';
-    recordedAudioBlob = new Blob(audioChunks, blobType ? { type: blobType } : undefined);
-    setRecordedAudioSource(recordedAudioBlob);
-    $('voiceAudioContainer').hidden = false;
-    $('recActiveState').hidden = true;
-    $('recIdleState').hidden = true;
-    releaseScreenWakeLock();
-
-    if (voiceRecordingInterrupted && voiceInterruptNote) {
+    sessionRecorder.onerror = (ev) => {
+      if (sessionId !== recordingSessionId) return;
+      clearInterval(recordTimerInterval);
+      recordTimerInterval = null;
+      pendingMicCleanupPromise = Promise.allSettled([
+        stopAudioVisualizer(),
+        stopSpeechCapture(true),
+      ]).then(() => {
+        stopMediaStreamTracks(sessionStream);
+        lastMicReleaseAt = Date.now();
+      });
+      releaseScreenWakeLock();
+      if (mediaRecorder === sessionRecorder) mediaRecorder = null;
+      if (mediaStream === sessionStream) mediaStream = null;
+      $('recIdleState').hidden = false;
+      $('recActiveState').hidden = true;
+      const errTxt = ev?.error?.message || 'Microphone recorder error — try again or use keyboard mic';
       const aiStatus = $('voiceAiStatus');
       if (aiStatus) {
         aiStatus.hidden = false;
-        aiStatus.className = 'voice-ai-status warn';
-        aiStatus.textContent = voiceInterruptNote;
+        aiStatus.className = 'voice-ai-status error';
+        aiStatus.textContent = errTxt;
       }
-      voiceRecordingInterrupted = false;
-      voiceInterruptNote = '';
+      toast(errTxt);
+    };
+
+    sessionRecorder.onstop = () => {
+      stopMediaStreamTracks(sessionStream);
+      lastMicReleaseAt = Date.now();
+      if (mediaRecorder === sessionRecorder) mediaRecorder = null;
+      if (mediaStream === sessionStream) mediaStream = null;
+      if (sessionId !== recordingSessionId) return;
+
+      const blobType = sessionRecorder?.mimeType || sessionChunks[0]?.type || '';
+      recordedAudioBlob = new Blob(sessionChunks, blobType ? { type: blobType } : undefined);
+      setRecordedAudioSource(recordedAudioBlob);
+      $('voiceAudioContainer').hidden = false;
+      $('recActiveState').hidden = true;
+      $('recIdleState').hidden = true;
+      releaseScreenWakeLock();
+
+      if (!recordedAudioBlob || recordedAudioBlob.size === 0) {
+        const aiStatus = $('voiceAiStatus');
+        if (aiStatus) {
+          aiStatus.hidden = false;
+          aiStatus.className = 'voice-ai-status warn';
+          aiStatus.textContent = 'No audio captured — check mic permission and tap Re-record.';
+        }
+        toast('No audio captured — tap Re-record or check mic permission');
+        return;
+      }
+
+      if (voiceRecordingInterrupted && voiceInterruptNote) {
+        const aiStatus = $('voiceAiStatus');
+        if (aiStatus) {
+          aiStatus.hidden = false;
+          aiStatus.className = 'voice-ai-status warn';
+          aiStatus.textContent = voiceInterruptNote;
+        }
+        voiceRecordingInterrupted = false;
+        voiceInterruptNote = '';
+      }
+
+      const whisperReadyLocally =
+        whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
+        cachedWhisperModels.has(selectedWhisperModel);
+
+      if (whisperAutoTranscribe && recordedAudioBlob && whisperReadyLocally) {
+        runOfflineWhisperTranscription(recordedAudioBlob);
+      } else if (speechTranscriptBuffer.trim()) {
+        $('voiceTranscript').value = mergeTranscriptText($('voiceTranscript').value, speechTranscriptBuffer);
+        const badge = $('transcribeBadge');
+        if (badge) {
+          badge.textContent = '✓ Browser Speech';
+          badge.hidden = false;
+        }
+      }
+    };
+
+    try {
+      sessionRecorder.start(250);
+    } catch {
+      sessionRecorder.start();
+    }
+    recordStartTime = Date.now();
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = setInterval(updateTimer, 250);
+    await acquireScreenWakeLock();
+    if (sessionId !== recordingSessionId) {
+      cancelRecordingTelegram(false);
+      return;
     }
 
-    const whisperReadyLocally =
-      whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
-      cachedWhisperModels.has(selectedWhisperModel);
+    $('recIdleState').hidden = true;
+    $('recActiveState').hidden = false;
+    $('voiceAudioContainer').hidden = true;
+    $('recTimer').textContent = '0:00';
 
-    if (whisperAutoTranscribe && recordedAudioBlob && whisperReadyLocally) {
-      runOfflineWhisperTranscription(recordedAudioBlob);
-    } else if (speechTranscriptBuffer.trim()) {
-      $('voiceTranscript').value = mergeTranscriptText($('voiceTranscript').value, speechTranscriptBuffer);
-      const badge = $('transcribeBadge');
-      if (badge) {
-        badge.textContent = '✓ Browser Speech';
-        badge.hidden = false;
-      }
+    startAudioVisualizer(sessionStream);
+    // Skip concurrent Web SpeechRecognition on Android where it locks the mic HAL away from MediaRecorder,
+    // and never call cloud Web Speech when any local Whisper model is available.
+    if (!IS_ANDROID_BROWSER && !hasAnyLocalWhisper && !useWhisperPrimary) {
+      startSpeechCapture();
     }
-  };
-
-  mediaRecorder.start();
-  recordStartTime = Date.now();
-  recordTimerInterval = setInterval(updateTimer, 250);
-  await acquireScreenWakeLock();
-
-  $('recIdleState').hidden = true;
-  $('recActiveState').hidden = false;
-  $('voiceAudioContainer').hidden = true;
-  $('recTimer').textContent = '0:00';
-
-  startAudioVisualizer(mediaStream);
-  // Make speech engines strictly privacy-safe: never call cloud Web Speech when any local Whisper model is available
-  if (!hasAnyLocalWhisper && !useWhisperPrimary) {
-    startSpeechCapture();
+  } finally {
+    isStartingRecording = false;
+    if (startBtn) startBtn.disabled = false;
   }
 }
 
 function stopRecordingTelegram() {
   clearInterval(recordTimerInterval);
-  stopAudioVisualizer();
-  stopSpeechCapture();
-  releaseScreenWakeLock();
+  recordTimerInterval = null;
+  const activeRecorder = mediaRecorder;
+  const activeStream = mediaStream;
+  mediaRecorder = null;
+  mediaStream = null;
+  if (activeStream) {
+    try {
+      activeStream.getTracks().forEach((track) => {
+        try { track.onended = null; } catch {}
+      });
+    } catch {}
+  }
 
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
+  const cleanupTasks = [
+    stopAudioVisualizer(),
+    stopSpeechCapture(false),
+    releaseScreenWakeLock(),
+  ];
+
+  if (activeRecorder && activeRecorder.state !== 'inactive') {
+    const recorderStopPromise = new Promise((resolve) => {
+      const safetyTimer = setTimeout(() => {
+        stopMediaStreamTracks(activeStream);
+        lastMicReleaseAt = Date.now();
+        resolve();
+      }, 1500);
+      const prevOnStop = activeRecorder.onstop;
+      activeRecorder.onstop = (ev) => {
+        clearTimeout(safetyTimer);
+        try {
+          if (typeof prevOnStop === 'function') prevOnStop.call(activeRecorder, ev);
+        } finally {
+          stopMediaStreamTracks(activeStream);
+          lastMicReleaseAt = Date.now();
+          resolve();
+        }
+      };
+      try {
+        activeRecorder.stop();
+      } catch {
+        clearTimeout(safetyTimer);
+        stopMediaStreamTracks(activeStream);
+        lastMicReleaseAt = Date.now();
+        resolve();
+      }
+    });
+    cleanupTasks.push(recorderStopPromise);
+  } else if (activeStream) {
+    stopMediaStreamTracks(activeStream);
+    lastMicReleaseAt = Date.now();
   }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
-    mediaStream = null;
-  }
+
+  pendingMicCleanupPromise = Promise.allSettled([pendingMicCleanupPromise, ...cleanupTasks]).then(() => {});
 }
 
 function cancelRecordingTelegram(requireConfirm = false) {
@@ -3954,21 +4409,73 @@ function cancelRecordingTelegram(requireConfirm = false) {
     if (!confirm('Discard captured voice recording?')) return false;
   }
 
+  recordingSessionId++;
   clearInterval(recordTimerInterval);
-  stopAudioVisualizer();
-  stopSpeechCapture();
-  releaseScreenWakeLock();
+  recordTimerInterval = null;
   voiceRecordingInterrupted = false;
   voiceInterruptNote = '';
 
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    try { mediaRecorder.onstop = null; } catch {}
-    try { mediaRecorder.stop(); } catch {}
+  const oldRecorder = mediaRecorder;
+  const oldStream = mediaStream;
+  mediaRecorder = null;
+  mediaStream = null;
+
+  if (oldStream) {
+    try {
+      oldStream.getTracks().forEach((track) => {
+        try { track.onended = null; } catch {}
+      });
+    } catch {}
   }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
-    mediaStream = null;
-  }
+
+  const recorderTeardown = new Promise((resolve) => {
+    if (oldRecorder && oldRecorder.state !== 'inactive') {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        try { oldRecorder.ondataavailable = null; } catch {}
+        try { oldRecorder.onerror = null; } catch {}
+        try { oldRecorder.onstop = null; } catch {}
+        stopMediaStreamTracks(oldStream);
+        lastMicReleaseAt = Date.now();
+        resolve();
+      };
+      const timer = setTimeout(done, 300);
+      try {
+        oldRecorder.ondataavailable = null;
+        oldRecorder.onerror = null;
+        oldRecorder.onstop = () => {
+          clearTimeout(timer);
+          done();
+        };
+        oldRecorder.stop();
+      } catch {
+        clearTimeout(timer);
+        done();
+      }
+    } else {
+      if (oldRecorder) {
+        try { oldRecorder.ondataavailable = null; } catch {}
+        try { oldRecorder.onerror = null; } catch {}
+        try { oldRecorder.onstop = null; } catch {}
+      }
+      if (oldStream) {
+        stopMediaStreamTracks(oldStream);
+        lastMicReleaseAt = Date.now();
+      }
+      resolve();
+    }
+  });
+
+  pendingMicCleanupPromise = Promise.allSettled([
+    pendingMicCleanupPromise,
+    stopSpeechCapture(true),
+    recorderTeardown,
+    stopAudioVisualizer(),
+    releaseScreenWakeLock(),
+  ]).then(() => {});
+
   audioChunks = [];
   recordedAudioBlob = null;
   speechTranscriptBuffer = '';
@@ -5883,7 +6390,7 @@ document.querySelectorAll('[data-ai-preset]').forEach((btn) => {
     if (presetId === 'gemini') {
       $('endpoint').value = preset.endpoint;
       const curModel = normalizeGeminiModel($('model').value);
-      $('model').value = curModel && /^gemini-/i.test(curModel) ? curModel : preset.model;
+      $('model').value = isSupportedGeminiModelId(curModel) ? curModel : preset.model;
       toast('Google Gemini preset applied — paste your Gemini API key');
       $('apiKey')?.focus();
     } else if (presetId === 'openai') {
@@ -5905,6 +6412,10 @@ document.querySelectorAll('[data-ai-preset]').forEach((btn) => {
     safeSetItem('cm.endpoint', $('endpoint').value.trim());
     safeSetItem('cm.model', $('model').value.trim());
     if ($('aiConnResult')) $('aiConnResult').textContent = '';
+    if ($('aiLiveModelSelect')) {
+      $('aiLiveModelSelect').innerHTML = '';
+      $('aiLiveModelSelect').hidden = true;
+    }
     syncAiPresetUi();
     updateCompanionConnHint();
   };
@@ -5917,11 +6428,78 @@ document.querySelectorAll('[data-gemini-model]').forEach((btn) => {
     $('model').value = modelId;
     safeSetItem('cm.model', modelId);
     if ($('aiConnResult')) $('aiConnResult').textContent = '';
+    if ($('aiLiveModelSelect') && !$('aiLiveModelSelect').hidden) {
+      const hasOpt = Array.from($('aiLiveModelSelect').options).some((opt) => opt.value === modelId);
+      if (hasOpt) $('aiLiveModelSelect').value = modelId;
+    }
     syncAiPresetUi();
     updateCompanionConnHint();
     toast(`Model set to ${modelId}`);
   };
 });
+
+if ($('fetchAiModelsBtn')) {
+  $('fetchAiModelsBtn').onclick = async () => {
+    const resEl = $('aiConnResult');
+    if (navigator.onLine === false) {
+      if (resEl) resEl.textContent = 'Offline — connect to load models.';
+      return toast('Offline — connect to load models');
+    }
+    const endpoint = $('endpoint').value.trim().replace(/\/$/, '');
+    const key = $('apiKey').value.trim();
+    if (!endpoint || !key) {
+      if (resEl) resEl.textContent = 'Enter endpoint URL and paste API key first.';
+      return toast('Enter endpoint URL and paste API key first');
+    }
+    $('fetchAiModelsBtn').disabled = true;
+    if (resEl) resEl.textContent = 'Loading models…';
+    try {
+      const { models } = await listAiModels({ endpoint, apiKey: key });
+      const sel = $('aiLiveModelSelect');
+      if (sel) {
+        sel.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = models.length
+          ? `Select from ${models.length} available model(s)…`
+          : 'No text generation models returned';
+        sel.appendChild(placeholder);
+        for (const m of models) {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent =
+            m.displayName && m.displayName !== m.id ? `${m.displayName} (${m.id})` : m.id;
+          sel.appendChild(opt);
+        }
+        const curModel = normalizeGeminiModel($('model').value);
+        if (models.some((m) => m.id === curModel)) {
+          sel.value = curModel;
+        }
+        sel.hidden = models.length === 0;
+      }
+      if (resEl) resEl.textContent = `✓ Loaded ${models.length} model(s)`;
+      toast(`Loaded ${models.length} model(s)`);
+    } catch (err) {
+      if (resEl) resEl.textContent = `✕ Failed: ${err.message}`;
+      toast(`Failed to load models: ${err.message}`);
+    } finally {
+      $('fetchAiModelsBtn').disabled = false;
+    }
+  };
+}
+
+if ($('aiLiveModelSelect')) {
+  $('aiLiveModelSelect').onchange = () => {
+    const picked = $('aiLiveModelSelect').value.trim();
+    if (!picked) return;
+    $('model').value = picked;
+    safeSetItem('cm.model', picked);
+    if ($('aiConnResult')) $('aiConnResult').textContent = '';
+    syncAiPresetUi();
+    updateCompanionConnHint();
+    toast(`Model set to ${picked}`);
+  };
+}
 
 ['endpoint', 'model'].forEach((id) => {
   $(id).value = safeGetItem('cm.' + id, '');
@@ -6188,12 +6766,25 @@ if ($('voiceSoapConfirmBtn')) {
   };
 }
 
-// Shift Carry-Forward modal actions
+// Shift Carry-Forward modal actions (Guided Entry + Raw Markdown)
+if ($('shiftModeFormBtn')) $('shiftModeFormBtn').onclick = () => setShiftModalMode('form');
+if ($('shiftModeRawBtn')) $('shiftModeRawBtn').onclick = () => setShiftModalMode('raw');
+if ($('shiftEditTemplateLink')) {
+  $('shiftEditTemplateLink').onclick = async () => {
+    if (!closeShiftModal(false)) return;
+    await setMode('settings');
+    setSettingsTab('template');
+  };
+}
+
 if ($('shiftPills')) {
   $('shiftPills').addEventListener('click', (e) => {
     const pill = e.target.closest('.shift-pill[data-shift]');
     if (!pill) return;
+    const prevWasInterim = shiftingChoice === 'interim';
     shiftingChoice = pill.dataset.shift;
+    const nowInterim = shiftingChoice === 'interim';
+
     $('shiftPills').querySelectorAll('.shift-pill').forEach((p) => {
       const active = p === pill;
       p.classList.toggle('active', active);
@@ -6202,14 +6793,19 @@ if ($('shiftPills')) {
     syncModalInterimTimeUi(shiftingChoice, 'shiftInterimTimeWrap', 'shiftInterimTimeInput');
     syncShiftMergeCheckbox();
     const headingChoice = resolveModalShiftHeading(shiftingChoice, 'shiftInterimTimeInput');
-    if (shiftPreviewDirty) {
+
+    if (prevWasInterim !== nowInterim) {
+      renderShiftGuidedForm();
+    }
+
+    if (shiftRawEdited) {
       const ta = $('shiftPreviewText');
       if (/^###\s+[^\n]+/.test(ta.value)) {
         ta.value = ta.value.replace(/^###\s+[^\n]+/, `### ${headingChoice}`);
       }
-      toast(`Updated heading to ### ${headingChoice} (kept your edits)`);
+      toast(`Updated heading to ### ${headingChoice} (kept raw edits)`);
     } else {
-      updateShiftPreview(true);
+      syncShiftPreviewFromForm({ forceRawUpdate: true });
     }
   });
 }
@@ -6218,13 +6814,13 @@ if ($('shiftInterimTimeInput')) {
   $('shiftInterimTimeInput').addEventListener('input', () => {
     if (shiftingChoice !== 'interim') return;
     const headingChoice = resolveModalShiftHeading('interim', 'shiftInterimTimeInput');
-    if (shiftPreviewDirty) {
+    if (shiftRawEdited) {
       const ta = $('shiftPreviewText');
       if (/^###\s+[^\n]+/.test(ta.value)) {
         ta.value = ta.value.replace(/^###\s+[^\n]+/, `### ${headingChoice}`);
       }
     } else {
-      updateShiftPreview(true);
+      syncShiftPreviewFromForm({ forceRawUpdate: true });
     }
   });
 }
@@ -6232,6 +6828,7 @@ if ($('shiftInterimTimeInput')) {
 if ($('shiftPreviewText')) {
   $('shiftPreviewText').oninput = () => {
     shiftPreviewDirty = true;
+    shiftRawEdited = true;
   };
 }
 if ($('shiftDateYesterdayBtn')) {
@@ -6240,23 +6837,18 @@ if ($('shiftDateYesterdayBtn')) {
     y.setDate(y.getDate() - 1);
     $('shiftDateInput').value = getTodayDateStrings(y).yyyymmdd;
     syncShiftMergeCheckbox();
-    updateShiftPreview();
+    if (!shiftRawEdited) syncShiftPreviewFromForm({ forceRawUpdate: true });
   };
 }
 if ($('shiftDateInput')) {
   $('shiftDateInput').onchange = () => {
     syncShiftMergeCheckbox();
-    updateShiftPreview();
+    if (!shiftRawEdited) syncShiftPreviewFromForm({ forceRawUpdate: true });
   };
 }
 ['cfPending', 'cfServicePlans', 'cfStanding'].forEach((id) => {
-  $(id).onchange = () => updateShiftPreview();
+  $(id).onchange = applyCarryForwardToggleToShiftForm;
 });
-['shiftQuickIn', 'shiftQuickOut'].forEach((id) => {
-  if ($(id)) $(id).oninput = updateShiftQuickFb;
-});
-if ($('shiftQuickIoUnit')) $('shiftQuickIoUnit').onchange = updateShiftQuickFb;
-if ($('shiftApplyQuickBtn')) $('shiftApplyQuickBtn').onclick = () => applyQuickVitalsIoToPreview();
 
 $('shiftModalClose').onclick = () => closeShiftModal(false);
 $('shiftAppendStayBtn').onclick = () => commitShiftBlock(false);
@@ -6870,6 +7462,10 @@ let admitRecChunks = [];
 let admitRecBlob = null;
 let admitRecAudioUrl = null;
 let admitIsRecording = false;
+let admitRecSessionId = 0;
+let admitMicCleanupPromise = Promise.resolve();
+let admitLastMicReleaseAt = 0;
+let admitIsStartingRec = false;
 
 const SAMPLE_ADMITTING_NOTE = `Chief Complaint: Progressive shortness of breath and bipedal edema x 3 days
 History of Present Illness: 64-year-old female with progressive dyspnea on exertion, orthopnea (3 pillows), and PND over 3 days. Associated with productive cough with whitish sputum. No chest pain, fever, or hemoptysis.
@@ -7034,37 +7630,132 @@ function readAdmitForm() {
 
 function stopAdmitAudioRecording() {
   admitIsRecording = false;
-  if (admitRecRecorder && admitRecRecorder.state !== 'inactive') {
+  const activeRecorder = admitRecRecorder;
+  const activeStream = admitRecStream;
+  admitRecRecorder = null;
+  admitRecStream = null;
+  if (activeStream) {
     try {
-      admitRecRecorder.stop();
+      activeStream.getTracks().forEach((t) => {
+        try { t.onended = null; } catch {}
+      });
     } catch {}
   }
-  if (admitRecStream) {
-    admitRecStream.getTracks().forEach((t) => {
-      try {
-        t.stop();
-      } catch {}
-    });
-    admitRecStream = null;
+
+  if (activeRecorder && activeRecorder.state !== 'inactive') {
+    const prevCleanup = admitMicCleanupPromise;
+    admitMicCleanupPromise = Promise.allSettled([
+      prevCleanup,
+      new Promise((resolve) => {
+        const safetyTimer = setTimeout(() => {
+          stopMediaStreamTracks(activeStream);
+          admitLastMicReleaseAt = Date.now();
+          resolve();
+        }, 1500);
+        const prevOnStop = activeRecorder.onstop;
+        activeRecorder.onstop = async (ev) => {
+          clearTimeout(safetyTimer);
+          try {
+            if (typeof prevOnStop === 'function') await prevOnStop.call(activeRecorder, ev);
+          } finally {
+            stopMediaStreamTracks(activeStream);
+            admitLastMicReleaseAt = Date.now();
+            resolve();
+          }
+        };
+        try {
+          activeRecorder.stop();
+        } catch {
+          clearTimeout(safetyTimer);
+          stopMediaStreamTracks(activeStream);
+          admitLastMicReleaseAt = Date.now();
+          resolve();
+        }
+      }),
+    ]).then(() => {});
+  } else if (activeStream) {
+    stopMediaStreamTracks(activeStream);
+    admitLastMicReleaseAt = Date.now();
   }
+
   if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
   if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
 }
 
 function clearAdmitAudioRecording() {
-  stopAdmitAudioRecording();
+  admitRecSessionId++;
+  admitIsRecording = false;
+  const oldRecorder = admitRecRecorder;
+  const oldStream = admitRecStream;
+  admitRecRecorder = null;
+  admitRecStream = null;
+
+  if (oldStream) {
+    try {
+      oldStream.getTracks().forEach((t) => {
+        try { t.onended = null; } catch {}
+      });
+    } catch {}
+  }
+
+  const prevAdmitCleanup = admitMicCleanupPromise;
+  admitMicCleanupPromise = Promise.allSettled([
+    prevAdmitCleanup,
+    new Promise((resolve) => {
+      if (oldRecorder && oldRecorder.state !== 'inactive') {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          try { oldRecorder.ondataavailable = null; } catch {}
+          try { oldRecorder.onerror = null; } catch {}
+          try { oldRecorder.onstop = null; } catch {}
+          stopMediaStreamTracks(oldStream);
+          admitLastMicReleaseAt = Date.now();
+          resolve();
+        };
+        const timer = setTimeout(done, 300);
+        try {
+          oldRecorder.ondataavailable = null;
+          oldRecorder.onerror = null;
+          oldRecorder.onstop = () => {
+            clearTimeout(timer);
+            done();
+          };
+          oldRecorder.stop();
+        } catch {
+          clearTimeout(timer);
+          done();
+        }
+      } else {
+        if (oldRecorder) {
+          try { oldRecorder.ondataavailable = null; } catch {}
+          try { oldRecorder.onerror = null; } catch {}
+          try { oldRecorder.onstop = null; } catch {}
+        }
+        if (oldStream) {
+          stopMediaStreamTracks(oldStream);
+          admitLastMicReleaseAt = Date.now();
+        }
+        resolve();
+      }
+    }),
+  ]).then(() => {});
+
   admitRecChunks = [];
   admitRecBlob = null;
   if (admitRecAudioUrl) {
-    URL.revokeObjectURL(admitRecAudioUrl);
+    try { URL.revokeObjectURL(admitRecAudioUrl); } catch {}
     admitRecAudioUrl = null;
   }
   if ($('admitAudioPlayer')) {
     $('admitAudioPlayer').removeAttribute('src');
-    $('admitAudioPlayer').load();
+    try { $('admitAudioPlayer').load(); } catch {}
   }
   if ($('admitAudioWrap')) $('admitAudioWrap').hidden = true;
   if ($('admitWhisperTranscribeBtn')) $('admitWhisperTranscribeBtn').hidden = true;
+  if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
+  if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
 }
 
 function openAdmitModal({ mode = 'new', noteId = null, triggerEl = null } = {}) {
@@ -7333,22 +8024,96 @@ if ($('admitAiStructureDictateBtn')) {
 
 if ($('admitStartRecBtn')) {
   $('admitStartRecBtn').onclick = async () => {
+    if (admitIsStartingRec) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
       return toast('Microphone recording unavailable — tap the transcript box to use your phone keyboard mic');
     }
+    admitIsStartingRec = true;
+    $('admitStartRecBtn').disabled = true;
+    clearAdmitAudioRecording();
+    const sessionId = admitRecSessionId;
+    let acquiredStream = null;
+
     try {
-      clearAdmitAudioRecording();
-      admitRecStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      admitRecChunks = [];
-      admitRecRecorder = new MediaRecorder(admitRecStream);
-      admitRecRecorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) admitRecChunks.push(ev.data);
+      await admitMicCleanupPromise;
+      if (sessionId !== admitRecSessionId) return;
+
+      await waitForMicReleaseGap(admitLastMicReleaseAt);
+      if (sessionId !== admitRecSessionId) return;
+
+      acquiredStream = await requestFreshMicStream();
+      if (sessionId !== admitRecSessionId) {
+        stopMediaStreamTracks(acquiredStream);
+        acquiredStream = null;
+        return;
+      }
+
+      const sessionStream = acquiredStream;
+      const sessionChunks = [];
+      const supportedMime = pickSupportedRecorderMime();
+      const recOpts = supportedMime ? { mimeType: supportedMime } : {};
+      let sessionRecorder;
+      try {
+        sessionRecorder = new MediaRecorder(sessionStream, recOpts);
+      } catch {
+        sessionRecorder = new MediaRecorder(sessionStream);
+      }
+
+      admitRecStream = sessionStream;
+      admitRecChunks = sessionChunks;
+      admitRecRecorder = sessionRecorder;
+
+      sessionStream.getAudioTracks().forEach((track) => {
+        track.onended = () => {
+          if (sessionId !== admitRecSessionId) return;
+          stopAdmitAudioRecording();
+          updateAdmitWhisperStatus();
+        };
+      });
+
+      sessionRecorder.ondataavailable = (ev) => {
+        if (sessionId !== admitRecSessionId) return;
+        if (ev.data && ev.data.size > 0) sessionChunks.push(ev.data);
       };
-      admitRecRecorder.onstop = async () => {
-        if (!admitRecChunks.length) return;
-        admitRecBlob = new Blob(admitRecChunks, { type: admitRecRecorder?.mimeType || 'audio/webm' });
+      sessionRecorder.onerror = (ev) => {
+        if (sessionId !== admitRecSessionId) return;
+        stopMediaStreamTracks(sessionStream);
+        admitLastMicReleaseAt = Date.now();
+        if (admitRecRecorder === sessionRecorder) admitRecRecorder = null;
+        if (admitRecStream === sessionStream) admitRecStream = null;
+        admitIsRecording = false;
+        if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
+        if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
+        updateAdmitWhisperStatus();
+        toast(`Mic recorder error: ${ev?.error?.message || 'try again'}`);
+      };
+      sessionRecorder.onstop = async () => {
+        stopMediaStreamTracks(sessionStream);
+        admitLastMicReleaseAt = Date.now();
+        if (admitRecRecorder === sessionRecorder) admitRecRecorder = null;
+        if (admitRecStream === sessionStream) admitRecStream = null;
+        admitIsRecording = false;
+        if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
+        if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
+        if (sessionId !== admitRecSessionId) return;
+
+        if (!sessionChunks.length) {
+          toast('No audio captured — tap Record Audio to try again');
+          updateAdmitWhisperStatus();
+          return;
+        }
+        const blobType = sessionRecorder?.mimeType || sessionChunks[0]?.type || 'audio/webm';
+        admitRecBlob = new Blob(sessionChunks, { type: blobType });
+        if (!admitRecBlob.size) {
+          toast('No audio captured — tap Record Audio to try again');
+          updateAdmitWhisperStatus();
+          return;
+        }
         admitRecAudioUrl = URL.createObjectURL(admitRecBlob);
-        if ($('admitAudioPlayer')) $('admitAudioPlayer').src = admitRecAudioUrl;
+        if ($('admitAudioPlayer')) {
+          $('admitAudioPlayer').src = admitRecAudioUrl;
+          try { $('admitAudioPlayer').load(); } catch {}
+        }
         if ($('admitAudioWrap')) $('admitAudioWrap').hidden = false;
         if ($('admitWhisperTranscribeBtn')) $('admitWhisperTranscribeBtn').hidden = false;
         updateAdmitWhisperStatus();
@@ -7360,15 +8125,26 @@ if ($('admitStartRecBtn')) {
           $('admitWhisperTranscribeBtn')?.click();
         }
       };
-      admitRecRecorder.start();
+      try {
+        sessionRecorder.start(250);
+      } catch {
+        sessionRecorder.start();
+      }
       admitIsRecording = true;
       $('admitStartRecBtn').hidden = true;
       $('admitStopRecBtn').hidden = false;
       updateAdmitWhisperStatus();
     } catch (err) {
+      if (acquiredStream) {
+        stopMediaStreamTracks(acquiredStream);
+        admitLastMicReleaseAt = Date.now();
+      }
       stopAdmitAudioRecording();
       updateAdmitWhisperStatus();
       toast(`Mic access error: ${err.message} — you can still use your phone keyboard mic below`);
+    } finally {
+      admitIsStartingRec = false;
+      if ($('admitStartRecBtn')) $('admitStartRecBtn').disabled = false;
     }
   };
 }
