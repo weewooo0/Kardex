@@ -847,6 +847,7 @@
               <select id="whisperModelSelect">
                 <option value="Xenova/whisper-tiny.en">Whisper Tiny · English (~39 MB, Fast)</option>
                 <option value="Xenova/whisper-base.en">Whisper Base · English (~75 MB, Higher Accuracy)</option>
+                <option value="Xenova/whisper-small.en">Whisper Small · English (~150 MB, Best Clinical Accuracy)</option>
               </select>
             </div>
             <div class="profile-flags mb-10">
@@ -1017,12 +1018,12 @@
 
       <div id="voiceSoapReviewBox" class="voice-soap-review" hidden>
         <div class="transcript-hdr">
-          <label for="voiceSoapPreviewText" class="lbl ico-inline" style="margin: 0;"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Staged AI SOAP Preview (Verify numbers before filing)</label>
+          <label for="voiceSoapPreviewText" class="lbl ico-inline" style="margin: 0;"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Staged AI Note Preview (Verify numbers &amp; flags before filing)</label>
           <button type="button" id="voiceSoapRestoreBtn" class="btn sm-btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Restore Raw</button>
         </div>
         <textarea id="voiceSoapPreviewText" rows="6" spellcheck="false"></textarea>
         <div class="row tight mt-8">
-          <button type="button" id="voiceSoapConfirmBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> File SOAP to Chart</button>
+          <button type="button" id="voiceSoapConfirmBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> File Update to Chart</button>
         </div>
       </div>
 
@@ -1031,7 +1032,7 @@
 
     <div class="modal-foot">
       <button type="button" id="voiceAppendRawBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Append Raw Note</button>
-      <button type="button" id="voiceFormatSoapBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Preview SOAP (AI)</button>
+      <button type="button" id="voiceFormatSoapBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Format Note (AI)</button>
     </div>
   </div>
 </div>

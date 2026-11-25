@@ -33,12 +33,14 @@ import {
   calculatePumpRateFromTargetDose,
 } from './clinical.js';
 import {
-  WHISPER_MODELS,
+   WHISPER_MODELS,
   mergeTranscriptText,
+  applyClinicalAsrCorrections,
   getCachedWhisperModelIds,
   hasCachedWhisperRuntime,
   clearWhisperModelCache,
   createWhisperController,
+  createPcmAudioRecorder,
 } from './whisper.js';
 import {
   DEFAULT_MORNING_TEMPLATE,
@@ -85,6 +87,11 @@ import {
   parseAdmittingHistoryText,
   extractAdmittingHistory,
   upsertAdmittingHistory,
+  classifyDictationShiftByClock,
+  extractStandingDictationContext,
+  buildClinicalDictationAiPrompt,
+  parseAiDictationResponse,
+  verifyAppendedChart,
 } from './census.js';
 
 const DB = 'companion-md', STORE = 'notes';
@@ -3663,76 +3670,24 @@ function closeCalcModal() {
   closeModalEl($('calcModal'));
 }
 
-/* ---------- voice dictation / SOAP modal (Telegram-style on-device) ---------- */
+/* ---------- voice dictation / SOAP modal (Telegram-style on-device PCM WAV) ---------- */
 let dictatingNoteId = null;
 let dictatingShift = '6am';
-let mediaStream = null;
-let mediaRecorder = null;
-let audioChunks = [];
 let recordedAudioBlob = null;
+let recordedAudioPcm16k = null;
+let recordedAudioToken = 0;
+let lastTranscribedAudioKey = '';
+let speechTranscriptBuffer = '';
 let recordTimerInterval = null;
 let recordStartTime = 0;
-let audioCtx = null;
-let audioSourceNode = null;
-let analyser = null;
 let animFrameId = null;
-let speechRecognizer = null;
-let speechTranscriptBuffer = '';
-let recordingSessionId = 0;
 let isStartingRecording = false;
-let pendingMicCleanupPromise = Promise.resolve();
-let lastMicReleaseAt = 0;
 
-const IS_ANDROID_BROWSER = /Android/i.test(navigator.userAgent || '');
-
-function pickSupportedRecorderMime() {
-  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
-    return '';
-  }
-  const mimeCandidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/mp4;codecs=mp4a.40.2',
-    'audio/mp4',
-  ];
-  return mimeCandidates.find((t) => MediaRecorder.isTypeSupported(t)) || '';
-}
-
-function stopMediaStreamTracks(stream) {
-  if (!stream) return;
-  try {
-    stream.getTracks().forEach((track) => {
-      try { track.onended = null; } catch {}
-      try { track.stop(); } catch {}
-    });
-  } catch {}
-}
-
-async function waitForMicReleaseGap(releaseTimestamp) {
-  if (!releaseTimestamp) return;
-  const elapsed = Date.now() - releaseTimestamp;
-  const remaining = 350 - elapsed;
-  if (remaining > 0) {
-    await new Promise((resolve) => setTimeout(resolve, remaining));
-  }
-}
-
-async function requestFreshMicStream() {
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-  } catch (err) {
-    if (err?.name === 'OverconstrainedError' || err?.name === 'ConstraintNotSatisfiedError') {
-      return await navigator.mediaDevices.getUserMedia({ audio: true });
-    }
-    throw err;
-  }
-}
+const voicePcmRecorder = createPcmAudioRecorder({
+  onError: (err) => {
+    handleMicInterruption(err?.message || 'Microphone stopped by screen lock or app switch — audio saved for review');
+  },
+});
 
 const WHISPER_MODEL_KEY = 'cm.whisperModel';
 const WHISPER_AUTO_KEY = 'cm.whisperAuto';
@@ -3920,8 +3875,12 @@ async function preloadSelectedWhisperModel() {
   }
 }
 
-async function runOfflineWhisperTranscription(audioBlob) {
-  if (!audioBlob) return toast('Record or upload audio first');
+async function runOfflineWhisperTranscription(audioBlob, { pcm16k = null, audioToken = recordedAudioToken } = {}) {
+  if (!audioBlob && !pcm16k) return toast('Record or upload audio first');
+  const cacheKey = `${audioToken}::${selectedWhisperModel}`;
+  if (audioToken && lastTranscribedAudioKey === cacheKey) {
+    return toast(`Already transcribed this audio with ${selectedWhisperModel} — switch model or re-record`);
+  }
   const aiStatus = $('voiceAiStatus');
   await acquireScreenWakeLock();
   try {
@@ -3930,7 +3889,9 @@ async function runOfflineWhisperTranscription(audioBlob) {
       aiStatus.className = 'voice-ai-status';
     }
     updateWhisperProgressUi(5, 'Preparing local audio for Whisper...', true);
-    const res = await whisperCtrl.transcribeBlob(audioBlob, selectedWhisperModel);
+    const res = pcm16k
+      ? await whisperCtrl.transcribePcm(pcm16k, selectedWhisperModel)
+      : await whisperCtrl.transcribeBlob(audioBlob, selectedWhisperModel);
     await refreshWhisperCacheStatus();
     updateWhisperProgressUi(100, '', false);
 
@@ -3945,7 +3906,9 @@ async function runOfflineWhisperTranscription(audioBlob) {
       return;
     }
 
-    // If browser SpeechRecognition populated temporary draft text matching our buffer, replace it cleanly to avoid double transcription
+    lastTranscribedAudioKey = cacheKey;
+    const corrected = applyClinicalAsrCorrections(res.text);
+
     let curVal = $('voiceTranscript').value;
     const cleanBuf = speechTranscriptBuffer.trim();
     if (cleanBuf && curVal.trim() === cleanBuf) {
@@ -3953,7 +3916,7 @@ async function runOfflineWhisperTranscription(audioBlob) {
     }
     speechTranscriptBuffer = '';
 
-    $('voiceTranscript').value = mergeTranscriptText(curVal, res.text);
+    $('voiceTranscript').value = mergeTranscriptText(curVal, corrected);
     const badge = $('transcribeBadge');
     if (badge) {
       badge.textContent = `✓ Whisper Offline (${(res.elapsedMs / 1000).toFixed(1)}s)`;
@@ -3992,22 +3955,9 @@ async function releaseScreenWakeLock() {
   screenWakeLock = null;
 }
 
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-function startAudioVisualizer(stream) {
+function startAudioVisualizer(analyserNode) {
   try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    audioCtx = new AudioContextClass();
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
-    }
-    const source = audioCtx.createMediaStreamSource(stream);
-    audioSourceNode = source;
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 64;
-    source.connect(analyser);
-
+    if (!analyserNode) return;
     const canvas = $('audioCanvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -4020,13 +3970,13 @@ function startAudioVisualizer(stream) {
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const bufferLength = analyser.frequencyBinCount;
+    const bufferLength = analyserNode.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     const barColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#38bdf8';
 
     function draw() {
       animFrameId = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArray);
+      analyserNode.getByteFrequencyData(dataArray);
       ctx.clearRect(0, 0, cssW, cssH);
 
       const barWidth = (cssW / bufferLength) * 1.6;
@@ -4050,37 +4000,6 @@ function stopAudioVisualizer() {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
   }
-  if (audioSourceNode) {
-    try { audioSourceNode.disconnect(); } catch {}
-    audioSourceNode = null;
-  }
-  if (analyser) {
-    try { analyser.disconnect(); } catch {}
-    analyser = null;
-  }
-  const ctxToClose = audioCtx;
-  audioCtx = null;
-  if (!ctxToClose) return Promise.resolve();
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    const timer = setTimeout(done, 250);
-    try {
-      Promise.resolve(ctxToClose.close())
-        .catch(() => {})
-        .finally(() => {
-          clearTimeout(timer);
-          done();
-        });
-    } catch {
-      clearTimeout(timer);
-      done();
-    }
-  });
 }
 
 function updateTimer() {
@@ -4091,69 +4010,8 @@ function updateTimer() {
   if (timerEl) timerEl.textContent = `${mins}:${secs}`;
 }
 
-function startSpeechCapture() {
-  if (!SpeechRecognition) return;
-  speechTranscriptBuffer = '';
-  try {
-    speechRecognizer = new SpeechRecognition();
-    speechRecognizer.continuous = true;
-    speechRecognizer.interimResults = true;
-    speechRecognizer.lang = 'en-US';
-
-    speechRecognizer.onresult = (event) => {
-      let finalChunk = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) finalChunk += event.results[i][0].transcript + ' ';
-      }
-      if (finalChunk) {
-        speechTranscriptBuffer += finalChunk;
-        const cur = $('voiceTranscript').value.trim();
-        $('voiceTranscript').value = (cur ? cur + ' ' : '') + finalChunk.trim();
-      }
-    };
-    speechRecognizer.onerror = (e) => {
-      console.warn('Speech capture note:', e.error);
-    };
-    speechRecognizer.start();
-  } catch {}
-}
-
-function stopSpeechCapture(immediate = false) {
-  const rec = speechRecognizer;
-  speechRecognizer = null;
-  if (!rec) return Promise.resolve();
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      try { rec.onresult = null; } catch {}
-      try { rec.onerror = null; } catch {}
-      try { rec.onend = null; } catch {}
-      resolve();
-    };
-    const timer = setTimeout(finish, 250);
-    try {
-      rec.onresult = null;
-      rec.onerror = null;
-      rec.onend = () => {
-        clearTimeout(timer);
-        finish();
-      };
-      if (immediate && typeof rec.abort === 'function') {
-        rec.abort();
-      } else {
-        rec.stop();
-      }
-    } catch {
-      clearTimeout(timer);
-      finish();
-    }
-  });
-}
-
 function handleMicInterruption(reason = 'Recording stopped by OS/screen lock — audio saved for review') {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if (!voicePcmRecorder.isRecording()) return;
   voiceRecordingInterrupted = true;
   voiceInterruptNote = reason;
   stopRecordingTelegram();
@@ -4161,183 +4019,46 @@ function handleMicInterruption(reason = 'Recording stopped by OS/screen lock —
 
 async function startRecordingTelegram() {
   if (isStartingRecording) return;
-  if (typeof MediaRecorder === 'undefined') {
-    return toast('Audio recording unsupported in this browser — use Upload Audio or keyboard mic');
-  }
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return toast('Microphone API unavailable — use Upload Audio or keyboard mic');
-  }
+  // Synchronously unlock/resume persistent AudioContext BEFORE any await (gesture requirement)
+  voicePcmRecorder.unlockAudioContext();
 
   isStartingRecording = true;
   const startBtn = $('startRecBtn');
   if (startBtn) startBtn.disabled = true;
-  const sessionId = ++recordingSessionId;
-  let acquiredStream = null;
 
   try {
-    await pendingMicCleanupPromise;
-    if (sessionId !== recordingSessionId) return;
-
-    await waitForMicReleaseGap(lastMicReleaseAt);
-    if (sessionId !== recordingSessionId) return;
-
-    try {
-      acquiredStream = await requestFreshMicStream();
-    } catch (err) {
-      console.warn('getUserMedia failed:', err);
-      toast('Microphone permission blocked. Please allow mic in URL bar.');
-      return;
-    }
-
-    if (sessionId !== recordingSessionId) {
-      stopMediaStreamTracks(acquiredStream);
-      acquiredStream = null;
-      return;
-    }
-
-    mediaStream = acquiredStream;
-    audioChunks = [];
     speechTranscriptBuffer = '';
     voiceRecordingInterrupted = false;
     voiceInterruptNote = '';
+    recordedAudioBlob = null;
+    recordedAudioPcm16k = null;
     if ($('voiceAiStatus')) $('voiceAiStatus').hidden = true;
 
-    const supportedMime = pickSupportedRecorderMime();
-    const options = supportedMime ? { mimeType: supportedMime } : {};
+    const info = await voicePcmRecorder.start();
+    if (!info || !voicePcmRecorder.isRecording()) return;
 
-    let sessionRecorder;
-    try {
-      sessionRecorder = new MediaRecorder(acquiredStream, options);
-    } catch {
-      sessionRecorder = new MediaRecorder(acquiredStream);
-    }
-    mediaRecorder = sessionRecorder;
-    const sessionStream = acquiredStream;
-    const sessionChunks = [];
-    audioChunks = sessionChunks;
-
-    const st = whisperCtrl.getState();
-    const hasAnyLocalWhisper = st.loadedModels.length > 0 || cachedWhisperModels.size > 0;
-    const useWhisperPrimary =
-      st.loadedModels.includes(selectedWhisperModel) ||
-      (cachedWhisperModels.has(selectedWhisperModel) && whisperAutoTranscribe);
-
-    sessionStream.getAudioTracks().forEach((track) => {
-      track.onended = () => {
-        if (sessionId !== recordingSessionId) return;
-        handleMicInterruption('Microphone stopped by screen lock or app switch — audio saved for review');
-      };
-    });
-
-    sessionRecorder.ondataavailable = (e) => {
-      if (sessionId !== recordingSessionId) return;
-      if (e.data && e.data.size > 0) sessionChunks.push(e.data);
-    };
-
-    sessionRecorder.onerror = (ev) => {
-      if (sessionId !== recordingSessionId) return;
-      clearInterval(recordTimerInterval);
-      recordTimerInterval = null;
-      pendingMicCleanupPromise = Promise.allSettled([
-        stopAudioVisualizer(),
-        stopSpeechCapture(true),
-      ]).then(() => {
-        stopMediaStreamTracks(sessionStream);
-        lastMicReleaseAt = Date.now();
-      });
-      releaseScreenWakeLock();
-      if (mediaRecorder === sessionRecorder) mediaRecorder = null;
-      if (mediaStream === sessionStream) mediaStream = null;
-      $('recIdleState').hidden = false;
-      $('recActiveState').hidden = true;
-      const errTxt = ev?.error?.message || 'Microphone recorder error — try again or use keyboard mic';
-      const aiStatus = $('voiceAiStatus');
-      if (aiStatus) {
-        aiStatus.hidden = false;
-        aiStatus.className = 'voice-ai-status error';
-        aiStatus.textContent = errTxt;
-      }
-      toast(errTxt);
-    };
-
-    sessionRecorder.onstop = () => {
-      stopMediaStreamTracks(sessionStream);
-      lastMicReleaseAt = Date.now();
-      if (mediaRecorder === sessionRecorder) mediaRecorder = null;
-      if (mediaStream === sessionStream) mediaStream = null;
-      if (sessionId !== recordingSessionId) return;
-
-      const blobType = sessionRecorder?.mimeType || sessionChunks[0]?.type || '';
-      recordedAudioBlob = new Blob(sessionChunks, blobType ? { type: blobType } : undefined);
-      setRecordedAudioSource(recordedAudioBlob);
-      $('voiceAudioContainer').hidden = false;
-      $('recActiveState').hidden = true;
-      $('recIdleState').hidden = true;
-      releaseScreenWakeLock();
-
-      if (!recordedAudioBlob || recordedAudioBlob.size === 0) {
-        const aiStatus = $('voiceAiStatus');
-        if (aiStatus) {
-          aiStatus.hidden = false;
-          aiStatus.className = 'voice-ai-status warn';
-          aiStatus.textContent = 'No audio captured — check mic permission and tap Re-record.';
-        }
-        toast('No audio captured — tap Re-record or check mic permission');
-        return;
-      }
-
-      if (voiceRecordingInterrupted && voiceInterruptNote) {
-        const aiStatus = $('voiceAiStatus');
-        if (aiStatus) {
-          aiStatus.hidden = false;
-          aiStatus.className = 'voice-ai-status warn';
-          aiStatus.textContent = voiceInterruptNote;
-        }
-        voiceRecordingInterrupted = false;
-        voiceInterruptNote = '';
-      }
-
-      const whisperReadyLocally =
-        whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
-        cachedWhisperModels.has(selectedWhisperModel);
-
-      if (whisperAutoTranscribe && recordedAudioBlob && whisperReadyLocally) {
-        runOfflineWhisperTranscription(recordedAudioBlob);
-      } else if (speechTranscriptBuffer.trim()) {
-        $('voiceTranscript').value = mergeTranscriptText($('voiceTranscript').value, speechTranscriptBuffer);
-        const badge = $('transcribeBadge');
-        if (badge) {
-          badge.textContent = '✓ Browser Speech';
-          badge.hidden = false;
-        }
-      }
-    };
-
-    try {
-      sessionRecorder.start(250);
-    } catch {
-      sessionRecorder.start();
-    }
     recordStartTime = Date.now();
     clearInterval(recordTimerInterval);
     recordTimerInterval = setInterval(updateTimer, 250);
     await acquireScreenWakeLock();
-    if (sessionId !== recordingSessionId) {
-      cancelRecordingTelegram(false);
-      return;
-    }
+    if (!voicePcmRecorder.isRecording()) return;
 
     $('recIdleState').hidden = true;
     $('recActiveState').hidden = false;
     $('voiceAudioContainer').hidden = true;
     $('recTimer').textContent = '0:00';
 
-    startAudioVisualizer(sessionStream);
-    // Skip concurrent Web SpeechRecognition on Android where it locks the mic HAL away from MediaRecorder,
-    // and never call cloud Web Speech when any local Whisper model is available.
-    if (!IS_ANDROID_BROWSER && !hasAnyLocalWhisper && !useWhisperPrimary) {
-      startSpeechCapture();
-    }
+    startAudioVisualizer(info.analyser);
+  } catch (err) {
+    console.warn('PCM audio capture failed:', err);
+    voicePcmRecorder.cancel();
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+    stopAudioVisualizer();
+    releaseScreenWakeLock();
+    $('recIdleState').hidden = false;
+    $('recActiveState').hidden = true;
+    toast('Microphone permission blocked or unavailable — check mic permissions.');
   } finally {
     isStartingRecording = false;
     if (startBtn) startBtn.disabled = false;
@@ -4347,137 +4068,74 @@ async function startRecordingTelegram() {
 function stopRecordingTelegram() {
   clearInterval(recordTimerInterval);
   recordTimerInterval = null;
-  const activeRecorder = mediaRecorder;
-  const activeStream = mediaStream;
-  mediaRecorder = null;
-  mediaStream = null;
-  if (activeStream) {
-    try {
-      activeStream.getTracks().forEach((track) => {
-        try { track.onended = null; } catch {}
-      });
-    } catch {}
+  stopAudioVisualizer();
+  releaseScreenWakeLock();
+
+  if (!voicePcmRecorder.isRecording()) return;
+
+  const res = voicePcmRecorder.stop();
+  recordedAudioBlob = res.blob;
+  recordedAudioPcm16k = res.pcm16k;
+  recordedAudioToken++;
+  lastTranscribedAudioKey = '';
+  setRecordedAudioSource(recordedAudioBlob);
+  $('voiceAudioContainer').hidden = false;
+  $('recActiveState').hidden = true;
+  $('recIdleState').hidden = true;
+
+  if (!recordedAudioBlob || recordedAudioBlob.size <= 44 || res.isSilent) {
+    const aiStatus = $('voiceAiStatus');
+    if (aiStatus) {
+      aiStatus.hidden = false;
+      aiStatus.className = 'voice-ai-status warn';
+      aiStatus.textContent = 'No sound detected in recording — check mic access and tap Re-record.';
+    }
+    toast('No sound captured — check mic permission or tap Re-record');
+    return;
   }
 
-  const cleanupTasks = [
-    stopAudioVisualizer(),
-    stopSpeechCapture(false),
-    releaseScreenWakeLock(),
-  ];
+  if (voiceRecordingInterrupted && voiceInterruptNote) {
+    const aiStatus = $('voiceAiStatus');
+    if (aiStatus) {
+      aiStatus.hidden = false;
+      aiStatus.className = 'voice-ai-status warn';
+      aiStatus.textContent = voiceInterruptNote;
+    }
+    voiceRecordingInterrupted = false;
+    voiceInterruptNote = '';
+  }
 
-  if (activeRecorder && activeRecorder.state !== 'inactive') {
-    const recorderStopPromise = new Promise((resolve) => {
-      const safetyTimer = setTimeout(() => {
-        stopMediaStreamTracks(activeStream);
-        lastMicReleaseAt = Date.now();
-        resolve();
-      }, 1500);
-      const prevOnStop = activeRecorder.onstop;
-      activeRecorder.onstop = (ev) => {
-        clearTimeout(safetyTimer);
-        try {
-          if (typeof prevOnStop === 'function') prevOnStop.call(activeRecorder, ev);
-        } finally {
-          stopMediaStreamTracks(activeStream);
-          lastMicReleaseAt = Date.now();
-          resolve();
-        }
-      };
-      try {
-        activeRecorder.stop();
-      } catch {
-        clearTimeout(safetyTimer);
-        stopMediaStreamTracks(activeStream);
-        lastMicReleaseAt = Date.now();
-        resolve();
-      }
+  const whisperReadyLocally =
+    whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
+    cachedWhisperModels.has(selectedWhisperModel);
+
+  if (whisperAutoTranscribe && recordedAudioBlob && whisperReadyLocally) {
+    runOfflineWhisperTranscription(recordedAudioBlob, {
+      pcm16k: recordedAudioPcm16k,
+      audioToken: recordedAudioToken,
     });
-    cleanupTasks.push(recorderStopPromise);
-  } else if (activeStream) {
-    stopMediaStreamTracks(activeStream);
-    lastMicReleaseAt = Date.now();
   }
-
-  pendingMicCleanupPromise = Promise.allSettled([pendingMicCleanupPromise, ...cleanupTasks]).then(() => {});
 }
 
 function cancelRecordingTelegram(requireConfirm = false) {
   const elapsedMs = recordStartTime ? Date.now() - recordStartTime : 0;
-  const isRec = Boolean(mediaRecorder && mediaRecorder.state === 'recording');
-  const hasAudio = Boolean(recordedAudioBlob) || audioChunks.length > 0;
+  const isRec = voicePcmRecorder.isRecording();
+  const hasAudio = Boolean(recordedAudioBlob);
   if (requireConfirm && ((isRec && elapsedMs > 3000) || (!isRec && hasAudio))) {
     if (!confirm('Discard captured voice recording?')) return false;
   }
 
-  recordingSessionId++;
   clearInterval(recordTimerInterval);
   recordTimerInterval = null;
+  stopAudioVisualizer();
+  releaseScreenWakeLock();
   voiceRecordingInterrupted = false;
   voiceInterruptNote = '';
+  voicePcmRecorder.cancel();
 
-  const oldRecorder = mediaRecorder;
-  const oldStream = mediaStream;
-  mediaRecorder = null;
-  mediaStream = null;
-
-  if (oldStream) {
-    try {
-      oldStream.getTracks().forEach((track) => {
-        try { track.onended = null; } catch {}
-      });
-    } catch {}
-  }
-
-  const recorderTeardown = new Promise((resolve) => {
-    if (oldRecorder && oldRecorder.state !== 'inactive') {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        try { oldRecorder.ondataavailable = null; } catch {}
-        try { oldRecorder.onerror = null; } catch {}
-        try { oldRecorder.onstop = null; } catch {}
-        stopMediaStreamTracks(oldStream);
-        lastMicReleaseAt = Date.now();
-        resolve();
-      };
-      const timer = setTimeout(done, 300);
-      try {
-        oldRecorder.ondataavailable = null;
-        oldRecorder.onerror = null;
-        oldRecorder.onstop = () => {
-          clearTimeout(timer);
-          done();
-        };
-        oldRecorder.stop();
-      } catch {
-        clearTimeout(timer);
-        done();
-      }
-    } else {
-      if (oldRecorder) {
-        try { oldRecorder.ondataavailable = null; } catch {}
-        try { oldRecorder.onerror = null; } catch {}
-        try { oldRecorder.onstop = null; } catch {}
-      }
-      if (oldStream) {
-        stopMediaStreamTracks(oldStream);
-        lastMicReleaseAt = Date.now();
-      }
-      resolve();
-    }
-  });
-
-  pendingMicCleanupPromise = Promise.allSettled([
-    pendingMicCleanupPromise,
-    stopSpeechCapture(true),
-    recorderTeardown,
-    stopAudioVisualizer(),
-    releaseScreenWakeLock(),
-  ]).then(() => {});
-
-  audioChunks = [];
   recordedAudioBlob = null;
+  recordedAudioPcm16k = null;
+  lastTranscribedAudioKey = '';
   speechTranscriptBuffer = '';
   recordStartTime = 0;
   revokeRecordedAudioUrl();
@@ -4512,14 +4170,15 @@ function openDictateModal(noteId, triggerEl = null) {
   const name = note.name || meta.name || 'Unknown Patient';
 
   $('voiceModalSubtitle').textContent = `${room} · ${name}`;
-  dictatingShift = defaultShiftForHour();
+  const clockInfo = classifyDictationShiftByClock(new Date(), shiftSchedule);
+  dictatingShift = clockInfo.shiftLabel;
 
   renderShiftPillGroup('voiceShiftPills', dictatingShift);
   if ($('voiceInterimTimeInput')) $('voiceInterimTimeInput').value = nowHhMm();
   syncModalInterimTimeUi(dictatingShift, 'voiceInterimTimeWrap', 'voiceInterimTimeInput');
 
   if ($('voiceDateInput')) {
-    $('voiceDateInput').value = getDefaultDutyIsoForShift(dictatingShift);
+    $('voiceDateInput').value = clockInfo.yyyymmdd || getDefaultDutyIsoForShift(dictatingShift);
   }
 
   cancelRecordingTelegram();
@@ -4540,7 +4199,7 @@ function openDictateModal(noteId, triggerEl = null) {
 
 function closeDictateModal(force = false) {
   const hasUnsaved =
-    (mediaRecorder && mediaRecorder.state === 'recording') ||
+    voicePcmRecorder.isRecording() ||
     Boolean($('voiceTranscript')?.value.trim()) ||
     Boolean(recordedAudioBlob) ||
     Boolean(stagedVoiceSoap);
@@ -5857,7 +5516,7 @@ if ($('swReloadBtn')) {
   $('swReloadBtn').onclick = async () => {
     await flushPendingChartSave();
     persistRecoveryDraftSync();
-    const isRec = Boolean(mediaRecorder && mediaRecorder.state === 'recording');
+    const isRec = voicePcmRecorder.isRecording() || admitPcmRecorder.isRecording();
     const hasKey = Boolean($('apiKey')?.value.trim());
     const hasScratch = Boolean(!$('scratchEditorCard')?.hidden && isScratchEditorDirty());
     const reasons = [];
@@ -6591,17 +6250,24 @@ if ($('whisperCancelBtn')) {
     toast('Whisper engine unloaded from memory');
   };
 }
-$('whisperTranscribeBtn').onclick = () => runOfflineWhisperTranscription(recordedAudioBlob);
+$('whisperTranscribeBtn').onclick = () =>
+  runOfflineWhisperTranscription(recordedAudioBlob, {
+    pcm16k: recordedAudioPcm16k,
+    audioToken: recordedAudioToken,
+  });
 $('voiceUploadInput').onchange = async (e) => {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
   recordedAudioBlob = file;
+  recordedAudioPcm16k = null;
+  recordedAudioToken++;
+  lastTranscribedAudioKey = '';
   setRecordedAudioSource(file);
   $('recIdleState').hidden = true;
   $('recActiveState').hidden = true;
   $('voiceAudioContainer').hidden = false;
-  await runOfflineWhisperTranscription(file);
+  await runOfflineWhisperTranscription(file, { pcm16k: null, audioToken: recordedAudioToken });
 };
 
 // Settings: Offline Whisper WASM controls
@@ -6633,12 +6299,53 @@ if ($('whisperClearCacheBtn')) {
   };
 }
 
+function formatPatientLastFirst(rawName) {
+  const clean = String(rawName || '').trim();
+  if (!clean || clean === 'Unknown Patient') return '';
+  if (clean.includes(',')) {
+    const parts = clean.split(',');
+    const last = parts[0].trim().toUpperCase();
+    const rest = parts.slice(1).join(',').trim();
+    return rest ? `${last}, ${rest}` : last;
+  }
+  const tokens = clean.split(/\s+/).filter(Boolean);
+  if (tokens.length <= 1) return clean.toUpperCase();
+  const prev = tokens[tokens.length - 2].toLowerCase();
+  if (tokens.length >= 3 && /^(?:dela|del|de|los|las|san|sta|santa|santo)$/i.test(prev)) {
+    const last = `${tokens[tokens.length - 2]} ${tokens[tokens.length - 1]}`.toUpperCase();
+    const rest = tokens.slice(0, -2).join(' ');
+    return rest ? `${last}, ${rest}` : last;
+  }
+  const last = tokens[tokens.length - 1].toUpperCase();
+  const rest = tokens.slice(0, -1).join(' ');
+  return `${last}, ${rest}`;
+}
+
+function redactStandingContext(standing, profile) {
+  const safeStr = (val) => (val ? redact(String(val), profile).text : '');
+  return {
+    pe: safeStr(standing.pe),
+    feeding: safeStr(standing.feeding),
+    drips: safeStr(standing.drips),
+    vent: safeStr(standing.vent),
+    meds: (standing.meds || []).map(safeStr),
+    onHold: (standing.onHold || []).map(safeStr),
+    pending: (standing.pending || []).map(safeStr),
+    subspecialtyPlans: (standing.subspecialtyPlans || []).map((sp) => ({
+      heading: sp.heading,
+      items: (sp.items || []).map(safeStr),
+    })),
+  };
+}
+
 async function fileVoiceBlockToChart(rawMarkdownBody, statusVerb) {
   const note = notes.find((n) => n.id === dictatingNoteId);
   if (!note) return;
   const dateStr = isoToMmDdYyyy($('voiceDateInput')?.value) || getTodayDateStrings().mmddyyyy;
   const effectiveShift = resolveModalShiftHeading(dictatingShift, 'voiceInterimTimeInput');
-  note.content = appendShiftBlock(note.content, effectiveShift, dateStr, rawMarkdownBody);
+  note.content = appendShiftBlock(note.content, effectiveShift, dateStr, rawMarkdownBody, null, {
+    tightSeam: true,
+  });
   note.updated = Date.now();
   await put(note);
   await refresh();
@@ -6650,22 +6357,33 @@ async function fileVoiceBlockToChart(rawMarkdownBody, statusVerb) {
     updateSaveStatusPill('saved');
     if (editorViewMode === 'timeline') renderChartTimeline();
   }
-  toast(`${statusVerb} to ${note.room || 'chart'} (${dateStr})`);
+
+  const check = verifyAppendedChart(note.content);
+  if (!check.ok) {
+    toast(`${statusVerb} — check seam warning: ${check.warnings[0]}`);
+  } else {
+    toast(`${statusVerb} to ${note.room || 'chart'} (${dateStr})`);
+  }
   closeDictateModal(true);
 }
 
 $('voiceAppendRawBtn').onclick = async () => {
-  const transcript = $('voiceTranscript').value.trim();
+  const transcript = applyClinicalAsrCorrections($('voiceTranscript').value.trim());
   if (!transcript) return toast('Please speak or type some dictation first');
   await fileVoiceBlockToChart(`**Dictated Update:**\n${transcript}\n`, 'Appended raw dictation');
 };
 
 $('voiceFormatSoapBtn').onclick = async () => {
-  const transcript = $('voiceTranscript').value.trim();
-  if (!transcript) return toast('Please speak or type some dictation first');
+  const rawInput = $('voiceTranscript').value.trim();
+  if (!rawInput) return toast('Please speak or type some dictation first');
 
   const note = notes.find((n) => n.id === dictatingNoteId);
   if (!note) return;
+
+  const transcript = applyClinicalAsrCorrections(rawInput);
+  if (transcript !== rawInput) {
+    $('voiceTranscript').value = transcript;
+  }
 
   if (navigator.onLine === false) {
     return toast('Offline — use Append Raw Note (AI formatting requires internet)');
@@ -6680,8 +6398,27 @@ $('voiceFormatSoapBtn').onclick = async () => {
   }
 
   const ptProfile = profileForNote(note);
+  const parsedNote = parseChart(note.content, note);
   const redactedResult = redact(transcript, ptProfile);
-  const leaks = findLeaks(redactedResult.text, ptProfile);
+  const standingRaw = extractStandingDictationContext(note.content);
+  const standingRedacted = redactStandingContext(standingRaw, ptProfile);
+
+  const leaks = [
+    ...findLeaks(redactedResult.text, ptProfile),
+    ...findLeaks(
+      [
+        standingRedacted.pe,
+        standingRedacted.feeding,
+        standingRedacted.drips,
+        standingRedacted.vent,
+        ...standingRedacted.meds,
+        ...standingRedacted.onHold,
+        ...standingRedacted.pending,
+        ...standingRedacted.subspecialtyPlans.flatMap((sp) => sp.items),
+      ].join('\n'),
+      ptProfile
+    ),
+  ];
   const aiStatus = $('voiceAiStatus');
 
   if (leaks.length > 0) {
@@ -6698,26 +6435,43 @@ $('voiceFormatSoapBtn').onclick = async () => {
   if (aiStatus) {
     aiStatus.hidden = false;
     aiStatus.className = 'voice-ai-status';
-    aiStatus.innerHTML = `<span>⏳ De-identifying &amp; staging SOAP preview with ${esc(model)}...</span>`;
+    aiStatus.innerHTML = `<span>⏳ De-identifying &amp; formatting update with ${esc(model)}...</span>`;
   }
 
   stopRecordingTelegram();
 
-  const promptContent = `You are an expert clinical documentation assistant for a hospital resident.
-Convert this raw dictated bedside update into a clean, concise markdown SOAP note block.
+  const dateStr = isoToMmDdYyyy($('voiceDateInput')?.value) || getTodayDateStrings().mmddyyyy;
+  const effectiveShift = resolveModalShiftHeading(dictatingShift, 'voiceInterimTimeInput');
+  const interimTimeLabel = formatInterimShiftLabel(
+    new Date(),
+    $('voiceInterimTimeInput')?.value || ''
+  ).replace(/^Interim\s*\(|\)$/g, '');
+  const headerFirstLine = String(templateConfig?.header || 'Good day team')
+    .split('\n')[0]
+    .replace(/\{\{\s*ap\s*\}\}/gi, parsedNote.ap || 'team')
+    .trim();
+  const signature = String(templateConfig?.footer || '').trim();
+  const ageSex = [parsedNote.age, parsedNote.sex].filter(Boolean).join('/');
+  const headerName = templateConfig?.showName !== false ? '[PATIENT_NAME]' : '';
+  const idLine = [headerName, templateConfig?.showAgeSex !== false ? ageSex : '']
+    .filter(Boolean)
+    .join(' ');
+  const patientHeaderLines = [];
+  if (idLine) patientHeaderLines.push(idLine);
+  if (templateConfig?.showRoom !== false && parsedNote.room && parsedNote.room !== 'Unassigned') {
+    patientHeaderLines.push(parsedNote.room);
+  }
 
-DICTATED TEXT:
-"${redactedResult.text}"
-
-FORMATTING REQUIREMENTS:
-- If vital signs or vent settings are mentioned, format as a "Vitals: " or "Vent: " line.
-- Structure into:
-  **S:** (Subjective symptoms, overnight interval events, patient complaints)
-  **O:** (Objective physical exam findings, current labs)
-  **A:** (Assessment / working diagnosis)
-  **P:** (Plan - use '- [ ] ' checklist checkboxes for ordered labs, consults, and pending items)
-- Keep all clinical numbers, vital signs, and drug doses exact. Do not hallucinate values.
-- Return ONLY the clean markdown note content. No introductory pleasantries, no backticks enclosing the entire block.`;
+  const promptContent = buildClinicalDictationAiPrompt({
+    redactedTranscript: redactedResult.text,
+    standingContext: standingRedacted,
+    shift: effectiveShift,
+    dateStr,
+    interimTimeLabel,
+    greeting: headerFirstLine,
+    signature,
+    patientHeaderLines,
+  });
 
   try {
     const reply = await callAiChat({
@@ -6728,13 +6482,16 @@ FORMATTING REQUIREMENTS:
       temperature: 0.2,
     });
 
-    const cleanSoap = reply.replace(/^```(?:markdown)?\n/, '').replace(/\n```$/, '').trim();
-    stagedVoiceSoap = cleanSoap;
-    if ($('voiceSoapPreviewText')) $('voiceSoapPreviewText').value = cleanSoap;
+    const formattedLocalName = formatPatientLastFirst(parsedNote.name);
+    const { noteBlock, flags } = parseAiDictationResponse(reply, formattedLocalName);
+    stagedVoiceSoap = noteBlock;
+    if ($('voiceSoapPreviewText')) $('voiceSoapPreviewText').value = noteBlock;
     if ($('voiceSoapReviewBox')) $('voiceSoapReviewBox').hidden = false;
     if (aiStatus) {
-      aiStatus.className = 'voice-ai-status';
-      aiStatus.textContent = '✓ Staged AI SOAP preview below — verify numbers and tap File SOAP to Chart.';
+      aiStatus.className = flags ? 'voice-ai-status warn' : 'voice-ai-status';
+      aiStatus.textContent = flags
+        ? `Verify flags before filing: ${flags}`
+        : '✓ Staged clinical update below — verify numbers and tap File Update to Chart.';
     }
   } catch (err) {
     if (aiStatus) {
@@ -7456,16 +7213,19 @@ let admitModalMode = 'new';
 let admitEditingNoteId = null;
 let admitActiveTab = 'manual';
 let admitSelectedCategories = [];
-let admitRecRecorder = null;
-let admitRecStream = null;
-let admitRecChunks = [];
 let admitRecBlob = null;
+let admitRecPcm16k = null;
+let admitAudioToken = 0;
+let lastAdmitTranscribedKey = '';
 let admitRecAudioUrl = null;
-let admitIsRecording = false;
-let admitRecSessionId = 0;
-let admitMicCleanupPromise = Promise.resolve();
-let admitLastMicReleaseAt = 0;
 let admitIsStartingRec = false;
+
+const admitPcmRecorder = createPcmAudioRecorder({
+  onError: () => {
+    stopAdmitAudioRecording();
+    updateAdmitWhisperStatus();
+  },
+});
 
 const SAMPLE_ADMITTING_NOTE = `Chief Complaint: Progressive shortness of breath and bipedal edema x 3 days
 History of Present Illness: 64-year-old female with progressive dyspnea on exertion, orthopnea (3 pillows), and PND over 3 days. Associated with productive cough with whitish sputum. No chest pain, fever, or hemoptysis.
@@ -7510,7 +7270,7 @@ function updateAdmitWhisperStatus(customText = null) {
   const st = whisperCtrl.getState();
   const isLoaded = st.loadedModels.includes(selectedWhisperModel);
   const isCached = cachedWhisperModels.has(selectedWhisperModel);
-  if (admitIsRecording) {
+  if (admitPcmRecorder.isRecording()) {
     pill.textContent = 'RECORDING';
     pill.className = 'pill block';
   } else if (st.status === 'transcribing') {
@@ -7629,121 +7389,45 @@ function readAdmitForm() {
 }
 
 function stopAdmitAudioRecording() {
-  admitIsRecording = false;
-  const activeRecorder = admitRecRecorder;
-  const activeStream = admitRecStream;
-  admitRecRecorder = null;
-  admitRecStream = null;
-  if (activeStream) {
-    try {
-      activeStream.getTracks().forEach((t) => {
-        try { t.onended = null; } catch {}
-      });
-    } catch {}
-  }
-
-  if (activeRecorder && activeRecorder.state !== 'inactive') {
-    const prevCleanup = admitMicCleanupPromise;
-    admitMicCleanupPromise = Promise.allSettled([
-      prevCleanup,
-      new Promise((resolve) => {
-        const safetyTimer = setTimeout(() => {
-          stopMediaStreamTracks(activeStream);
-          admitLastMicReleaseAt = Date.now();
-          resolve();
-        }, 1500);
-        const prevOnStop = activeRecorder.onstop;
-        activeRecorder.onstop = async (ev) => {
-          clearTimeout(safetyTimer);
-          try {
-            if (typeof prevOnStop === 'function') await prevOnStop.call(activeRecorder, ev);
-          } finally {
-            stopMediaStreamTracks(activeStream);
-            admitLastMicReleaseAt = Date.now();
-            resolve();
-          }
-        };
-        try {
-          activeRecorder.stop();
-        } catch {
-          clearTimeout(safetyTimer);
-          stopMediaStreamTracks(activeStream);
-          admitLastMicReleaseAt = Date.now();
-          resolve();
-        }
-      }),
-    ]).then(() => {});
-  } else if (activeStream) {
-    stopMediaStreamTracks(activeStream);
-    admitLastMicReleaseAt = Date.now();
-  }
-
   if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
   if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
+  if (!admitPcmRecorder.isRecording()) return;
+
+  const res = admitPcmRecorder.stop();
+  if (!res.blob || res.blob.size <= 44 || res.isSilent) {
+    toast('No sound captured — check mic permission and tap Record Audio again');
+    updateAdmitWhisperStatus();
+    return;
+  }
+  admitRecBlob = res.blob;
+  admitRecPcm16k = res.pcm16k;
+  admitAudioToken++;
+  lastAdmitTranscribedKey = '';
+  if (admitRecAudioUrl) {
+    try { URL.revokeObjectURL(admitRecAudioUrl); } catch {}
+  }
+  admitRecAudioUrl = URL.createObjectURL(admitRecBlob);
+  if ($('admitAudioPlayer')) {
+    $('admitAudioPlayer').src = admitRecAudioUrl;
+    try { $('admitAudioPlayer').load(); } catch {}
+  }
+  if ($('admitAudioWrap')) $('admitAudioWrap').hidden = false;
+  if ($('admitWhisperTranscribeBtn')) $('admitWhisperTranscribeBtn').hidden = false;
+  updateAdmitWhisperStatus();
+
+  const isCachedOrLoaded =
+    whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
+    (cachedWhisperModels.has(selectedWhisperModel) && cachedWhisperRuntimeReady);
+  if (whisperAutoTranscribe && isCachedOrLoaded) {
+    $('admitWhisperTranscribeBtn')?.click();
+  }
 }
 
 function clearAdmitAudioRecording() {
-  admitRecSessionId++;
-  admitIsRecording = false;
-  const oldRecorder = admitRecRecorder;
-  const oldStream = admitRecStream;
-  admitRecRecorder = null;
-  admitRecStream = null;
-
-  if (oldStream) {
-    try {
-      oldStream.getTracks().forEach((t) => {
-        try { t.onended = null; } catch {}
-      });
-    } catch {}
-  }
-
-  const prevAdmitCleanup = admitMicCleanupPromise;
-  admitMicCleanupPromise = Promise.allSettled([
-    prevAdmitCleanup,
-    new Promise((resolve) => {
-      if (oldRecorder && oldRecorder.state !== 'inactive') {
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          try { oldRecorder.ondataavailable = null; } catch {}
-          try { oldRecorder.onerror = null; } catch {}
-          try { oldRecorder.onstop = null; } catch {}
-          stopMediaStreamTracks(oldStream);
-          admitLastMicReleaseAt = Date.now();
-          resolve();
-        };
-        const timer = setTimeout(done, 300);
-        try {
-          oldRecorder.ondataavailable = null;
-          oldRecorder.onerror = null;
-          oldRecorder.onstop = () => {
-            clearTimeout(timer);
-            done();
-          };
-          oldRecorder.stop();
-        } catch {
-          clearTimeout(timer);
-          done();
-        }
-      } else {
-        if (oldRecorder) {
-          try { oldRecorder.ondataavailable = null; } catch {}
-          try { oldRecorder.onerror = null; } catch {}
-          try { oldRecorder.onstop = null; } catch {}
-        }
-        if (oldStream) {
-          stopMediaStreamTracks(oldStream);
-          admitLastMicReleaseAt = Date.now();
-        }
-        resolve();
-      }
-    }),
-  ]).then(() => {});
-
-  admitRecChunks = [];
+  admitPcmRecorder.cancel();
   admitRecBlob = null;
+  admitRecPcm16k = null;
+  lastAdmitTranscribedKey = '';
   if (admitRecAudioUrl) {
     try { URL.revokeObjectURL(admitRecAudioUrl); } catch {}
     admitRecAudioUrl = null;
@@ -8025,121 +7709,21 @@ if ($('admitAiStructureDictateBtn')) {
 if ($('admitStartRecBtn')) {
   $('admitStartRecBtn').onclick = async () => {
     if (admitIsStartingRec) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
-      return toast('Microphone recording unavailable — tap the transcript box to use your phone keyboard mic');
-    }
+    admitPcmRecorder.unlockAudioContext();
     admitIsStartingRec = true;
     $('admitStartRecBtn').disabled = true;
     clearAdmitAudioRecording();
-    const sessionId = admitRecSessionId;
-    let acquiredStream = null;
 
     try {
-      await admitMicCleanupPromise;
-      if (sessionId !== admitRecSessionId) return;
-
-      await waitForMicReleaseGap(admitLastMicReleaseAt);
-      if (sessionId !== admitRecSessionId) return;
-
-      acquiredStream = await requestFreshMicStream();
-      if (sessionId !== admitRecSessionId) {
-        stopMediaStreamTracks(acquiredStream);
-        acquiredStream = null;
-        return;
-      }
-
-      const sessionStream = acquiredStream;
-      const sessionChunks = [];
-      const supportedMime = pickSupportedRecorderMime();
-      const recOpts = supportedMime ? { mimeType: supportedMime } : {};
-      let sessionRecorder;
-      try {
-        sessionRecorder = new MediaRecorder(sessionStream, recOpts);
-      } catch {
-        sessionRecorder = new MediaRecorder(sessionStream);
-      }
-
-      admitRecStream = sessionStream;
-      admitRecChunks = sessionChunks;
-      admitRecRecorder = sessionRecorder;
-
-      sessionStream.getAudioTracks().forEach((track) => {
-        track.onended = () => {
-          if (sessionId !== admitRecSessionId) return;
-          stopAdmitAudioRecording();
-          updateAdmitWhisperStatus();
-        };
-      });
-
-      sessionRecorder.ondataavailable = (ev) => {
-        if (sessionId !== admitRecSessionId) return;
-        if (ev.data && ev.data.size > 0) sessionChunks.push(ev.data);
-      };
-      sessionRecorder.onerror = (ev) => {
-        if (sessionId !== admitRecSessionId) return;
-        stopMediaStreamTracks(sessionStream);
-        admitLastMicReleaseAt = Date.now();
-        if (admitRecRecorder === sessionRecorder) admitRecRecorder = null;
-        if (admitRecStream === sessionStream) admitRecStream = null;
-        admitIsRecording = false;
-        if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
-        if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
-        updateAdmitWhisperStatus();
-        toast(`Mic recorder error: ${ev?.error?.message || 'try again'}`);
-      };
-      sessionRecorder.onstop = async () => {
-        stopMediaStreamTracks(sessionStream);
-        admitLastMicReleaseAt = Date.now();
-        if (admitRecRecorder === sessionRecorder) admitRecRecorder = null;
-        if (admitRecStream === sessionStream) admitRecStream = null;
-        admitIsRecording = false;
-        if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
-        if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
-        if (sessionId !== admitRecSessionId) return;
-
-        if (!sessionChunks.length) {
-          toast('No audio captured — tap Record Audio to try again');
-          updateAdmitWhisperStatus();
-          return;
-        }
-        const blobType = sessionRecorder?.mimeType || sessionChunks[0]?.type || 'audio/webm';
-        admitRecBlob = new Blob(sessionChunks, { type: blobType });
-        if (!admitRecBlob.size) {
-          toast('No audio captured — tap Record Audio to try again');
-          updateAdmitWhisperStatus();
-          return;
-        }
-        admitRecAudioUrl = URL.createObjectURL(admitRecBlob);
-        if ($('admitAudioPlayer')) {
-          $('admitAudioPlayer').src = admitRecAudioUrl;
-          try { $('admitAudioPlayer').load(); } catch {}
-        }
-        if ($('admitAudioWrap')) $('admitAudioWrap').hidden = false;
-        if ($('admitWhisperTranscribeBtn')) $('admitWhisperTranscribeBtn').hidden = false;
-        updateAdmitWhisperStatus();
-
-        const isCachedOrLoaded =
-          whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
-          (cachedWhisperModels.has(selectedWhisperModel) && cachedWhisperRuntimeReady);
-        if (whisperAutoTranscribe && isCachedOrLoaded) {
-          $('admitWhisperTranscribeBtn')?.click();
-        }
-      };
-      try {
-        sessionRecorder.start(250);
-      } catch {
-        sessionRecorder.start();
-      }
-      admitIsRecording = true;
+      const info = await admitPcmRecorder.start();
+      if (!info || !admitPcmRecorder.isRecording()) return;
       $('admitStartRecBtn').hidden = true;
       $('admitStopRecBtn').hidden = false;
       updateAdmitWhisperStatus();
     } catch (err) {
-      if (acquiredStream) {
-        stopMediaStreamTracks(acquiredStream);
-        admitLastMicReleaseAt = Date.now();
-      }
-      stopAdmitAudioRecording();
+      admitPcmRecorder.cancel();
+      if ($('admitStartRecBtn')) $('admitStartRecBtn').hidden = false;
+      if ($('admitStopRecBtn')) $('admitStopRecBtn').hidden = true;
       updateAdmitWhisperStatus();
       toast(`Mic access error: ${err.message} — you can still use your phone keyboard mic below`);
     } finally {
@@ -8156,7 +7740,11 @@ if ($('admitStopRecBtn')) {
 }
 if ($('admitWhisperTranscribeBtn')) {
   $('admitWhisperTranscribeBtn').onclick = async () => {
-    if (!admitRecBlob) return toast('Record audio first');
+    if (!admitRecBlob && !admitRecPcm16k) return toast('Record audio first');
+    const cacheKey = `${admitAudioToken}::${selectedWhisperModel}`;
+    if (admitAudioToken && lastAdmitTranscribedKey === cacheKey) {
+      return toast(`Already transcribed with ${selectedWhisperModel} — switch model or re-record`);
+    }
     const isCachedOrLoaded =
       whisperCtrl.getState().loadedModels.includes(selectedWhisperModel) ||
       (cachedWhisperModels.has(selectedWhisperModel) && cachedWhisperRuntimeReady);
@@ -8166,9 +7754,13 @@ if ($('admitWhisperTranscribeBtn')) {
     try {
       updateAdmitWhisperStatus('TRANSCRIBING...');
       $('admitWhisperTranscribeBtn').disabled = true;
-      const res = await whisperCtrl.transcribeBlob(admitRecBlob, selectedWhisperModel);
+      const res = admitRecPcm16k
+        ? await whisperCtrl.transcribePcm(admitRecPcm16k, selectedWhisperModel)
+        : await whisperCtrl.transcribeBlob(admitRecBlob, selectedWhisperModel);
       if (res?.text && $('admitDictateTranscript')) {
-        $('admitDictateTranscript').value = mergeTranscriptText($('admitDictateTranscript').value, res.text);
+        lastAdmitTranscribedKey = cacheKey;
+        const corrected = applyClinicalAsrCorrections(res.text);
+        $('admitDictateTranscript').value = mergeTranscriptText($('admitDictateTranscript').value, corrected);
         toast(`Transcribed offline in ${(res.elapsedMs / 1000).toFixed(1)}s`);
       } else {
         toast('No speech detected in audio');
@@ -8281,7 +7873,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('beforeunload', (e) => {
-  const isRec = mediaRecorder && mediaRecorder.state === 'recording';
+  const isRec = voicePcmRecorder.isRecording() || admitPcmRecorder.isRecording();
   if (dirtyChart || isRec || templateDirtyFlag) {
     e.preventDefault();
     e.returnValue = '';
@@ -8313,8 +7905,11 @@ window.addEventListener('offline', updateNetworkStatusUi);
 function handleBackgroundLifecycleSave() {
   persistRecoveryDraftSync();
   flushPendingChartSave();
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (voicePcmRecorder.isRecording()) {
     handleMicInterruption('Recording stopped by screen lock / app switch — audio saved for review');
+  }
+  if (admitPcmRecorder.isRecording()) {
+    stopAdmitAudioRecording();
   }
   releaseScreenWakeLock();
 }

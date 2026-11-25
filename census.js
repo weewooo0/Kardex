@@ -333,6 +333,48 @@ export function getDutyDateStrings(now = new Date(), schedule = null) {
   };
 }
 
+export function classifyDictationShiftByClock(now = new Date(), schedule = DEFAULT_SHIFT_SCHEDULE) {
+  const norm = normalizeShiftSchedule(schedule);
+  const isDefault8h =
+    norm.length === 3 &&
+    norm[0].time === '06:00' &&
+    norm[1].time === '14:00' &&
+    norm[2].time === '22:00';
+
+  if (!isDefault8h) {
+    return getDutyDateStrings(now, norm);
+  }
+
+  const h = now.getHours();
+  if (h >= 4 && h < 12) {
+    return {
+      ...getTodayDateStrings(now),
+      isPostMidnightCarryover: false,
+      shiftLabel: norm[0].label,
+    };
+  }
+  if (h >= 12 && h < 19) {
+    return {
+      ...getTodayDateStrings(now),
+      isPostMidnightCarryover: false,
+      shiftLabel: norm[1].label,
+    };
+  }
+  if (h >= 19) {
+    return {
+      ...getTodayDateStrings(now),
+      isPostMidnightCarryover: false,
+      shiftLabel: norm[2].label,
+    };
+  }
+  const prevDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  return {
+    ...getTodayDateStrings(prevDay),
+    isPostMidnightCarryover: true,
+    shiftLabel: norm[2].label,
+  };
+}
+
 export function naturalBedCompare(a, b) {
   const cleanA = String(a || '').trim();
   const cleanB = String(b || '').trim();
@@ -1581,8 +1623,8 @@ export function extractMedicationsFromBlock(blockText) {
 
   const pushMed = (raw) => {
     const clean = String(raw || '')
-      .replace(/^[-*]\s*\[[ xX]\]\s*/, '')
-      .replace(/^(?:[-*]|\d+[.)])\s+/, '')
+      .replace(/^[•\-*]\s*\[[ xX]\]\s*/, '')
+      .replace(/^(?:[•\-*]|\d+[.)])\s+/, '')
       .trim();
     if (isMedPlaceholder(clean)) return;
     const key = clean.toLowerCase();
@@ -1640,7 +1682,7 @@ export function extractMedicationsFromBlock(blockText) {
     }
 
     blankCount = 0;
-    if (/[|;]/.test(trimmed) && !/^(?:[-*]|\d+[.)])\s+/.test(trimmed)) {
+    if (/[|;]/.test(trimmed) && !/^(?:[•\-*]|\d+[.)])\s+/.test(trimmed)) {
       for (const piece of trimmed.split(/[|;]/)) {
         pushMed(piece);
       }
@@ -1720,6 +1762,161 @@ function extractLatestMedicationsFromChart(content, latestDateBlock, latestShift
 
   const fallbackMeds = extractMedicationsFromBlock(content);
   return { medications: fallbackMeds, medicationsDate: fallbackMeds.length ? latestDate || '' : '' };
+}
+
+function extractLabeledListFromBlock(blockText, headerRegex) {
+  const lines = String(blockText || '').split('\n');
+  const items = [];
+  let inSec = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const hdr = trimmed.match(headerRegex);
+    if (hdr) {
+      inSec = true;
+      const inline = (hdr[1] || '').trim();
+      if (inline) {
+        for (const piece of inline.split(/[|;]/)) {
+          const clean = piece.replace(/^(?:[•\-*]|\d+[.)])\s+/, '').trim();
+          if (clean && !/^none$/i.test(clean)) items.push(clean);
+        }
+      }
+      continue;
+    }
+    if (!inSec) continue;
+    if (!trimmed) {
+      if (items.length > 0) break;
+      continue;
+    }
+    if (
+      /^#{2,3}\s+/.test(trimmed) ||
+      /^(?:\*{0,2})(?:Pending|Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Plans?|Meds?|Medications?|Drips?|Feeding|Diet|Nutrition|Vitals|VS|Vent|Labs?|Thank\s+you)/i.test(
+        trimmed
+      )
+    ) {
+      break;
+    }
+    const clean = trimmed.replace(/^(?:[•\-*]|\d+[.)])\s+/, '').trim();
+    if (clean && !/^none$/i.test(clean)) items.push(clean);
+  }
+  return items;
+}
+
+function extractPeLinesFromBlock(blockText) {
+  const lines = String(blockText || '').split('\n');
+  const out = [];
+  let inPe = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^(?:HEENT|C\/L|CVS|ABD|EXT):/i.test(trimmed) || /^Awake,\s*/i.test(trimmed)) {
+      inPe = true;
+      out.push(trimmed);
+      continue;
+    }
+    if (inPe) {
+      if (
+        !trimmed ||
+        /^(?:\*{0,2})(?:Drips?|Meds?|Medications?|Pending|Service|Plans?|Generic|[A-Za-z\s/&+-]{2,25}\s+Plans?|Thank\s+you|Feeding|Diet|BP|HR|RR|Tmax|Temp|O2)/i.test(
+          trimmed
+        )
+      ) {
+        if (out.length > 0) break;
+        continue;
+      }
+      out.push(trimmed);
+    }
+  }
+  return out.join('\n');
+}
+
+export function extractStandingDictationContext(content) {
+  const text = String(content || '');
+  const allShiftsDesc = splitAnyShiftBlocks(text)
+    .map((s) => s.block)
+    .reverse();
+  const blocks = allShiftsDesc.length ? allShiftsDesc : [text];
+
+  let pe = '';
+  let meds = [];
+  let onHold = [];
+  let feeding = '';
+  let drips = '';
+  let vent = '';
+  let pending = [];
+  const subspecialtyPlans = [];
+  const seenPlanHeaders = new Set();
+
+  for (const blk of blocks) {
+    if (!pe) pe = extractPeLinesFromBlock(blk);
+    if (!meds.length) meds = extractMedicationsFromBlock(blk);
+    if (!onHold.length) {
+      onHold = extractLabeledListFromBlock(blk, /^(?:\*{0,2})(?:On\s+hold|Hold|Held)(?:\*{0,2}):\s*(.*)$/i);
+    }
+    if (!feeding) {
+      const fMatch = blk.match(/^(?:\*{0,2})(?:Feeding|Diet|Nutrition)(?:\*{0,2}):\s*(.+)$/im);
+      if (fMatch && fMatch[1].trim()) feeding = fMatch[1].trim();
+    }
+    const metrics = extractClinicalMetricsFromBlock(blk);
+    if (!drips && metrics.drips) drips = metrics.drips;
+    if (!vent && metrics.vent) vent = metrics.vent;
+    if (!pending.length) {
+      const pendRes = extractPendingFromBlock(blk);
+      if (pendRes.pending.length > 0) {
+        pending = pendRes.pending.filter((p) => !p.checked).map((p) => p.text);
+      }
+    }
+
+    // Collect named subspecialty plans (Pulmo plans:, Cardio plans:, etc.; exclude generic Plans:)
+    const blkLines = blk.split('\n');
+    let curHeading = '';
+    let curItems = [];
+    const flushSubPlan = () => {
+      if (curHeading && curItems.length && !seenPlanHeaders.has(curHeading.toLowerCase())) {
+        seenPlanHeaders.add(curHeading.toLowerCase());
+        subspecialtyPlans.push({ heading: curHeading, items: [...curItems] });
+      }
+      curHeading = '';
+      curItems = [];
+    };
+    for (const rawLine of blkLines) {
+      const tr = rawLine.trim();
+      const spHdr = tr.match(/^(?:\*{0,2})([A-Za-z][A-Za-z\s/&+-]{1,28})\s+Plans?(?:\*{0,2}):\s*(.*)$/i);
+      if (spHdr && !/^#{2,3}\s+/.test(tr)) {
+        flushSubPlan();
+        const prefix = spHdr[1].trim();
+        if (!/^(?:generic|general|routine)$/i.test(prefix)) {
+          curHeading = `${prefix} plans:`;
+          if (spHdr[2] && spHdr[2].trim()) {
+            curItems.push(spHdr[2].trim().replace(/^(?:[•\-*]|\d+[.)])\s+/, ''));
+          }
+        }
+        continue;
+      }
+      if (curHeading) {
+        if (
+          !tr ||
+          /^#{2,3}\s+/.test(tr) ||
+          /^(?:\*{0,2})(?:Plans?|Pending|Thank\s+you|Greeting|Footer)/i.test(tr)
+        ) {
+          flushSubPlan();
+        } else {
+          const item = tr.replace(/^(?:[•\-*]\s*\[[ xX]\]\s*|^(?:[•\-*]|\d+[.)])\s+)/, '').trim();
+          if (item) curItems.push(item);
+        }
+      }
+    }
+    flushSubPlan();
+  }
+
+  return {
+    pe,
+    meds,
+    onHold,
+    feeding,
+    drips,
+    vent,
+    pending,
+    subspecialtyPlans,
+  };
 }
 
 export function extractCarryForwardData(content) {
@@ -2284,6 +2481,8 @@ export function appendShiftBlock(
   const shiftHeading = `### ${cleanShift}`;
 
   const text = String(content || '').trimEnd();
+  const tightSeam = Boolean(mergeOptions?.tightSeam);
+  const seamSep = tightSeam ? '\n' : '\n\n';
 
   // Match exact dateHeading or an equivalent last ## date heading for the same calendar date
   let dateIndex = -1;
@@ -2332,11 +2531,207 @@ export function appendShiftBlock(
 
   if (dateIndex !== -1) {
     // Date heading already exists, append under it
-    return `${text}\n\n${bodyContent}`;
+    return `${text}${seamSep}${bodyContent}`;
   } else {
     // Create new date block
-    return text ? `${text}\n\n${dateHeading}\n\n${bodyContent}` : `${dateHeading}\n\n${bodyContent}`;
+    return text ? `${text}${seamSep}${dateHeading}\n\n${bodyContent}` : `${dateHeading}\n\n${bodyContent}`;
   }
+}
+
+export function buildClinicalDictationAiPrompt({
+  redactedTranscript = '',
+  standingContext = {},
+  shift = '6am',
+  dateStr = '',
+  interimTimeLabel = '',
+  greeting = '',
+  signature = '',
+  patientHeaderLines = [],
+} = {}) {
+  const st = standingContext || {};
+  const standingParts = [];
+  if (st.vent) standingParts.push(`Previous Vent Settings: ${st.vent}`);
+  if (st.drips) standingParts.push(`Previous Drips: ${st.drips}`);
+  if (st.feeding) standingParts.push(`Previous Feeding: ${st.feeding}`);
+  if (st.pe) standingParts.push(`Previous PE:\n${st.pe}`);
+  if (Array.isArray(st.meds) && st.meds.length) {
+    standingParts.push(`Previous Meds:\n${st.meds.map((m) => `• ${m}`).join('\n')}`);
+  }
+  if (Array.isArray(st.onHold) && st.onHold.length) {
+    standingParts.push(`Previous On Hold:\n${st.onHold.map((h) => `• ${h}`).join('\n')}`);
+  }
+  if (Array.isArray(st.pending) && st.pending.length) {
+    standingParts.push(`Standing Open **Pending items:\n${st.pending.map((p) => `- [ ] ${p}`).join('\n')}`);
+  }
+  if (Array.isArray(st.subspecialtyPlans) && st.subspecialtyPlans.length) {
+    for (const sp of st.subspecialtyPlans) {
+      standingParts.push(`Previous ${sp.heading}\n${sp.items.map((x) => `- ${x}`).join('\n')}`);
+    }
+  }
+
+  const headerPreview = (patientHeaderLines || []).filter(Boolean).join('\n');
+  const shiftGuidance = interimTimeLabel
+    ? `Selected Shift: ### ${shift} (If single-order / interval update, write ### ${shift}; interim time reference: ${interimTimeLabel})`
+    : `Selected Shift: ### ${shift} (Date: ${dateStr || getTodayDateStrings().mmddyyyy})`;
+
+  return `You are a clinical inpatient documentation assistant formatting a bedside resident dictation.
+
+STRICT DICTATION & CHARTING RULES:
+1. ASR CAUTION & AMBIGUITY: Only fix obvious single-reading ASR errors (e.g. PEEP vs BP only in vent context, FiO2, CRBSI, Clindamycin, Vancomycin, Pulmo, afebrile, mcg/kg/min). If any number/field looks garbled or ambiguous, DO NOT guess — omit/flag it under ===FLAGS=== and ask.
+2. SELF-CORRECTIONS: "scratch that", "I mean", "correction" → output ONLY the corrected value, never both.
+3. NO I&O ARITHMETIC RECONCILIATION: Output dictated In / Out / balance verbatim even if In - Out != balance; report arithmetic mismatch in ===FLAGS===.
+4. VENT SETTINGS & RETURNS: If dictated "same vent settings", copy Previous Vent Settings verbatim right under O2 sat (no "same settings" prose). Vent returns go immediately below settings as bare numeric lines without a heading.
+5. TEMPERATURE RULE: "afebrile" alone → omit Tmax line (mention "afebrile" only in subjective). "afebrile Tmax 36.6" → put "afebrile" in subjective AND "Tmax 36.6C" between RR and O2 sat.
+6. INTERVAL EVENTS: One observation per line. "No acute events but noted X" → drop "No acute events", keep only X.
+7. SINGLE ORDER RULE: If dictation is only a single standalone order/event with no shift data, start heading with ### Interim (${interimTimeLabel || 'time'}).
+8. NEVER CARRY FORWARD MEASURED VALUES: NEVER invent or carry forward I&O rows, HGT values, vent returns, or temperatures from prior blocks. Only carry standing sections (PE, Meds, On hold, Feeding, open **Pending items not resolved in this shift, subspecialty plans) when omitted from dictation.
+9. ORDERING & SECTION RULES:
+   - Omit empty sections completely (never output empty headers like empty **Pending:).
+   - **Pending: goes AFTER Meds: and BEFORE all plan sections.
+   - Named subspecialty plans go under their own headings (Pulmo plans:, Cardio plans:, etc.).
+   - Generic Plans: go last before the signature.
+
+EXACT SECTION ORDER FOR REGULAR SHIFT BLOCK:
+### <shift>
+${greeting ? `${greeting}\n` : '<greeting line if appropriate>'}
+Update on your patient
+${headerPreview || '[PATIENT_NAME]'}
+
+<subjective line(s)>
+<event lines>
+
+<Lab update heading if labs dictated>
+<labs flush with heading>
+
+BP <range>/<range>
+HR <range>
+RR <range>
+Tmax <n>C
+O2 sat <n>%
+<vent settings line flush under O2 sat>
+<vent returns bare>
+
+<shift row e.g. 6-2pm or 10-6a>
+I <n>
+O <n>
+<balance>
+<special lines e.g. 2 episodes BM>
+
+Feeding: <line>
+FWF <n>
+
+<PE lines>
+
+Drips:
+<drip line>
+
+Meds:
+• <drug>
+
+**Pending:
+<item>
+
+<Subspecialty plans: e.g. Pulmo plans:>
+<item>
+
+Plans:
+<item>${signature ? `\n${signature}` : ''}
+
+${shiftGuidance}
+
+STANDING CONTEXT FROM PRIOR BLOCK (carry ONLY standing sections when omitted; never measured values):
+${standingParts.length ? standingParts.join('\n\n') : '(none available)'}
+
+DE-IDENTIFIED DICTATION TRANSCRIPT:
+"""
+${String(redactedTranscript || '').trim()}
+"""
+
+OUTPUT FORMAT:
+Return your response wrapped cleanly with these exact markers:
+===NOTE===
+<clean markdown note block starting with ### ...>
+===FLAGS===
+<bullet list of any I&O mismatches, omitted missing measured values, or garbled numbers to clarify — or "None" if everything is clear>`;
+}
+
+export function parseAiDictationResponse(rawReply, formattedPatientName = '') {
+  let raw = String(rawReply || '').trim();
+  raw = raw.replace(/^```(?:markdown)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+
+  let noteBlock = raw;
+  let flagsText = '';
+
+  const noteMatch = raw.match(/===NOTE===\s*([\s\S]*?)(?====FLAGS===|$)/i);
+  const flagsMatch = raw.match(/===FLAGS===\s*([\s\S]*)$/i);
+
+  if (noteMatch) {
+    noteBlock = noteMatch[1].trim();
+  }
+  if (flagsMatch) {
+    const cleanedFlags = flagsMatch[1].trim();
+    if (cleanedFlags && !/^(?:none|no\s+flags|clear)\.?$/i.test(cleanedFlags)) {
+      flagsText = cleanedFlags;
+    }
+  }
+
+  noteBlock = noteBlock.replace(/^```(?:markdown)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+
+  if (formattedPatientName) {
+    noteBlock = noteBlock.replace(/\[PATIENT_NAME\]/g, formattedPatientName);
+  }
+
+  return { noteBlock, flags: flagsText };
+}
+
+export function verifyAppendedChart(content) {
+  const text = String(content || '');
+  const warnings = [];
+  const lines = text.split('\n');
+  const dateRe =
+    /^##\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\w+\s+\d{1,2},?\s+\d{4})\b/;
+
+  const dateValues = [];
+  let headingCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Seam check: verify ## or ### heading didn't get glued onto signature/text mid-line
+    if (/[^\s]\s*#{2,3}\s+/.test(line) && !/^\s*#{2,3}\s+/.test(line)) {
+      warnings.push(`Line ${i + 1}: heading appears glued onto previous text ("${line.slice(0, 60)}")`);
+    }
+    if (/^#{2,3}\s+/.test(line)) headingCount++;
+    const dm = line.match(dateRe);
+    if (dm) {
+      const dp = parseDateParts(dm[1]);
+      const parsedTs = dp ? Date.UTC(dp.year, dp.month - 1, dp.day) : null;
+      if (parsedTs !== null) {
+        if (dateValues.length > 0 && parsedTs < dateValues[dateValues.length - 1].ts) {
+          warnings.push(`Date heading "## ${dm[1]}" is out of chronological order`);
+        }
+        dateValues.push({ raw: dm[1], ts: parsedTs });
+      }
+    }
+  }
+
+  const timeline = parseChartTimeline(text);
+  const lastDateEntry = timeline[timeline.length - 1] || null;
+  const lastShiftEntry =
+    lastDateEntry && lastDateEntry.shifts.length
+      ? lastDateEntry.shifts[lastDateEntry.shifts.length - 1]
+      : null;
+
+  if (!lastDateEntry || !lastShiftEntry) {
+    warnings.push('Final appended shift block could not be parsed in timeline');
+  }
+
+  return {
+    ok: warnings.length === 0,
+    warnings,
+    headingCount,
+    lastDate: lastDateEntry?.date || '',
+    lastShift: lastShiftEntry?.rawShift || lastShiftEntry?.shift || '',
+  };
 }
 
 export function extractTodayShiftBlocks(content, dateStr = null) {

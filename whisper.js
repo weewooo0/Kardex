@@ -18,6 +18,12 @@ export const WHISPER_MODELS = [
     label: 'Whisper Base · English (~75 MB, Higher Accuracy)',
     approxMb: 75,
   },
+  {
+    id: 'Xenova/whisper-small.en',
+    shortLabel: 'Whisper Small · English',
+    label: 'Whisper Small · English (~150 MB, Best Clinical Accuracy)',
+    approxMb: 150,
+  },
 ];
 
 /**
@@ -461,4 +467,291 @@ export function createWhisperController({ onStatus, onProgress } = {}) {
     unload,
     getState,
   };
+}
+
+/**
+ * Encodes Float32 PCM audio into a 16 kHz mono 16-bit signed RIFF/WAVE Blob.
+ */
+export function encodeWav16kMono(samples, fromSampleRate = WHISPER_SAMPLE_RATE) {
+  const mono = samples instanceof Float32Array ? samples : new Float32Array(samples || 0);
+  const resampled =
+    fromSampleRate === WHISPER_SAMPLE_RATE
+      ? Float32Array.from(mono)
+      : resampleLinear(mono, fromSampleRate, WHISPER_SAMPLE_RATE);
+  const norm = normalizeAudioPcm(resampled);
+  const pcm16k = norm.pcm;
+  const numSamples = pcm16k.length;
+  const dataBytes = numSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataBytes, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM chunk size
+  view.setUint16(20, 1, true); // linear PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, WHISPER_SAMPLE_RATE, true);
+  view.setUint32(28, WHISPER_SAMPLE_RATE * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, dataBytes, true);
+
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, pcm16k[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+
+  return {
+    blob: new Blob([buffer], { type: 'audio/wav' }),
+    pcm16k,
+    durationSec: numSamples / WHISPER_SAMPLE_RATE,
+    peak: norm.peak,
+    rms: norm.rms,
+    isSilent: norm.isSilent,
+  };
+}
+
+/**
+ * Creates a Web Audio PCM WAV recorder backed by ONE persistent AudioContext.
+ * Call unlockAudioContext() synchronously inside a tap handler before any await.
+ */
+export function createPcmAudioRecorder({ onError } = {}) {
+  let persistentCtx = null;
+  let activeStream = null;
+  let sourceNode = null;
+  let analyserNode = null;
+  let processorNode = null;
+  let zeroGainNode = null;
+  let pcmChunks = [];
+  let recording = false;
+  let sessionId = 0;
+
+  function ensureAudioContext() {
+    const AudioCtx = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!AudioCtx) throw new Error('Web Audio API is unavailable in this browser');
+    if (!persistentCtx || persistentCtx.state === 'closed') {
+      persistentCtx = new AudioCtx();
+    }
+    return persistentCtx;
+  }
+
+  function unlockAudioContext() {
+    try {
+      const ctx = ensureAudioContext();
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        ctx.resume().catch(() => {});
+      }
+      return ctx;
+    } catch {
+      return null;
+    }
+  }
+
+  function teardownGraph() {
+    if (processorNode) {
+      try { processorNode.onaudioprocess = null; } catch {}
+      try { processorNode.disconnect(); } catch {}
+      processorNode = null;
+    }
+    if (zeroGainNode) {
+      try { zeroGainNode.disconnect(); } catch {}
+      zeroGainNode = null;
+    }
+    if (sourceNode) {
+      try { sourceNode.disconnect(); } catch {}
+      sourceNode = null;
+    }
+    if (analyserNode) {
+      try { analyserNode.disconnect(); } catch {}
+      analyserNode = null;
+    }
+    if (activeStream) {
+      try {
+        activeStream.getTracks().forEach((track) => {
+          try { track.onended = null; } catch {}
+          try { track.stop(); } catch {}
+        });
+      } catch {}
+      activeStream = null;
+    }
+    if (persistentCtx && persistentCtx.state === 'running' && typeof persistentCtx.suspend === 'function') {
+      try { persistentCtx.suspend().catch(() => {}); } catch {}
+    }
+  }
+
+  async function requestMicStream() {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch (err) {
+      if (err?.name === 'OverconstrainedError' || err?.name === 'ConstraintNotSatisfiedError') {
+        return await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      throw err;
+    }
+  }
+
+  async function start() {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      throw new Error('Microphone API unavailable in this browser');
+    }
+    const ctx = unlockAudioContext() || ensureAudioContext();
+    teardownGraph();
+    pcmChunks = [];
+    recording = false;
+    const mySession = ++sessionId;
+
+    let stream = null;
+    try {
+      stream = await requestMicStream();
+      if (mySession !== sessionId) {
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        return null;
+      }
+      const tracks = stream.getAudioTracks();
+      if (!tracks.length || tracks.every((t) => t.readyState === 'ended')) {
+        throw new Error('Microphone stream returned no live audio tracks');
+      }
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        await ctx.resume();
+      }
+      if (mySession !== sessionId) {
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+        return null;
+      }
+
+      activeStream = stream;
+      sourceNode = ctx.createMediaStreamSource(stream);
+      analyserNode = ctx.createAnalyser();
+      analyserNode.fftSize = 64;
+      sourceNode.connect(analyserNode);
+
+      const bufSize = 4096;
+      processorNode = ctx.createScriptProcessor(bufSize, 1, 1);
+      zeroGainNode = ctx.createGain();
+      zeroGainNode.gain.value = 0;
+
+      const capturedChunks = [];
+      pcmChunks = capturedChunks;
+      processorNode.onaudioprocess = (ev) => {
+        if (!recording || mySession !== sessionId) return;
+        const input = ev.inputBuffer?.getChannelData?.(0);
+        if (input && input.length > 0) {
+          capturedChunks.push(new Float32Array(input));
+        }
+      };
+
+      sourceNode.connect(processorNode);
+      processorNode.connect(zeroGainNode);
+      zeroGainNode.connect(ctx.destination);
+
+      tracks.forEach((track) => {
+        track.onended = () => {
+          if (mySession === sessionId && recording && typeof onError === 'function') {
+            onError(new Error('Microphone track ended unexpectedly (screen lock or OS interrupt)'));
+          }
+        };
+      });
+
+      recording = true;
+      return { sampleRate: ctx.sampleRate || WHISPER_SAMPLE_RATE, stream, analyser: analyserNode };
+    } catch (err) {
+      if (stream && activeStream !== stream) {
+        stream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+      }
+      teardownGraph();
+      throw err;
+    }
+  }
+
+  function cancel() {
+    sessionId++;
+    recording = false;
+    pcmChunks = [];
+    teardownGraph();
+  }
+
+  function stop() {
+    sessionId++;
+    recording = false;
+    const chunks = pcmChunks;
+    const sampleRate = (persistentCtx && persistentCtx.sampleRate) || WHISPER_SAMPLE_RATE;
+    pcmChunks = [];
+    teardownGraph();
+
+    let totalLen = 0;
+    for (const c of chunks) totalLen += c.length;
+    const merged = new Float32Array(totalLen);
+    let pos = 0;
+    for (const c of chunks) {
+      merged.set(c, pos);
+      pos += c.length;
+    }
+    return encodeWav16kMono(merged, sampleRate);
+  }
+
+  return {
+    unlockAudioContext,
+    start,
+    cancel,
+    stop,
+    isRecording: () => recording,
+    getAnalyser: () => analyserNode,
+  };
+}
+
+/**
+ * Corrects common clinical Whisper ASR garbles only when surrounding clinical context forces one reading.
+ * Contains strictly generic medical terminology (no patient/clinician names).
+ */
+export function applyClinicalAsrCorrections(text) {
+  let out = String(text || '');
+  if (!out.trim()) return out;
+
+  // Antibiotic & microbiology garbles
+  out = out.replace(/\b(?:Kundamycin|Condamising|Clindamising|Kundamising)\b/gi, 'Clindamycin');
+  out = out.replace(/\b(?:Vancomising|Vankomising)\b/gi, 'Vancomycin');
+  out = out.replace(/\b(?:Crib\s*C|cribsi)\b/gi, 'CRBSI');
+
+  // Status & dosing unit garbles
+  out = out.replace(/\b(?:a\s+fee\s+rel|a\s+febrile)\b/gi, 'afebrile');
+  out = out.replace(/(\d(?:\.\d+)?\s*)\b(?:mkm|MKM)\b/g, '$1mcg/kg/min');
+
+  // FiO2 garbles (avoid consuming trailing space when "2" is omitted)
+  out = out.replace(/\b(?:phyoto|fyoto|fioto)\b/gi, 'FiO2');
+  out = out.replace(/\b(?:FIO\s*2|FIO)(?=\s*(?:of\s*)?\d+\s*%)/gi, 'FiO2');
+
+  // Pulmo specialty context (only when followed by plan/service/consult/co-management keywords or colon)
+  out = out.replace(
+    /\b(?:Tuma|Ulma)\b(?=\s*(?::|\bplans?\b|\bservice\b|\bconsult\b|\bnote\b|\bcleared\b|\bco-?manage))/gi,
+    'Pulmo'
+  );
+
+  // Context-aware PEEP (replace BP / P -> PEEP ONLY on ventilator lines, never altering BP 120/80)
+  out = out
+    .split('\n')
+    .map((line) => {
+      const hasVentCtx =
+        /\b(?:vent(?:ilator)?|FiO2|Vt|VTE|AC\/?VC|AC\/?PC|PCMV|PC-?CMV|VC-?CMV|PRVC|SIMV|PSV|Ppeak|Pplat|cmH2O)\b/i.test(
+          line
+        );
+      if (!hasVentCtx) return line;
+      return line.replace(/\b(?:BP|P)\b(?=\s*(?:[:=]|\bof\b)?\s*\d{1,2}\b(?!\s*\/\s*\d))/g, 'PEEP');
+    })
+    .join('\n');
+
+  return out;
 }
