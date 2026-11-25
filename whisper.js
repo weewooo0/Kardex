@@ -713,6 +713,303 @@ export function createPcmAudioRecorder({ onError } = {}) {
   };
 }
 
+export function pickRecorderMimeType(
+  userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '',
+  isTypeSupported = typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function'
+    ? (t) => MediaRecorder.isTypeSupported(t)
+    : null
+) {
+  if (typeof isTypeSupported !== 'function') return '';
+  const isFirefox = /Firefox|FxiOS/i.test(String(userAgent || ''));
+  const candidates = isFirefox
+    ? ['audio/ogg;codecs=opus', 'audio/ogg', 'audio/webm;codecs=opus', 'audio/webm']
+    : ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  return candidates.find((t) => {
+    try {
+      return isTypeSupported(t);
+    } catch {
+      return false;
+    }
+  }) || '';
+}
+
+function stopStreamSafely(stream) {
+  if (!stream) return;
+  try {
+    stream.getTracks().forEach((track) => {
+      try { track.onended = null; } catch {}
+      try { track.stop(); } catch {}
+    });
+  } catch {}
+}
+
+/**
+ * MediaRecorder-first universal audio recorder safe across Firefox Android (Cubeb/sample-rate),
+ * Android Chrome, Safari/iOS, and Desktop browsers, with Web Audio PCM fallback only if MediaRecorder is absent.
+ */
+export function createUniversalAudioRecorder({ onError } = {}) {
+  if (typeof MediaRecorder === 'undefined') {
+    const pcmFallback = createPcmAudioRecorder({ onError });
+    return {
+      start: async () => {
+        pcmFallback.unlockAudioContext();
+        const res = await pcmFallback.start();
+        return res ? { stream: res.stream, engine: 'pcm-wav' } : null;
+      },
+      stop: async () => {
+        const res = pcmFallback.stop();
+        return {
+          blob: res.blob,
+          pcm16k: res.pcm16k,
+          durationSec: res.durationSec,
+          isEmpty: !res.blob || res.blob.size <= 44 || res.isSilent,
+          engine: 'pcm-wav',
+        };
+      },
+      cancel: () => pcmFallback.cancel(),
+      isRecording: () => pcmFallback.isRecording(),
+      getStream: () => null,
+      getEngine: () => 'pcm-wav',
+    };
+  }
+
+  let activeRecorder = null;
+  let activeStream = null;
+  let activeChunks = [];
+  let sessionId = 0;
+  let recording = false;
+  let startMs = 0;
+  let pendingCleanup = Promise.resolve();
+  let lastReleaseAt = 0;
+
+  async function acquireFreshStream() {
+    let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let tracks = stream.getAudioTracks();
+    if (!tracks.length || tracks.every((t) => t.readyState !== 'live')) {
+      stopStreamSafely(stream);
+      await new Promise((r) => setTimeout(r, 400));
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      tracks = stream.getAudioTracks();
+      if (!tracks.length || tracks.every((t) => t.readyState !== 'live')) {
+        stopStreamSafely(stream);
+        throw new Error('Microphone stream returned no active audio tracks');
+      }
+    }
+    return stream;
+  }
+
+  async function start() {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      throw new Error('Microphone API unavailable in this browser');
+    }
+    const mySession = ++sessionId;
+    recording = false;
+
+    await pendingCleanup;
+    if (mySession !== sessionId) return null;
+
+    if (lastReleaseAt > 0) {
+      const waitMs = 450 - (Date.now() - lastReleaseAt);
+      if (waitMs > 0) {
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (mySession !== sessionId) return null;
+      }
+    }
+
+    let stream = null;
+    try {
+      stream = await acquireFreshStream();
+      if (mySession !== sessionId) {
+        stopStreamSafely(stream);
+        return null;
+      }
+
+      const mimeType = pickRecorderMimeType();
+      let recorder;
+      try {
+        recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
+
+      const chunks = [];
+      activeStream = stream;
+      activeRecorder = recorder;
+      activeChunks = chunks;
+
+      recorder.ondataavailable = (ev) => {
+        if (mySession !== sessionId) return;
+        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+      };
+
+      recorder.onerror = (ev) => {
+        if (mySession !== sessionId) return;
+        recording = false;
+        stopStreamSafely(stream);
+        lastReleaseAt = Date.now();
+        if (activeRecorder === recorder) activeRecorder = null;
+        if (activeStream === stream) activeStream = null;
+        if (typeof onError === 'function') {
+          onError(ev?.error || new Error('Audio recorder error'));
+        }
+      };
+
+      stream.getAudioTracks().forEach((track) => {
+        track.onended = () => {
+          if (mySession === sessionId && recording && typeof onError === 'function') {
+            onError(new Error('Microphone track ended unexpectedly (screen lock or OS interrupt)'));
+          }
+        };
+      });
+
+      try {
+        recorder.start(250);
+      } catch {
+        recorder.start();
+      }
+      startMs = Date.now();
+      recording = true;
+      return { stream, engine: 'mediarecorder', mimeType: recorder.mimeType || mimeType };
+    } catch (err) {
+      if (stream && activeStream !== stream) stopStreamSafely(stream);
+      throw err;
+    }
+  }
+
+  async function stop() {
+    const rec = activeRecorder;
+    const stream = activeStream;
+    const chunks = activeChunks;
+    const elapsedSec = startMs ? Math.max(0, (Date.now() - startMs) / 1000) : 0;
+
+    sessionId++;
+    recording = false;
+    activeRecorder = null;
+    activeStream = null;
+    activeChunks = [];
+    startMs = 0;
+
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => {
+          try { t.onended = null; } catch {}
+        });
+      } catch {}
+    }
+
+    const finalize = async () => {
+      if (rec && rec.state !== 'inactive') {
+        await new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            try { rec.ondataavailable = null; } catch {}
+            try { rec.onerror = null; } catch {}
+            try { rec.onstop = null; } catch {}
+            resolve();
+          };
+          const timer = setTimeout(finish, 1500);
+          rec.onstop = () => {
+            clearTimeout(timer);
+            finish();
+          };
+          try {
+            rec.stop();
+          } catch {
+            clearTimeout(timer);
+            finish();
+          }
+        });
+      }
+      stopStreamSafely(stream);
+      lastReleaseAt = Date.now();
+    };
+
+    pendingCleanup = pendingCleanup.then(finalize, finalize);
+    await pendingCleanup;
+
+    const blobType = rec?.mimeType || chunks[0]?.type || 'audio/ogg';
+    const blob = new Blob(chunks, blobType ? { type: blobType } : undefined);
+    return {
+      blob,
+      pcm16k: null,
+      durationSec: elapsedSec,
+      isEmpty: !blob || blob.size === 0,
+      engine: 'mediarecorder',
+    };
+  }
+
+  function cancel() {
+    const rec = activeRecorder;
+    const stream = activeStream;
+    sessionId++;
+    recording = false;
+    activeRecorder = null;
+    activeStream = null;
+    activeChunks = [];
+    startMs = 0;
+
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => {
+          try { t.onended = null; } catch {}
+        });
+      } catch {}
+    }
+
+    const teardown = () =>
+      new Promise((resolve) => {
+        if (rec && rec.state !== 'inactive') {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            try { rec.ondataavailable = null; } catch {}
+            try { rec.onerror = null; } catch {}
+            try { rec.onstop = null; } catch {}
+            stopStreamSafely(stream);
+            lastReleaseAt = Date.now();
+            resolve();
+          };
+          const timer = setTimeout(finish, 300);
+          try {
+            rec.ondataavailable = null;
+            rec.onerror = null;
+            rec.onstop = () => {
+              clearTimeout(timer);
+              finish();
+            };
+            rec.stop();
+          } catch {
+            clearTimeout(timer);
+            finish();
+          }
+        } else {
+          if (rec) {
+            try { rec.ondataavailable = null; } catch {}
+            try { rec.onerror = null; } catch {}
+            try { rec.onstop = null; } catch {}
+          }
+          stopStreamSafely(stream);
+          lastReleaseAt = Date.now();
+          resolve();
+        }
+      });
+
+    pendingCleanup = pendingCleanup.then(teardown, teardown);
+  }
+
+  return {
+    start,
+    stop,
+    cancel,
+    isRecording: () => recording,
+    getStream: () => activeStream,
+    getEngine: () => 'mediarecorder',
+  };
+}
+
 /**
  * Corrects common clinical Whisper ASR garbles only when surrounding clinical context forces one reading.
  * Contains strictly generic medical terminology (no patient/clinician names).
