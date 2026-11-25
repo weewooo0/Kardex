@@ -1,5 +1,13 @@
 import { redact, findLeaks, redactFilename, buildPayload } from './redaction.js';
 import {
+  AI_PRESETS,
+  isGeminiEndpoint,
+  detectAiPreset,
+  normalizeGeminiModel,
+  callAiChat,
+  testAiConnection,
+} from './ai.js';
+import {
   THEME_PRESETS,
   ACCENT_PRESETS,
   ACCENT_VAR_NAMES,
@@ -5142,13 +5150,8 @@ async function send() {
   reply.hidden = false;
   reply.textContent = 'Thinking…';
   try {
-    const res = await fetch(`${endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: payload }] }),
-    });
-    const data = await res.json();
-    reply.textContent = data?.choices?.[0]?.message?.content || JSON.stringify(data, null, 2);
+    const text = await callAiChat({ endpoint, model, apiKey: key, prompt: payload });
+    reply.textContent = text;
   } catch (e) {
     reply.textContent = 'Request failed: ' + e.message;
   }
@@ -5844,14 +5847,95 @@ $('copyBtn').onclick = async () => {
 $('sendBtn').onclick = send;
 
 // Settings: API & Connection verification
+function syncAiPresetUi() {
+  const endpointVal = $('endpoint')?.value.trim() || '';
+  const modelVal = $('model')?.value.trim() || '';
+  const activePreset = detectAiPreset(endpointVal);
+  const presetCfg = AI_PRESETS[activePreset] || AI_PRESETS.custom;
+
+  document.querySelectorAll('[data-ai-preset]').forEach((btn) => {
+    const isMatch = btn.dataset.aiPreset === activePreset;
+    btn.classList.toggle('active', isMatch);
+    btn.setAttribute('aria-pressed', String(isMatch));
+  });
+
+  const hintEl = $('geminiPresetHint');
+  const isGemini = isGeminiEndpoint(endpointVal);
+  if (hintEl) hintEl.hidden = !isGemini;
+
+  const normalizedModel = normalizeGeminiModel(modelVal);
+  document.querySelectorAll('[data-gemini-model]').forEach((btn) => {
+    const isMatch = isGemini && btn.dataset.geminiModel === normalizedModel;
+    btn.classList.toggle('active', isMatch);
+    btn.setAttribute('aria-pressed', String(isMatch));
+  });
+
+  if ($('apiKey') && presetCfg.keyPlaceholder) {
+    $('apiKey').placeholder = presetCfg.keyPlaceholder;
+  }
+}
+
+document.querySelectorAll('[data-ai-preset]').forEach((btn) => {
+  btn.onclick = () => {
+    const presetId = btn.dataset.aiPreset;
+    const preset = AI_PRESETS[presetId];
+    if (!preset) return;
+    if (presetId === 'gemini') {
+      $('endpoint').value = preset.endpoint;
+      const curModel = normalizeGeminiModel($('model').value);
+      $('model').value = curModel && /^gemini-/i.test(curModel) ? curModel : preset.model;
+      toast('Google Gemini preset applied — paste your Gemini API key');
+      $('apiKey')?.focus();
+    } else if (presetId === 'openai') {
+      $('endpoint').value = preset.endpoint;
+      $('model').value = preset.model;
+      toast('OpenAI preset applied — paste your OpenAI API key');
+      $('apiKey')?.focus();
+    } else {
+      const curEndpoint = $('endpoint').value.trim().replace(/\/+$/, '');
+      const curModel = $('model').value.trim();
+      if (isGeminiEndpoint(curEndpoint) || curEndpoint.toLowerCase() === AI_PRESETS.openai.endpoint) {
+        $('endpoint').value = '';
+      }
+      if (curModel === AI_PRESETS.gemini.model || curModel === AI_PRESETS.openai.model || /^gemini-/i.test(curModel)) {
+        $('model').value = '';
+      }
+      $('endpoint')?.focus();
+    }
+    safeSetItem('cm.endpoint', $('endpoint').value.trim());
+    safeSetItem('cm.model', $('model').value.trim());
+    if ($('aiConnResult')) $('aiConnResult').textContent = '';
+    syncAiPresetUi();
+    updateCompanionConnHint();
+  };
+});
+
+document.querySelectorAll('[data-gemini-model]').forEach((btn) => {
+  btn.onclick = () => {
+    const modelId = btn.dataset.geminiModel;
+    if (!modelId) return;
+    $('model').value = modelId;
+    safeSetItem('cm.model', modelId);
+    if ($('aiConnResult')) $('aiConnResult').textContent = '';
+    syncAiPresetUi();
+    updateCompanionConnHint();
+    toast(`Model set to ${modelId}`);
+  };
+});
+
 ['endpoint', 'model'].forEach((id) => {
   $(id).value = safeGetItem('cm.' + id, '');
   $(id).onchange = () => {
     safeSetItem('cm.' + id, $(id).value.trim());
+    syncAiPresetUi();
     updateCompanionConnHint();
   };
-  $(id).oninput = updateCompanionConnHint;
+  $(id).oninput = () => {
+    syncAiPresetUi();
+    updateCompanionConnHint();
+  };
 });
+syncAiPresetUi();
 $('apiKey').oninput = () => {
   updateCompanionConnHint();
   updateApiKeyStatusPill();
@@ -5873,6 +5957,7 @@ if ($('testAiConnBtn')) {
       return;
     }
     const endpoint = $('endpoint').value.trim().replace(/\/$/, '');
+    const model = $('model').value.trim();
     const key = $('apiKey').value.trim();
     if (!endpoint || !key) {
       if (resEl) resEl.textContent = 'Enter endpoint URL and paste API key first.';
@@ -5880,14 +5965,10 @@ if ($('testAiConnBtn')) {
     }
     $('testAiConnBtn').disabled = true;
     if (resEl) resEl.textContent = 'Testing…';
-    const t0 = performance.now();
     try {
-      const resp = await fetch(`${endpoint}/models`, {
-        headers: { Authorization: `Bearer ${key}` },
-      });
-      const ms = Math.round(performance.now() - t0);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      if (resEl) resEl.textContent = `✓ Connected (${ms}ms)`;
+      const { provider, ms } = await testAiConnection({ endpoint, model, apiKey: key });
+      const label = provider === 'gemini' ? 'Gemini connected' : 'Connected';
+      if (resEl) resEl.textContent = `✓ ${label} (${ms}ms)`;
       toast('Kardex AI endpoint reachable');
     } catch (err) {
       if (resEl) resEl.textContent = `✕ Failed: ${err.message}`;
@@ -6061,18 +6142,13 @@ FORMATTING REQUIREMENTS:
 - Return ONLY the clean markdown note content. No introductory pleasantries, no backticks enclosing the entire block.`;
 
   try {
-    const res = await fetch(`${endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: promptContent }],
-        temperature: 0.2,
-      }),
+    const reply = await callAiChat({
+      endpoint,
+      model,
+      apiKey: key,
+      prompt: promptContent,
+      temperature: 0.2,
     });
-    const data = await res.json();
-    const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) throw new Error(data?.error?.message || 'No response from model');
 
     const cleanSoap = reply.replace(/^```(?:markdown)?\n/, '').replace(/\n```$/, '').trim();
     stagedVoiceSoap = cleanSoap;
@@ -7094,14 +7170,7 @@ async function structureAdmittingHistoryWithAi(rawText) {
   toast('Structuring de-identified admitting history via Kardex AI...');
   try {
     const prompt = `Organize the following de-identified clinical admitting note strictly into these exact labeled headings without inventing any clinical values or vitals:\nChief Complaint:\nHistory of Present Illness:\nPast Medical History:\nFamily History:\nPersonal and Social History:\nAdmission Vitals:\nPhysical Examination:\nAdmitting Impression:\nPlan of Care:\n\nInput:\n${redacted.text}`;
-    const res = await fetch(`${endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }] }),
-    });
-    const data = await res.json();
-    const replyText = data?.choices?.[0]?.message?.content;
-    if (!replyText) throw new Error('Empty AI response');
+    const replyText = await callAiChat({ endpoint, model, apiKey: key, prompt });
     applyParsedAdmittingHistory(replyText);
   } catch (err) {
     toast(`Kardex AI structuring failed: ${err.message} — try local Auto-Parse`);

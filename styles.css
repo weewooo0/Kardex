@@ -2090,6 +2090,52 @@ html.kb-open .modal-overlay {
   flex: 1;
   min-width: 140px;
 }
+.ai-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+.ai-preset-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-txt);
+}
+.ai-gemini-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+}
+.ai-gemini-hint[hidden] {
+  display: none;
+}
+.ai-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ai-model-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-txt);
+}
+.ai-key-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ai-key-link:hover {
+  text-decoration: underline;
+}
 .companion-conn-bar {
   display: flex;
   justify-content: space-between;

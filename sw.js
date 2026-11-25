@@ -1,9 +1,10 @@
-const CACHE = 'kardex-v38';
+const CACHE = 'kardex-v39';
 const WHISPER_RUNTIME_CACHE = 'companion-md-whisper-runtime';
 const SHELL = [
   './',
   './index.html',
   './app.js',
+  './ai.js',
   './theme.js',
   './census.js',
   './labs.js',

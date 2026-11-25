@@ -793,8 +793,23 @@
               <span id="apiKeyStatusPill" class="pill" role="status" aria-live="polite">NO KEY IN RAM</span>
             </div>
             <div class="field mb-10">
-              <label for="endpoint">OpenAI-compatible endpoint</label>
-              <input id="endpoint" placeholder="https://…/v1">
+              <label>Quick Provider Preset</label>
+              <div class="ai-preset-row" role="group" aria-label="Quick AI provider preset">
+                <button type="button" id="presetGeminiBtn" class="chip ai-preset-chip" data-ai-preset="gemini" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Google Gemini</button>
+                <button type="button" id="presetOpenAiBtn" class="chip ai-preset-chip" data-ai-preset="openai" aria-pressed="false">OpenAI</button>
+                <button type="button" id="presetCustomBtn" class="chip ai-preset-chip" data-ai-preset="custom" aria-pressed="false">Custom</button>
+              </div>
+              <div id="geminiPresetHint" class="ai-gemini-hint" hidden>
+                <div class="ai-model-chips" role="group" aria-label="Google Gemini model choices">
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-2.5-flash" aria-pressed="false">2.5 Flash (Free)</button>
+                  <button type="button" class="chip sm-chip ai-model-chip" data-gemini-model="gemini-2.5-pro" aria-pressed="false">2.5 Pro</button>
+                </div>
+                <a class="ai-key-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Get free Gemini key ↗</a>
+              </div>
+            </div>
+            <div class="field mb-10">
+              <label for="endpoint">API endpoint (Google Gemini or OpenAI-compatible)</label>
+              <input id="endpoint" placeholder="https://generativelanguage.googleapis.com/v1beta">
             </div>
             <div class="field mb-10">
               <label for="model">Model</label>
