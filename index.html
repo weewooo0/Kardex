@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#0b1020">
+<meta name="theme-color" content="#0C0C0D">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -15,9 +15,9 @@
 <script>
 (() => {
   try {
-    const colors = { midnight: '#0b1020', amoled: '#000000', slate: '#0f172a', charcoal: '#141210', daylight: '#f1f5f9' };
+    const colors = { obsidian: '#0C0C0D', paper: '#F7F7F5' };
     const saved = String(localStorage.getItem('cm.theme') || '').trim().toLowerCase();
-    const id = Object.prototype.hasOwnProperty.call(colors, saved) ? saved : 'midnight';
+    const id = saved === 'paper' || saved === 'daylight' || saved === 'light' ? 'paper' : 'obsidian';
     document.documentElement.dataset.theme = id;
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute('content', colors[id]);
@@ -242,131 +242,182 @@
       <circle cx="12" cy="12" r="9"/>
       <path d="M12 7v5l3 2"/>
     </symbol>
+    <symbol id="ico-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/>
+      <path d="m20 20-3.5-3.5"/>
+    </symbol>
+    <symbol id="ico-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m6 9 6 6 6-6"/>
+    </symbol>
+    <symbol id="ico-nav-rounds-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="4" width="16" height="17" rx="2"/>
+      <path d="M9 2h6v3H9z"/>
+      <path d="M8 10h8M8 14h5"/>
+    </symbol>
+    <symbol id="ico-nav-rounds-filled" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M8 2a1 1 0 0 0-1 1v1H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V3a1 1 0 0 0-1-1H8zm1 2h6v1H9V4zm-1 6h8v1.8H8V10zm0 4h5v1.8H8V14z"/>
+    </symbol>
+    <symbol id="ico-nav-editor-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 20h9"/>
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+    </symbol>
+    <symbol id="ico-nav-editor-filled" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M18.3 2.7a2.4 2.4 0 0 1 3.4 3.4L8.6 19.2 3 21l1.8-5.6L18.3 2.7zM12 19h9v2h-9v-2z"/>
+    </symbol>
+    <symbol id="ico-nav-charts-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12h4l3-7 4 14 3-7h4"/>
+    </symbol>
+    <symbol id="ico-nav-charts-filled" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12h4l3-7 4 14 3-7h4"/>
+    </symbol>
+    <symbol id="ico-nav-notes-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>
+      <path d="M14 3v5h5M8 13h8M8 17h5"/>
+    </symbol>
+    <symbol id="ico-nav-notes-filled" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M6 2a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6H6zm7 1.5L18.5 9H13V3.5zM8 12h8v1.8H8V12zm0 4h5v1.8H8V16z"/>
+    </symbol>
+    <symbol id="ico-nav-settings-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/>
+    </symbol>
+    <symbol id="ico-nav-settings-filled" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/>
+    </symbol>
   </defs>
 </svg>
 <div id="swUpdateBanner" class="sw-update-banner" role="status" aria-live="polite" hidden>
   <span class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> A new version of Kardex is ready offline.</span>
   <div class="row tight">
     <button type="button" id="swReloadBtn" class="primary sm-btn">Reload Safely</button>
-    <button type="button" id="swDismissBtn" class="btn sm-btn" aria-label="Dismiss update banner">Later</button>
+    <button type="button" id="swDismissBtn" class="ghost-action" aria-label="Dismiss update banner">Later</button>
   </div>
 </div>
 
-<header>
-  <div class="header-top-row">
-    <div class="brand"><svg class="ui-ico" aria-hidden="true"><use href="#ico-brand-folders"></use></svg> Kardex</div>
-    <div class="header-pills">
-      <span id="offlinePill" class="pill offline-pill" role="status" aria-live="polite" hidden>OFFLINE</span>
-      <span id="backupReminderPill" class="pill warn clickable-pill" role="button" tabindex="0" title="Export a full local backup" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> Backup</span>
-      <div id="shieldStatus" class="pill" role="status" aria-live="polite">LOCAL ONLY</div>
-      <button type="button" id="quickThemeToggleBtn" class="theme-quick-btn" title="Switch to Daylight Ward theme" aria-label="Switch to Daylight Ward theme"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sun"></use></svg></button>
+<header class="app-header">
+  <div class="header-brand-row">
+    <div class="app-logo-mark" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="3" width="6.5" height="18" rx="1.2" fill="currentColor" opacity="0.28"/>
+        <rect x="6" y="3" width="4.2" height="18" rx="1" fill="currentColor"/>
+        <path d="M11.6 11.4L19.4 3.6C19.8 3.2 20.5 3.5 20.5 4.1V7.2C20.5 7.5 20.4 7.8 20.1 8L15.1 12.7L20.3 18.2C20.6 18.5 20.6 18.9 20.6 19.3V20.2C20.6 20.6 20.2 21 19.8 21H16.8C16.5 21 16.2 20.9 16 20.6L11.6 15.6V11.4Z" fill="currentColor"/>
+      </svg>
+    </div>
+    <div id="headerTitleWrap" class="header-title-wrap">
+      <h1 id="headerModeTitle" class="app-title">Rounds</h1>
+      <div id="roundsShiftClock" class="app-subtitle">—</div>
+      <div id="headerModeSubtitle" class="app-subtitle" hidden></div>
+    </div>
+  </div>
+  <div class="header-actions">
+    <span id="offlinePill" class="status-meta warn offline-pill" role="status" aria-live="polite" hidden>OFFLINE</span>
+    <div id="roundsHeaderActions" class="header-rounds-actions">
+      <button type="button" id="inboxBtn" class="icon-circle-btn" title="Dump / Labs inbox" aria-label="Dump / Labs">
+        <svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg>
+        <span id="inboxBadge" class="icon-dot-badge" hidden>0</span>
+      </button>
+      <button type="button" id="quickNewPtBtn" class="icon-circle-btn solid" title="Add new patient chart" aria-label="Add Patient">
+        <svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg>
+      </button>
+      <div class="header-more-wrap">
+        <button type="button" id="roundsMoreBtn" class="icon-circle-btn" aria-haspopup="menu" aria-expanded="false" title="More rounds actions" aria-label="More rounds actions">
+          <svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg>
+        </button>
+        <div id="roundsMoreMenu" class="popover-menu" role="menu" hidden>
+          <button type="button" id="roundsToggleExpandAllBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-down"></use></svg><span>Expand All</span></button>
+          <button type="button" id="copyCensusBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg><span>Copy Census</span></button>
+          <button type="button" id="handoverBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-handover"></use></svg><span>Handover Report</span></button>
+          <button type="button" id="roundsBackupMenuBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg><span>Backup Workspace</span></button>
+          <button type="button" id="loadSyntheticBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg><span>Load Sample Census</span></button>
+        </div>
+      </div>
     </div>
   </div>
   <nav class="nav-modes" aria-label="Primary navigation">
-    <button type="button" id="navRoundsBtn" class="mode-btn active" aria-pressed="true"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-clipboard-list"></use></svg></span><span class="nav-lbl">Rounds</span></button>
-    <button type="button" id="navEditorBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-edit-box"></use></svg></span><span class="nav-lbl">Editor</span></button>
-    <button type="button" id="navLibraryBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-folder-pulse"></use></svg></span><span class="nav-lbl">Charts</span></button>
-    <button type="button" id="navScratchBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-file-lines"></use></svg></span><span class="nav-lbl">Notes</span></button>
-    <button type="button" id="navSettingsBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-sliders-v"></use></svg></span><span class="nav-lbl">Settings</span></button>
+    <button type="button" id="navRoundsBtn" class="mode-btn active" aria-pressed="true"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico ico-outline"><use href="#ico-nav-rounds-outline"></use></svg><svg class="ui-ico ico-filled"><use href="#ico-nav-rounds-filled"></use></svg></span><span class="nav-lbl">Rounds</span></button>
+    <button type="button" id="navEditorBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico ico-outline"><use href="#ico-nav-editor-outline"></use></svg><svg class="ui-ico ico-filled"><use href="#ico-nav-editor-filled"></use></svg></span><span class="nav-lbl">Editor</span></button>
+    <button type="button" id="navLibraryBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico ico-outline"><use href="#ico-nav-charts-outline"></use></svg><svg class="ui-ico ico-filled"><use href="#ico-nav-charts-filled"></use></svg></span><span class="nav-lbl">Charts</span></button>
+    <button type="button" id="navScratchBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico ico-outline"><use href="#ico-nav-notes-outline"></use></svg><svg class="ui-ico ico-filled"><use href="#ico-nav-notes-filled"></use></svg></span><span class="nav-lbl">Notes</span></button>
+    <button type="button" id="navSettingsBtn" class="mode-btn" aria-pressed="false"><span class="nav-ico" aria-hidden="true"><svg class="ui-ico ico-outline"><use href="#ico-nav-settings-outline"></use></svg><svg class="ui-ico ico-filled"><use href="#ico-nav-settings-filled"></use></svg><span id="navSettingsBackupDot" class="nav-alert-dot" hidden></span></span><span class="nav-lbl">Settings</span></button>
   </nav>
 </header>
 
 <main>
   <!-- ==================== ROUNDS / CENSUS MODE ==================== -->
   <section id="roundsSection" class="view-panel">
-    <div class="duty-clock-bar">
-      <span id="roundsShiftClock" class="cf-meta">Duty Window: —</span>
-      <button type="button" id="roundsCompactBtn" class="btn sm-btn subtle" aria-pressed="false" title="Toggle compact card density"><svg class="ui-ico" aria-hidden="true"><use href="#ico-compress"></use></svg> Compact View</button>
+    <div id="backupReminderBanner" class="backup-warn-banner" role="status" aria-live="polite" hidden>
+      <span id="backupBannerText" class="backup-warn-msg">Backup overdue — export a local JSON snapshot.</span>
+      <div class="row tight">
+        <button type="button" id="backupBannerNowBtn" class="btn-secondary sm-btn">Backup</button>
+        <button type="button" id="backupBannerDismissBtn" class="ghost-action" aria-label="Dismiss backup reminder"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      </div>
     </div>
 
     <div id="storageRiskBanner" class="storage-warn-banner" role="status" aria-live="polite" hidden>
       <span class="storage-warn-msg"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> <strong>Browser Tab Storage:</strong> Mobile browsers can clear tab data after inactivity. <strong>Add to Home Screen</strong> or export a local backup.</span>
       <div class="row">
-        <button type="button" id="storageRiskBackupBtn" class="primary sm-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Backup Now</button>
-        <button type="button" id="storageRiskDismissBtn" class="btn sm-btn subtle" aria-label="Dismiss storage alert">Dismiss</button>
+        <button type="button" id="storageRiskBackupBtn" class="btn-secondary sm-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Backup Now</button>
+        <button type="button" id="storageRiskDismissBtn" class="ghost-action" aria-label="Dismiss storage alert">Dismiss</button>
       </div>
     </div>
 
-    <!-- Census Metrics Banner (Interactive Quick Filters) -->
-    <div class="census-summary" role="group" aria-label="Census quick filters">
-      <button type="button" class="stat-card" data-stat-filter="active" aria-pressed="true">
-        <span class="stat-val" id="statActive">0</span>
-        <span class="stat-lbl">Active Census</span>
-      </button>
-      <button type="button" class="stat-card" data-stat-filter="active" aria-pressed="false">
-        <span class="stat-val" id="statUpdated">0</span>
-        <span class="stat-lbl">Updated Today</span>
-      </button>
-      <button type="button" class="stat-card" data-stat-filter="needs-update" aria-pressed="false">
-        <span class="stat-val" id="statNeedsUpdate">0</span>
-        <span class="stat-lbl">Needs Update</span>
-      </button>
-      <button type="button" class="stat-card" data-stat-filter="open-tasks" aria-pressed="false">
-        <span class="stat-val" id="statPending">0</span>
-        <span class="stat-lbl">Open Tasks</span>
-      </button>
-    </div>
-
-    <!-- Rounds Toolbar & Filter -->
+    <!-- Rounds Tabs & Search -->
     <div class="rounds-toolbar">
-      <div class="filter-chips-wrap">
-        <div class="filter-chips" id="roundsFilterChips">
-          <button type="button" class="chip active" data-filter="active" aria-pressed="true">All Active <span class="chip-count" id="chipCountActive">0</span></button>
-          <button type="button" class="chip" data-filter="needs-update" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> Needs Update <span class="chip-count" id="chipCountNeedsUpdate">0</span></button>
-          <button type="button" class="chip" data-filter="open-tasks" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pin"></use></svg> Open Tasks <span class="chip-count" id="chipCountOpenTasks">0</span></button>
-          <button type="button" class="chip" data-filter="all" aria-pressed="false">All Charts <span class="chip-count" id="chipCountAll">0</span></button>
-          <button type="button" id="addRoundsCategoryBtn" class="chip add-cat-chip" title="Create a custom patient category tab"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Tab</button>
+      <div class="rounds-tabs-bar">
+        <div class="filter-chips-wrap">
+          <div class="filter-chips" id="roundsFilterChips">
+            <button type="button" class="chip active" data-filter="active" aria-pressed="true">All Active <span class="chip-count" id="chipCountActive">0</span></button>
+            <button type="button" class="chip" data-filter="needs-update" aria-pressed="false">Needs Update <span class="chip-count" id="chipCountNeedsUpdate">0</span></button>
+            <button type="button" class="chip" data-filter="open-tasks" aria-pressed="false">Open Tasks <span class="chip-count" id="chipCountOpenTasks">0</span></button>
+            <button type="button" class="chip" data-filter="all" aria-pressed="false">All Charts <span class="chip-count" id="chipCountAll">0</span></button>
+            <button type="button" id="addRoundsCategoryBtn" class="chip add-cat-chip" title="Create a custom patient category tab">+ Tab</button>
+          </div>
+          <form id="roundsAddCatForm" class="inline-cat-form" hidden>
+            <label for="roundsAddCatInput" class="sr-only">New category tab name</label>
+            <input id="roundsAddCatInput" type="text" maxlength="28" autocapitalize="words" enterkeyhint="done" placeholder="New tab (e.g. ICU, Pay, Team A)...">
+            <button type="submit" class="primary sm-btn">Add</button>
+            <button type="button" id="roundsAddCatCancelBtn" class="ghost-action" aria-label="Cancel adding tab"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+          </form>
         </div>
-        <form id="roundsAddCatForm" class="inline-cat-form" hidden>
-          <label for="roundsAddCatInput" class="sr-only">New category tab name</label>
-          <input id="roundsAddCatInput" type="text" maxlength="28" autocapitalize="words" enterkeyhint="done" placeholder="New tab (e.g. ICU, Pay, Team A)...">
-          <button type="submit" class="primary sm-btn">Add</button>
-          <button type="button" id="roundsAddCatCancelBtn" class="btn sm-btn subtle" aria-label="Cancel adding tab"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
-        </form>
       </div>
-      <div class="toolbar-search-row">
-        <div class="toolbar-search">
+      <div class="rounds-search-row">
+        <div class="rounds-search-box">
+          <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
           <label for="bedSearchInput" class="sr-only">Filter patients</label>
-          <input id="bedSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Filter by bed, name, dx, drips, labs, pending..." spellcheck="false">
+          <input id="bedSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Filter by bed, name, dx..." spellcheck="false">
         </div>
-        <div class="toolbar-sort">
+        <div class="rounds-sort-wrap">
+          <span class="sort-lbl" aria-hidden="true">Sort:</span>
           <label for="roundsSortSelect" class="sr-only">Sort census</label>
-          <select id="roundsSortSelect" aria-label="Sort rounds cards">
-            <option value="bed">Sort: Bed Order</option>
-            <option value="needs-update">Sort: Needs Update</option>
-            <option value="open-tasks">Sort: Open Tasks</option>
-            <option value="ap">Sort: Attending</option>
+          <select id="roundsSortSelect" aria-label="Sort rounds rows">
+            <option value="bed">Bed</option>
+            <option value="needs-update">Needs Update</option>
+            <option value="open-tasks">Open Tasks</option>
+            <option value="ap">Attending</option>
           </select>
         </div>
       </div>
-      <div class="toolbar-actions">
-        <button type="button" id="copyCensusBtn" class="btn toolbar-icon-btn" title="Copy formatted daily census text" aria-label="Copy Census"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg><span class="toolbar-btn-label"> Copy Census</span></button>
-        <button type="button" id="handoverBtn" class="btn toolbar-icon-btn" title="Compile end-of-shift endorsement report" aria-label="Handover"><svg class="ui-ico" aria-hidden="true"><use href="#ico-handover"></use></svg><span class="toolbar-btn-label"> Handover</span></button>
-        <button type="button" id="inboxBtn" class="btn toolbar-icon-btn" title="Paste lab results or chat relays into charts" aria-label="Dump / Labs"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg><span class="toolbar-btn-label"> Dump / Labs</span> <span id="inboxBadge" class="inbox-count-badge" hidden>0</span></button>
-        <button type="button" id="quickNewPtBtn" class="primary toolbar-icon-btn" title="Add new patient chart" aria-label="Add Patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg><span class="toolbar-btn-label"> Add Patient</span></button>
-        <button type="button" id="loadSyntheticBtn" class="btn subtle" title="Load sample synthetic patients"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Census</button>
-      </div>
     </div>
 
-    <!-- Bed-by-Bed Scutsheet Grid -->
-    <div id="roundsGrid" class="scut-grid"></div>
+    <!-- Bed-by-Bed Clinical Ledger -->
+    <div id="roundsGrid" class="ledger-list"></div>
+    <div id="roundsFooterSummary" class="ledger-list-footer" aria-live="polite"></div>
   </section>
 
   <!-- ==================== CHART EDITOR MODE ==================== -->
   <div id="editorSection" class="view-panel" hidden>
     <div class="editor-topbar sticky-editor-bar">
       <div class="editor-topbar-left">
-        <button type="button" id="backToRoundsBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Rounds</button>
+        <button type="button" id="backToRoundsBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Rounds</button>
         <div class="editor-patient-nav" id="editorPatientNav" aria-label="Switch patient chart">
-          <button type="button" id="prevPatientBtn" class="btn sm-btn" title="Previous patient by bed" aria-label="Previous patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-left"></use></svg></button>
+          <button type="button" id="prevPatientBtn" class="ghost-action" title="Previous patient by bed" aria-label="Previous patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-left"></use></svg></button>
           <select id="editorPatientSelect" aria-label="Select patient chart"></select>
-          <button type="button" id="nextPatientBtn" class="btn sm-btn" title="Next patient by bed" aria-label="Next patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-right"></use></svg></button>
+          <button type="button" id="nextPatientBtn" class="ghost-action" title="Next patient by bed" aria-label="Next patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-right"></use></svg></button>
         </div>
       </div>
       <div class="editor-topbar-right">
-        <span id="saveStatusPill" class="pill safe" role="status" aria-live="polite"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Saved</span>
-        <button type="button" id="undoChartBtn" class="btn sm-btn subtle" title="Undo recent chart edit" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Undo</button>
-        <button type="button" id="saveBtn" class="primary">Save</button>
+        <span id="saveStatusPill" class="status-meta safe" role="status" aria-live="polite"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Saved</span>
+        <button type="button" id="undoChartBtn" class="ghost-action" title="Undo recent chart edit" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Undo</button>
+        <button type="button" id="saveBtn" class="editor-save-btn">Save</button>
       </div>
     </div>
 
@@ -376,38 +427,42 @@
       <p class="cf-meta">Choose a patient from Rounds or Chart Explorer, or create a fresh chart below. All charts stay strictly in local browser IndexedDB.</p>
       <div class="row mt-10">
         <button type="button" id="emptyNewPatientBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Patient</button>
-        <button type="button" id="emptyBrowseRoundsBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Go to Rounds</button>
-        <button type="button" id="emptyBrowseChartsBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-folder-pulse"></use></svg> Browse Charts</button>
+        <button type="button" id="emptyBrowseRoundsBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Go to Rounds</button>
+        <button type="button" id="emptyBrowseChartsBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-folder-pulse"></use></svg> Browse Charts</button>
       </div>
     </section>
 
     <section id="workspace" class="panel">
       <div class="panel-head editor-panel-head">
         <div class="editor-title-block">
-          <h2 id="noteTitle">Untitled note</h2>
+          <h2 id="noteTitle" class="editor-note-title">Untitled note</h2>
           <span class="editor-hint">Local IndexedDB chart · Auto-saves after edits · Rebuilds title on room/name edit</span>
         </div>
         <div class="editor-actions-bar">
-          <button type="button" id="appendShiftBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update</button>
-          <button type="button" id="editorDictateBtn" class="btn dictate-btn" title="Dictate or transcribe voice note into this chart"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Dictate</button>
-          <button type="button" id="chartLabsBtn" class="btn" title="Parse and trend pasted labs for this patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Parse Labs</button>
-          <button type="button" id="chartCalcBtn" class="btn" title="Renal calculators, drip rates &amp; safety audit"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg> Calc / Audit</button>
-          <button type="button" id="copyUpdateBtn" class="btn" title="Copy latest update as clean plain text (contains Raw PHI)"><svg class="ui-ico" aria-hidden="true"><use href="#ico-share"></use></svg> Copy Update</button>
-          <details id="editorMoreMenu" class="more-menu">
-            <summary class="btn subtle" aria-label="More chart actions"><svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg> More</summary>
-            <div class="more-menu-popover">
-              <button type="button" id="exportBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md (Raw)</button>
-              <button type="button" id="exportDeidBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Export de-identified</button>
-              <button type="button" id="deleteBtn" class="menu-item-btn danger-item"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Delete Chart</button>
-            </div>
-          </details>
+          <div class="editor-primary-bar">
+            <button type="button" id="appendShiftBtn" class="primary editor-cta-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update</button>
+            <button type="button" id="editorDictateBtn" class="btn-secondary dictate-btn editor-sec-btn" title="Dictate or transcribe voice note into this chart"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Dictate</button>
+          </div>
+          <div class="editor-utility-strip">
+            <button type="button" id="chartLabsBtn" class="ghost-action" title="Parse and trend pasted labs for this patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Parse Labs</button>
+            <button type="button" id="chartCalcBtn" class="ghost-action" title="Renal calculators, drip rates &amp; safety audit"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg> Calc / Audit</button>
+            <button type="button" id="copyUpdateBtn" class="ghost-action" title="Copy latest update as clean plain text (contains Raw PHI)"><svg class="ui-ico" aria-hidden="true"><use href="#ico-share"></use></svg> Copy Update</button>
+            <details id="editorMoreMenu" class="more-menu">
+              <summary class="ghost-action" aria-label="More chart actions"><svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg> More</summary>
+              <div class="more-menu-popover">
+                <button type="button" id="exportBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md (Raw)</button>
+                <button type="button" id="exportDeidBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Export de-identified</button>
+                <button type="button" id="deleteBtn" class="menu-item-btn danger-item"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Delete Chart</button>
+              </div>
+            </details>
+          </div>
         </div>
       </div>
 
       <details id="profileDetails" class="profile-dropdown">
         <summary class="profile-summary">
           <span id="profileSummaryText"><svg class="ui-ico" aria-hidden="true"><use href="#ico-user"></use></svg> Patient Details</span>
-          <span class="profile-summary-badge">Edit Details ▾</span>
+          <span class="profile-summary-badge">Edit ▾</span>
         </summary>
         <div class="profile-dropdown-body">
           <div class="grid">
@@ -443,7 +498,7 @@
               <label for="profileAddCatInput" class="sr-only">New patient category name</label>
               <input id="profileAddCatInput" type="text" maxlength="28" autocapitalize="words" enterkeyhint="done" placeholder="New category (e.g. ICU, Pay)...">
               <button type="submit" class="primary sm-btn">Add</button>
-              <button type="button" id="profileAddCatCancelBtn" class="btn sm-btn subtle" aria-label="Cancel adding category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+              <button type="button" id="profileAddCatCancelBtn" class="ghost-action" aria-label="Cancel adding category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
             </form>
           </div>
         </div>
@@ -452,12 +507,12 @@
       <details id="admittingHistoryDetails" class="profile-dropdown">
         <summary class="profile-summary">
           <span id="admittingHistorySummaryText" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Admitting History</span>
-          <span class="profile-summary-badge">View / Edit ▾</span>
+          <span class="profile-summary-badge">View ▾</span>
         </summary>
         <div class="profile-dropdown-body">
           <div id="admittingHistoryBody" class="admitting-history-body"></div>
           <div class="row tight mt-8">
-            <button type="button" id="editAdmittingHistoryBtn" class="btn sm-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Edit / Dictate Admitting History</button>
+            <button type="button" id="editAdmittingHistoryBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Edit / Dictate Admitting History</button>
           </div>
         </div>
       </details>
@@ -477,8 +532,11 @@
             <div id="timelineDateChips" class="filter-chips"></div>
           </div>
           <div class="toolbar-search">
-            <label for="timelineSearchInput" class="sr-only">Search timeline</label>
-            <input id="timelineSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search events, labs, meds, vitals..." spellcheck="false">
+            <div class="rounds-search-box">
+              <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
+              <label for="timelineSearchInput" class="sr-only">Search timeline</label>
+              <input id="timelineSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search events, labs, meds, vitals..." spellcheck="false">
+            </div>
           </div>
         </div>
         <div id="chartTimelineList" class="timeline-list"></div>
@@ -490,9 +548,9 @@
             <div id="labsPanelChips" class="filter-chips" role="group" aria-label="Filter lab panels"></div>
           </div>
           <div class="labs-export-actions">
-            <button type="button" id="labsCopyBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
-            <button type="button" id="labsExportMdBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
-            <button type="button" id="labsExportCsvBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
+            <button type="button" id="labsCopyBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
+            <button type="button" id="labsExportMdBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
+            <button type="button" id="labsExportCsvBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
           </div>
         </div>
         <div id="chartLabsContent" class="labs-summary-content"></div>
@@ -507,7 +565,7 @@
         <summary class="companion-summary">
           <div class="row tight">
             <span class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Kardex AI (De-identified Prompt Builder)</span>
-            <span id="guardPill" class="pill" role="status" aria-live="polite">CHECKING</span>
+            <span id="guardPill" class="status-meta" role="status" aria-live="polite">CHECKING</span>
           </div>
           <span class="profile-summary-badge">Toggle ▾</span>
         </summary>
@@ -517,13 +575,13 @@
 
           <div class="companion-conn-bar">
             <span id="companionConnHint" class="cf-meta">AI connection not configured</span>
-            <button type="button" id="openSettingsFromEditorBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-settings"></use></svg> Settings</button>
+            <button type="button" id="openSettingsFromEditorBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-settings"></use></svg> Settings</button>
           </div>
 
           <div class="row">
             <button type="button" id="previewBtn" class="primary">Build redacted preview</button>
-            <button type="button" id="copyBtn" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy safe prompt</button>
-            <button type="button" id="sendBtn" disabled>Send to Kardex AI</button>
+            <button type="button" id="copyBtn" class="btn-secondary" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy safe prompt</button>
+            <button type="button" id="sendBtn" class="btn-secondary" disabled>Send to Kardex AI</button>
           </div>
 
           <label for="preview" class="lbl">Outgoing text — nothing here is sent until you confirm</label>
@@ -538,17 +596,12 @@
 
   <!-- ==================== CHART EXPLORER MODE ==================== -->
   <section id="librarySection" class="view-panel" hidden>
-    <div class="editor-topbar">
-      <button type="button" id="backToRoundsFromLibraryBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Back to Rounds</button>
-      <span class="editor-hint">All local patient charts on this device · Tap any chart to open</span>
-    </div>
-
     <section id="library" class="panel">
       <div class="panel-head">
         <h2>Chart Explorer</h2>
         <div class="row">
           <button type="button" id="newBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> New</button>
-          <label class="btn file"><svg class="ui-ico" aria-hidden="true"><use href="#ico-upload"></use></svg> Import .md<input id="importInput" type="file" accept=".md,.markdown,.txt" multiple hidden></label>
+          <label class="btn-secondary file"><svg class="ui-ico" aria-hidden="true"><use href="#ico-upload"></use></svg> Import .md<input id="importInput" type="file" accept=".md,.markdown,.txt" multiple hidden></label>
         </div>
       </div>
 
@@ -562,26 +615,32 @@
         </div>
         <div class="toolbar-search-row">
           <div class="toolbar-search">
-            <label for="librarySearchInput" class="sr-only">Search charts</label>
-            <input id="librarySearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search charts by name, room, dx, or text..." spellcheck="false">
+            <div class="rounds-search-box">
+              <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
+              <label for="librarySearchInput" class="sr-only">Search charts</label>
+              <input id="librarySearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search charts by name, room, dx, or text..." spellcheck="false">
+            </div>
           </div>
           <div class="toolbar-sort">
-            <label for="librarySortSelect" class="sr-only">Sort charts</label>
-            <select id="librarySortSelect" aria-label="Sort chart explorer">
-              <option value="recent">Sort: Recent</option>
-              <option value="bed">Sort: Bed Order</option>
-              <option value="name">Sort: Name</option>
-            </select>
+            <div class="rounds-sort-wrap">
+              <span class="sort-lbl" aria-hidden="true">Sort:</span>
+              <label for="librarySortSelect" class="sr-only">Sort charts</label>
+              <select id="librarySortSelect" aria-label="Sort chart explorer">
+                <option value="recent">Recent</option>
+                <option value="bed">Bed Order</option>
+                <option value="name">Name</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
 
       <div id="noteList" class="list"></div>
       <div class="row tight mt-10">
-        <button type="button" id="backupBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Full Backup (.json)</button>
-        <button type="button" id="exportAllMdBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Export All (.md)</button>
-        <label class="btn file"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Restore Backup<input id="restoreInput" type="file" accept="application/json,.json" hidden></label>
-        <button type="button" id="librarySampleBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Census</button>
+        <button type="button" id="backupBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Full Backup (.json)</button>
+        <button type="button" id="exportAllMdBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Export All (.md)</button>
+        <label class="ghost-action file"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Restore Backup<input id="restoreInput" type="file" accept="application/json,.json" hidden></label>
+        <button type="button" id="librarySampleBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Census</button>
       </div>
       <p class="fine">All notes live in browser IndexedDB/storage on this device. Full backups include patient charts, Quick Notes, Inbox Queue, and shift templates.</p>
     </section>
@@ -589,36 +648,34 @@
 
   <!-- ==================== QUICK NOTES / SCRATCHPAD MODE ==================== -->
   <section id="scratchSection" class="view-panel" hidden>
-    <div class="editor-topbar">
-      <button type="button" id="backToRoundsFromScratchBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Back to Rounds</button>
-      <span class="editor-hint">Quick clinical notes &amp; drip preps · Stored locally &amp; included in workspace backups</span>
-    </div>
-
     <div class="rounds-toolbar">
       <div class="filter-chips-wrap">
         <div class="filter-chips" id="scratchFilterChips">
           <button type="button" class="chip active" data-cat="all" aria-pressed="true">All</button>
-          <button type="button" class="chip" data-cat="Drips" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-droplet"></use></svg> Drips</button>
-          <button type="button" class="chip" data-cat="Protocols" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Protocols</button>
-          <button type="button" class="chip" data-cat="Meds" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pill"></use></svg> Meds</button>
-          <button type="button" class="chip" data-cat="Scratchpad" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Scratchpad</button>
+          <button type="button" class="chip" data-cat="Drips" aria-pressed="false">Drips</button>
+          <button type="button" class="chip" data-cat="Protocols" aria-pressed="false">Protocols</button>
+          <button type="button" class="chip" data-cat="Meds" aria-pressed="false">Meds</button>
+          <button type="button" class="chip" data-cat="Scratchpad" aria-pressed="false">Scratchpad</button>
         </div>
       </div>
       <div class="toolbar-search">
-        <label for="scratchSearchInput" class="sr-only">Search quick notes</label>
-        <input id="scratchSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search notes, drips, dilutions..." spellcheck="false">
+        <div class="rounds-search-box">
+          <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
+          <label for="scratchSearchInput" class="sr-only">Search quick notes</label>
+          <input id="scratchSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search notes, drips, dilutions..." spellcheck="false">
+        </div>
       </div>
       <div class="toolbar-actions">
         <button type="button" id="newScratchBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> New Note</button>
-        <button type="button" id="loadSampleScratchBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Refs</button>
-        <button type="button" id="exportScratchBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export (.md)</button>
+        <button type="button" id="loadSampleScratchBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Refs</button>
+        <button type="button" id="exportScratchBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export (.md)</button>
       </div>
     </div>
 
     <section id="scratchEditorCard" class="panel mb-14" hidden>
       <div class="panel-head">
         <h2 id="scratchEditorHeading">New Quick Note</h2>
-        <button type="button" id="cancelScratchBtn" class="btn close-btn" title="Close" aria-label="Close note editor"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+        <button type="button" id="cancelScratchBtn" class="close-btn" title="Close" aria-label="Close note editor"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
       </div>
       <div class="grid-scratch-meta">
         <div class="field">
@@ -642,7 +699,7 @@
       <textarea id="scratchBodyInput" rows="6" spellcheck="false" placeholder="Jot down drip concentrations, preparation steps, infusion rates, or reminders..."></textarea>
       <div class="row mt-10">
         <button type="button" id="saveScratchBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save Note</button>
-        <button type="button" id="cancelScratchFootBtn" class="btn">Cancel</button>
+        <button type="button" id="cancelScratchFootBtn" class="btn-secondary">Cancel</button>
       </div>
     </section>
 
@@ -652,18 +709,13 @@
 
   <!-- ==================== SETTINGS MODE ==================== -->
   <section id="settingsSection" class="view-panel" hidden>
-    <div class="editor-topbar">
-      <button type="button" id="backToRoundsFromSettingsBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Back to Rounds</button>
-      <span class="editor-hint">Device-only preferences · Nothing leaves your phone</span>
-    </div>
-
     <div class="settings-shell">
       <nav id="settingsSubnav" class="settings-subnav" role="tablist" aria-label="Settings categories">
         <button type="button" id="settingsTabAppearance" class="settings-nav-btn active" role="tab" data-settings-tab="appearance" aria-controls="settingsPanelAppearance" aria-selected="true">
           <span class="settings-nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-sliders-h"></use></svg></span>
           <span class="settings-nav-text">
             <span class="settings-nav-title">Appearance</span>
-            <span class="settings-nav-sub">Palettes &amp; accent</span>
+            <span class="settings-nav-sub">True Obsidian &amp; Ink &amp; Paper</span>
           </span>
         </button>
         <button type="button" id="settingsTabShifts" class="settings-nav-btn" role="tab" data-settings-tab="shifts" aria-controls="settingsPanelShifts" aria-selected="false">
@@ -707,22 +759,11 @@
         <div id="settingsPanelAppearance" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabAppearance">
           <section id="appearanceSettingsCard" class="panel">
             <div class="panel-head">
-              <h2>Appearance &amp; Color Palette</h2>
-              <span id="themeStatusPill" class="pill" role="status" aria-live="polite">Midnight Teal</span>
+              <h2>Appearance</h2>
+              <span id="themeStatusPill" class="status-meta" role="status" aria-live="polite">True Obsidian</span>
             </div>
-            <div id="themePaletteGrid" class="theme-palette-grid" role="radiogroup" aria-label="Color palette presets"></div>
-            <div class="accent-section">
-              <span class="accent-section-lbl">Accent Color Override (Optional)</span>
-              <div class="accent-controls-row">
-                <div id="accentPresetsRow" class="accent-picker-row"></div>
-                <label class="accent-color-label" for="customAccentInput">
-                  <input type="color" id="customAccentInput" value="#14b8a6" aria-label="Pick custom accent color">
-                  <span>Custom</span>
-                </label>
-                <button type="button" id="resetAccentBtn" class="btn sm-btn subtle" disabled>Reset Accent</button>
-              </div>
-            </div>
-            <p class="fine">Palettes switch instantly via native CSS custom properties with zero runtime overhead and keep clinical alert colors legible.</p>
+            <div id="themePaletteGrid" class="theme-palette-grid" role="radiogroup" aria-label="Theme selection"></div>
+            <p class="fine">High-contrast Swiss monochrome surface modes reserve color strictly for clinical status signals.</p>
           </section>
         </div>
 
@@ -730,15 +771,15 @@
           <section id="shiftScheduleCard" class="panel">
             <div class="panel-head">
               <h2>Shift Schedule</h2>
-              <span id="shiftSchedulePill" class="pill" role="status" aria-live="polite">3 shifts</span>
+              <span id="shiftSchedulePill" class="status-meta" role="status" aria-live="polite">3 shifts</span>
             </div>
             <div class="lbl">Quick Presets</div>
             <div id="shiftPresetBtns" class="shift-presets-row"></div>
             <div class="lbl mt-10">Custom Shifts (Start Time &amp; Label)</div>
             <div id="shiftScheduleList" class="shift-schedule-list"></div>
             <div class="settings-actions">
-              <button type="button" id="addShiftSlotBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Shift</button>
-              <button type="button" id="resetShiftScheduleBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Default</button>
+              <button type="button" id="addShiftSlotBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Shift</button>
+              <button type="button" id="resetShiftScheduleBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Default</button>
             </div>
             <p class="fine">Sets your shift tabs across Add Update, Dictate, Dump / Labs, and the automatic Duty Window clock. Use <strong>Interim</strong> inside any update dialog for significant events between shifts.</p>
           </section>
@@ -749,8 +790,8 @@
             <div class="panel-head">
               <h2>Default Update Template</h2>
               <div class="row tight">
-                <span id="tplDirtyPill" class="pill warn" hidden>UNSAVED</span>
-                <span class="pill">LOCAL ONLY</span>
+                <span id="tplDirtyPill" class="status-meta warn" hidden>UNSAVED</span>
+                <span class="status-meta">LOCAL ONLY</span>
               </div>
             </div>
 
@@ -785,8 +826,8 @@
             <pre id="tplLivePreview" class="preview tpl-preview-box"></pre>
 
             <div class="settings-actions">
-              <button type="button" id="loadMorningTemplateBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Load Morning Preset</button>
-              <button type="button" id="resetTemplateBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Standard</button>
+              <button type="button" id="loadMorningTemplateBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Load Morning Preset</button>
+              <button type="button" id="resetTemplateBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Standard</button>
               <button type="button" id="saveTemplateBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save Template</button>
             </div>
 
@@ -805,7 +846,7 @@
           <section class="panel">
             <div class="panel-head">
               <h2>Kardex AI &amp; API Credentials</h2>
-              <span id="apiKeyStatusPill" class="pill" role="status" aria-live="polite">NO KEY IN RAM</span>
+              <span id="apiKeyStatusPill" class="status-meta" role="status" aria-live="polite">NO KEY IN RAM</span>
             </div>
             <div class="field mb-10">
               <label>Quick Provider Preset</label>
@@ -832,7 +873,7 @@
               <label for="model">Model</label>
               <div class="input-with-btn">
                 <input id="model" placeholder="e.g. gemini-3.8-flash">
-                <button type="button" id="fetchAiModelsBtn" class="btn sm-btn subtle" title="Fetch models available on your API key"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Load My Models</button>
+                <button type="button" id="fetchAiModelsBtn" class="btn-secondary sm-btn" title="Fetch models available on your API key"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Load My Models</button>
               </div>
               <select id="aiLiveModelSelect" class="ai-live-model-select" aria-label="Models available on your API key" hidden></select>
             </div>
@@ -840,11 +881,11 @@
               <label for="apiKey">API key (memory only — cleared on reload)</label>
               <div class="input-with-btn">
                 <input id="apiKey" type="password" placeholder="paste key">
-                <button type="button" id="toggleApiKeyBtn" class="btn sm-btn subtle" aria-label="Show or hide API key" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-eye"></use></svg></button>
+                <button type="button" id="toggleApiKeyBtn" class="btn-secondary sm-btn" aria-label="Show or hide API key" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-eye"></use></svg></button>
               </div>
             </div>
             <div class="settings-actions">
-              <button type="button" id="testAiConnBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plug"></use></svg> Test Connection</button>
+              <button type="button" id="testAiConnBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plug"></use></svg> Test Connection</button>
               <span id="aiConnResult" class="cf-meta" role="status" aria-live="polite"></span>
             </div>
             <p class="fine">Endpoint and model name are saved locally in browser storage on this device. Your API key stays strictly in volatile memory and is automatically cleared when you close or reload the app.</p>
@@ -855,7 +896,7 @@
           <section id="whisperSettingsCard" class="panel">
             <div class="panel-head">
               <h2>Offline Voice Transcription (WASM Whisper)</h2>
-              <span id="whisperSettingsBadge" class="pill" role="status" aria-live="polite">NOT DOWNLOADED</span>
+              <span id="whisperSettingsBadge" class="status-meta" role="status" aria-live="polite">NOT DOWNLOADED</span>
             </div>
             <div class="field mb-10">
               <label for="whisperModelSelect">On-Device Whisper Model (Quantized WebAssembly)</label>
@@ -879,7 +920,7 @@
             </div>
             <div class="settings-actions">
               <button type="button" id="whisperPreloadBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Preload Offline Model</button>
-              <button type="button" id="whisperClearCacheBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Clear Cached Model</button>
+              <button type="button" id="whisperClearCacheBtn" class="ghost-action danger-ghost"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Clear Cached Model</button>
             </div>
             <p class="fine">One-time download of open-source Whisper ONNX weights &amp; WASM runtime into your phone’s local browser cache. All voice audio is processed strictly on-device with zero external uploads.</p>
           </section>
@@ -890,7 +931,7 @@
             <section id="storagePwaCard" class="panel">
               <div class="panel-head">
                 <h2>Local Storage, PWA &amp; Updates</h2>
-                <span id="storagePersistPill" class="pill" role="status" aria-live="polite">CHECKING</span>
+                <span id="storagePersistPill" class="status-meta" role="status" aria-live="polite">CHECKING</span>
               </div>
               <div class="storage-status-box">
                 <div class="storage-stat-row"><span class="cf-meta">Storage Quota</span><span id="storageQuotaText" class="cf-meta">—</span></div>
@@ -898,7 +939,7 @@
                 <div class="storage-stat-row"><span class="cf-meta">Offline App Cache</span><span id="swUpdateStatusText" class="cf-meta">Checking...</span></div>
               </div>
               <div class="settings-actions">
-                <button type="button" id="checkSwUpdateBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Check for Update</button>
+                <button type="button" id="checkSwUpdateBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Check for Update</button>
                 <button type="button" id="settingsBackupBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Full Backup (.json)</button>
               </div>
               <p class="fine">Tip: Install via Share → Add to Home Screen (iOS) or Install App (Android) for stronger offline retention and zero browser toolbar clutter.</p>
@@ -934,7 +975,7 @@
         <h3 id="voiceModalTitle" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Bedside Voice Dictation</h3>
         <div id="voiceModalSubtitle" class="modal-sub">Room 412 · Juan B. Dela Cruz</div>
       </div>
-      <button type="button" id="voiceModalClose" class="btn close-btn" title="Close" aria-label="Close voice dictation modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="voiceModalClose" class="close-btn" title="Close" aria-label="Close voice dictation modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -960,11 +1001,11 @@
       <div id="whisperModalBar" class="whisper-bar">
         <div class="whisper-meta-row">
           <span class="whisper-title ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Offline Whisper (WASM)</span>
-          <span id="whisperModalStatus" class="pill" role="status" aria-live="polite">NOT DOWNLOADED</span>
+          <span id="whisperModalStatus" class="status-meta" role="status" aria-live="polite">NOT DOWNLOADED</span>
           <div class="row tight">
-            <button type="button" id="whisperModalLoadBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-bolt"></use></svg> Load Offline Model</button>
-            <button type="button" id="whisperRetryBtn" class="btn subtle" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Retry</button>
-            <button type="button" id="whisperCancelBtn" class="btn subtle" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg> Unload</button>
+            <button type="button" id="whisperModalLoadBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-bolt"></use></svg> Load Offline Model</button>
+            <button type="button" id="whisperRetryBtn" class="ghost-action" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Retry</button>
+            <button type="button" id="whisperCancelBtn" class="ghost-action" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg> Unload</button>
           </div>
         </div>
         <div id="whisperModalProgressWrap" class="whisper-progress-wrap" hidden>
@@ -984,7 +1025,7 @@
               <span class="tg-mic-icon" aria-hidden="true"><svg class="ui-ico"><use href="#ico-mic"></use></svg></span>
               <span class="tg-mic-label">Tap to Record</span>
             </button>
-            <label class="btn subtle file" title="Transcribe an audio file locally on this device">
+            <label class="btn-secondary file" title="Transcribe an audio file locally on this device">
               <svg class="ui-ico" aria-hidden="true"><use href="#ico-upload"></use></svg> Upload Audio
               <input id="voiceUploadInput" type="file" accept="audio/*" hidden>
             </label>
@@ -1003,7 +1044,7 @@
           <canvas id="audioCanvas" class="audio-wave-canvas" width="300" height="48" aria-hidden="true"></canvas>
 
           <div class="rec-actions-row">
-            <button type="button" id="cancelRecBtn" class="btn danger tg-ctrl-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Cancel</button>
+            <button type="button" id="cancelRecBtn" class="btn-secondary tg-ctrl-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Cancel</button>
             <button type="button" id="stopRecBtn" class="primary tg-ctrl-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-stop"></use></svg> Stop &amp; Review</button>
           </div>
         </div>
@@ -1012,7 +1053,7 @@
         <div id="voiceAudioContainer" class="rec-state" hidden>
           <div class="audio-preview-row">
             <audio id="voiceAudioPlayer" controls class="tg-audio-player"></audio>
-            <button type="button" id="rerecordBtn" class="btn subtle" title="Record again"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Re-record</button>
+            <button type="button" id="rerecordBtn" class="ghost-action" title="Record again"><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Re-record</button>
           </div>
           <div class="whisper-review-actions">
             <button type="button" id="whisperTranscribeBtn" class="primary whisper-transcribe-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Transcribe Offline (WASM)</button>
@@ -1023,7 +1064,7 @@
       <div class="transcript-section">
         <div class="transcript-hdr">
           <label for="voiceTranscript" class="lbl" style="margin: 0;">Clinical Notes / Dictation (Editable)</label>
-          <span id="transcribeBadge" class="pill safe" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Transcribed</span>
+          <span id="transcribeBadge" class="status-meta safe" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Transcribed</span>
         </div>
         <textarea id="voiceTranscript" rows="4" placeholder="Dictated text appears here. You can edit, correct numbers, or tap here to use your phone keyboard's mic..."></textarea>
         <div class="mobile-keyboard-tip">
@@ -1034,7 +1075,7 @@
       <div id="voiceSoapReviewBox" class="voice-soap-review" hidden>
         <div class="transcript-hdr">
           <label for="voiceSoapPreviewText" class="lbl ico-inline" style="margin: 0;"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Staged AI Note Preview (Verify numbers &amp; flags before filing)</label>
-          <button type="button" id="voiceSoapRestoreBtn" class="btn sm-btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Restore Raw</button>
+          <button type="button" id="voiceSoapRestoreBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Restore Raw</button>
         </div>
         <textarea id="voiceSoapPreviewText" rows="6" spellcheck="false"></textarea>
         <div class="row tight mt-8">
@@ -1046,7 +1087,7 @@
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="voiceAppendRawBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Append Raw Note</button>
+      <button type="button" id="voiceAppendRawBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Append Raw Note</button>
       <button type="button" id="voiceFormatSoapBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Format Note (AI)</button>
     </div>
   </div>
@@ -1060,7 +1101,7 @@
         <h3 id="shiftModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update (Shift / Interim)</h3>
         <div id="shiftModalSubtitle" class="modal-sub">Room — Patient</div>
       </div>
-      <button type="button" id="shiftModalClose" class="btn close-btn" title="Close" aria-label="Close shift modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="shiftModalClose" class="close-btn" title="Close" aria-label="Close shift modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -1079,7 +1120,7 @@
         <div class="date-inline-field">
           <label for="shiftDateInput" class="lbl-inline">Date:</label>
           <input id="shiftDateInput" type="date" class="compact-date-input">
-          <button type="button" id="shiftDateYesterdayBtn" class="btn sm-btn subtle" title="Set duty date to yesterday">Yest.</button>
+          <button type="button" id="shiftDateYesterdayBtn" class="ghost-action" title="Set duty date to yesterday">Yest.</button>
         </div>
       </div>
 
@@ -1115,7 +1156,7 @@
           <button type="button" id="shiftModeFormBtn" class="mode-btn active" role="tab" aria-selected="true" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Guided Entry</button>
           <button type="button" id="shiftModeRawBtn" class="mode-btn" role="tab" aria-selected="false" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
         </div>
-        <button type="button" id="shiftEditTemplateLink" class="btn sm-btn subtle" title="Choose which sections appear in Guided Entry"><svg class="ui-ico" aria-hidden="true"><use href="#ico-template-edit"></use></svg> Customize Fields</button>
+        <button type="button" id="shiftEditTemplateLink" class="ghost-action" title="Choose which sections appear in Guided Entry"><svg class="ui-ico" aria-hidden="true"><use href="#ico-template-edit"></use></svg> Customize Fields</button>
       </div>
 
       <div id="shiftGuidedForm" class="shift-guided-form"></div>
@@ -1127,7 +1168,7 @@
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="shiftAppendStayBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Append &amp; Stay</button>
+      <button type="button" id="shiftAppendStayBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Append &amp; Stay</button>
       <button type="button" id="shiftAppendEditBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Append &amp; Open Chart</button>
     </div>
   </div>
@@ -1141,7 +1182,7 @@
         <h3 id="handoverModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-handover"></use></svg> End-of-Shift Handover</h3>
         <div id="handoverModalSubtitle" class="modal-sub">Compilation summary</div>
       </div>
-      <button type="button" id="handoverModalClose" class="btn close-btn" title="Close" aria-label="Close handover modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="handoverModalClose" class="close-btn" title="Close" aria-label="Close handover modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -1149,7 +1190,7 @@
         <div class="date-inline-field">
           <label for="handoverDateInput" class="lbl-inline">Duty Date:</label>
           <input id="handoverDateInput" type="date" class="compact-date-input">
-          <button type="button" id="handoverYesterdayBtn" class="btn sm-btn subtle">Yest.</button>
+          <button type="button" id="handoverYesterdayBtn" class="ghost-action">Yest.</button>
         </div>
         <div class="date-inline-field">
           <label for="handoverScopeSelect" class="lbl-inline">Scope:</label>
@@ -1166,17 +1207,17 @@
       <div class="handover-status-bar">
         <span id="handoverModeLabel" class="cf-meta">Viewing: Raw PHI (Local Only)</span>
         <div class="row tight">
-          <button type="button" id="handoverToggleDeidBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Preview De-identified</button>
-          <span id="handoverGuardPill" class="pill" role="status" aria-live="polite">LOCAL ONLY</span>
+          <button type="button" id="handoverToggleDeidBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Preview De-identified</button>
+          <span id="handoverGuardPill" class="status-meta" role="status" aria-live="polite">LOCAL ONLY</span>
         </div>
       </div>
       <div id="handoverPreview" class="preview handover-preview"></div>
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="copyHandoverBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> Copy Raw PHI</button>
+      <button type="button" id="copyHandoverBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> Copy Raw PHI</button>
       <button type="button" id="copyHandoverDeidBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy De-identified</button>
-      <button type="button" id="exportHandoverBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
+      <button type="button" id="exportHandoverBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
     </div>
   </div>
 </div>
@@ -1189,7 +1230,7 @@
         <h3 id="inboxModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg> Dump-to-Chart Inbox &amp; Lab Parser</h3>
         <div class="modal-sub">Paste Viber/Telegram relays or EMR labs · Trended on-device</div>
       </div>
-      <button type="button" id="inboxModalClose" class="btn close-btn" title="Close" aria-label="Close inbox modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="inboxModalClose" class="close-btn" title="Close" aria-label="Close inbox modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -1197,8 +1238,8 @@
       <textarea id="inboxPasteInput" rows="4" spellcheck="false" placeholder="Paste messy Viber/Telegram update or raw lab results here..."></textarea>
       <div class="row mt-8 mb-10">
         <button type="button" id="inboxCaptureBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Capture to Inbox</button>
-        <button type="button" id="inboxSampleBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Lab/Relay</button>
-        <button type="button" id="inboxClearFiledBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-broom"></use></svg> Clear Filed</button>
+        <button type="button" id="inboxSampleBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Lab/Relay</button>
+        <button type="button" id="inboxClearFiledBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-broom"></use></svg> Clear Filed</button>
       </div>
 
       <div id="inboxQueueSection" class="inbox-queue-section" hidden>
@@ -1214,7 +1255,7 @@
             <label for="inboxTargetSelect">Target Patient Chart</label>
             <select id="inboxTargetSelect"></select>
           </div>
-          <span id="inboxCensusFlag" class="pill">NO PATIENT</span>
+          <span id="inboxCensusFlag" class="status-meta">NO PATIENT</span>
         </div>
 
         <div class="inbox-controls-row">
@@ -1253,7 +1294,7 @@
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="inboxCopyRelayBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Lab Relay</button>
+      <button type="button" id="inboxCopyRelayBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Lab Relay</button>
       <button type="button" id="inboxFileBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg> File to Chart</button>
     </div>
   </div>
@@ -1267,7 +1308,7 @@
         <h3 id="calcModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg> Clinical Calculators &amp; Safety Audit</h3>
         <div class="modal-sub">Deterministic on-device math · STE §8 &amp; §11 guards (zero cloud calls)</div>
       </div>
-      <button type="button" id="calcModalClose" class="btn close-btn" title="Close" aria-label="Close calculators modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="calcModalClose" class="close-btn" title="Close" aria-label="Close calculators modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -1313,8 +1354,8 @@
             <div class="field"><label for="calcOverrideCr">SCr (mg/dL)</label><input id="calcOverrideCr" type="number" inputmode="decimal" enterkeyhint="next" step="0.01" min="0.05" max="30" placeholder="mg/dL"></div>
           </div>
           <div class="row tight mt-8">
-            <button type="button" id="calcResetOverridesBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Chart Inputs</button>
-            <button type="button" id="calcSaveProfileOverridesBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save Age / Sex / Weight to Chart</button>
+            <button type="button" id="calcResetOverridesBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset to Chart Inputs</button>
+            <button type="button" id="calcSaveProfileOverridesBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save Age / Sex / Weight to Chart</button>
           </div>
         </details>
 
@@ -1416,8 +1457,8 @@
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="calcCopySummaryBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy De-id Summary</button>
-      <button type="button" id="calcInsertChartBtn" class="btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg> Insert to Chart</button>
+      <button type="button" id="calcCopySummaryBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy De-id Summary</button>
+      <button type="button" id="calcInsertChartBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg> Insert to Chart</button>
       <button type="button" id="calcSaveNoteBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Save Drip to Notes</button>
     </div>
   </div>
@@ -1431,7 +1472,7 @@
         <h3 id="restoreModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Restore Workspace Backup</h3>
         <div id="restoreModalSubtitle" class="modal-sub">Review contents &amp; choose conflict behavior</div>
       </div>
-      <button type="button" id="restoreModalClose" class="btn close-btn" title="Close" aria-label="Close restore modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="restoreModalClose" class="close-btn" title="Close" aria-label="Close restore modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
     <div class="modal-body">
       <div id="restoreSummary" class="resolve-banner resolved"></div>
@@ -1446,7 +1487,7 @@
       <div id="restorePreviewList" class="restore-preview-list mt-10"></div>
     </div>
     <div class="modal-foot">
-      <button type="button" id="restoreCancelBtn" class="btn">Cancel</button>
+      <button type="button" id="restoreCancelBtn" class="btn-secondary">Cancel</button>
       <button type="button" id="restoreConfirmBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Apply Restore</button>
     </div>
   </div>
@@ -1460,13 +1501,13 @@
         <h3 id="manualCopyHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg> Manual Copy</h3>
         <div class="modal-sub">Clipboard access restricted — tap Select All, then Copy</div>
       </div>
-      <button type="button" id="manualCopyCloseBtn" class="btn close-btn" title="Close" aria-label="Close manual copy dialog"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="manualCopyCloseBtn" class="close-btn" title="Close" aria-label="Close manual copy dialog"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
     <div class="modal-body">
       <textarea id="manualCopyText" readonly rows="8" spellcheck="false" aria-label="Text to copy"></textarea>
     </div>
     <div class="modal-foot">
-      <button type="button" id="manualCopySelectBtn" class="btn">Select All</button>
+      <button type="button" id="manualCopySelectBtn" class="btn-secondary">Select All</button>
       <button type="button" id="manualCopyDoneBtn" class="primary">Done</button>
     </div>
   </div>
@@ -1480,7 +1521,7 @@
         <h3 id="admitModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Admit / Add Patient</h3>
         <div id="admitModalSubtitle" class="modal-sub">Manual form, pasted admitting history, or on-device dictation</div>
       </div>
-      <button type="button" id="admitModalClose" class="btn close-btn" title="Close" aria-label="Close admit patient modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      <button type="button" id="admitModalClose" class="close-btn" title="Close" aria-label="Close admit patient modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
     </div>
 
     <div class="modal-body">
@@ -1614,8 +1655,8 @@
         <textarea id="admitPasteInput" rows="10" spellcheck="false" placeholder="Paste Chief Complaint, HPI, PMH, Family/Social History, Vitals, PE, Impression, and Plan..."></textarea>
         <div class="row tight mt-8">
           <button type="button" id="admitParsePasteBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-bolt"></use></svg> Auto-Parse into Form</button>
-          <button type="button" id="admitSamplePasteBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Admitting Note</button>
-          <button type="button" id="admitAiStructurePasteBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Structure via Kardex AI</button>
+          <button type="button" id="admitSamplePasteBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Admitting Note</button>
+          <button type="button" id="admitAiStructurePasteBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Structure via Kardex AI</button>
         </div>
         <p class="fine">Auto-Parse runs 100% locally offline and fills the structured form fields &amp; PMH checkboxes for your review before saving.</p>
       </div>
@@ -1625,12 +1666,12 @@
         <div class="admit-dictate-bar">
           <div class="whisper-meta-row">
             <span class="whisper-title ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic-wave"></use></svg> On-Device Admitting Dictation</span>
-            <span id="admitWhisperStatus" class="pill" role="status" aria-live="polite">READY</span>
+            <span id="admitWhisperStatus" class="status-meta" role="status" aria-live="polite">READY</span>
           </div>
           <div class="row tight mt-8">
-            <button type="button" id="admitStartRecBtn" class="btn primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Record Audio</button>
-            <button type="button" id="admitStopRecBtn" class="btn danger" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-stop"></use></svg> Stop Recording</button>
-            <button type="button" id="admitWhisperTranscribeBtn" class="btn" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Transcribe Offline (Whisper)</button>
+            <button type="button" id="admitStartRecBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Record Audio</button>
+            <button type="button" id="admitStopRecBtn" class="danger" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-stop"></use></svg> Stop Recording</button>
+            <button type="button" id="admitWhisperTranscribeBtn" class="btn-secondary" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Transcribe Offline (Whisper)</button>
           </div>
           <div id="admitAudioWrap" class="mt-8" hidden>
             <audio id="admitAudioPlayer" controls class="tg-audio-player"></audio>
@@ -1640,16 +1681,68 @@
         <textarea id="admitDictateTranscript" rows="7" placeholder="Speak or tap here with your phone keyboard microphone (e.g. 'Chief complaint: chest pain. HPI: ... Past medical history: hypertensive 5 years...')"></textarea>
         <div class="row tight mt-8">
           <button type="button" id="admitParseDictateBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-bolt"></use></svg> Auto-Parse into Form</button>
-          <button type="button" id="admitAiStructureDictateBtn" class="btn subtle"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Structure via Kardex AI</button>
+          <button type="button" id="admitAiStructureDictateBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Structure via Kardex AI</button>
         </div>
         <p class="fine">Phone keyboard dictation works offline/natively on iOS &amp; Android, or record directly here and transcribe locally via cached Whisper WASM.</p>
       </div>
     </div>
 
     <div class="modal-foot">
-      <button type="button" id="admitCancelBtn" class="btn">Cancel</button>
-      <button type="button" id="admitBlankChartBtn" class="btn subtle">Quick Blank Chart</button>
+      <button type="button" id="admitCancelBtn" class="ghost-action">Cancel</button>
+      <button type="button" id="admitBlankChartBtn" class="btn-secondary">Quick Blank Chart</button>
       <button type="button" id="admitSaveBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Save &amp; Admit Patient</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bedside Pitch Pop-up Modal -->
+<div id="pitchModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="pitchModalHeading" hidden>
+  <div class="modal-box pitch-modal">
+    <div class="modal-head">
+      <div>
+        <h3 id="pitchModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Bedside Pitch</h3>
+        <div id="pitchModalSubtitle" class="modal-sub">De-identified clinical pitch right from Rounds</div>
+      </div>
+      <button type="button" id="pitchModalClose" class="close-btn" title="Close" aria-label="Close bedside pitch modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+    </div>
+
+    <div class="modal-body">
+      <div class="pitch-guard-bar">
+        <span id="pitchGuardPill" class="status-meta">CHECKING</span>
+        <span id="pitchConnMeta" class="cf-meta">Checking AI configuration...</span>
+      </div>
+
+      <div id="pitchPresets" class="pitch-presets" role="group" aria-label="Pitch format presets">
+        <button type="button" class="filter-chip active" data-pitch-preset="30s" aria-pressed="true">30s Bedside Pitch</button>
+        <button type="button" class="filter-chip" data-pitch-preset="oneliner" aria-pressed="false">1-Liner</button>
+        <button type="button" class="filter-chip" data-pitch-preset="soap" aria-pressed="false">SOAP Summary</button>
+        <button type="button" class="filter-chip" data-pitch-preset="overnight" aria-pressed="false">Overnight &amp; Plan</button>
+      </div>
+
+      <label for="pitchPromptInput" class="lbl">Prompt</label>
+      <textarea id="pitchPromptInput" rows="3" spellcheck="true"></textarea>
+
+      <details id="pitchPreviewDetails" class="pitch-preview-details mt-10">
+        <summary>De-identified Chart Preview <span id="pitchRedactedMeta" class="cf-meta"></span></summary>
+        <div id="pitchReport" class="fine mt-8"></div>
+        <pre id="pitchSafePreview" class="preview mt-8"></pre>
+      </details>
+
+      <div id="pitchReplyWrap" class="pitch-reply-wrap mt-12" hidden>
+        <div class="pitch-reply-head">
+          <span class="lbl" style="margin: 0;">Generated Pitch</span>
+          <button type="button" id="pitchCopyReplyBtn" class="ghost-action" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Pitch</button>
+        </div>
+        <div id="pitchReply" class="reply mt-8" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div class="modal-foot pitch-modal-foot">
+      <div class="pitch-foot-secondary">
+        <button type="button" id="pitchCopyPromptBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Safe Prompt</button>
+        <button type="button" id="pitchOpenChartBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Open Chart</button>
+      </div>
+      <button type="button" id="pitchGenerateBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Generate Pitch</button>
     </div>
   </div>
 </div>

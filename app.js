@@ -11,15 +11,14 @@ import {
 } from './ai.js';
 import {
   THEME_PRESETS,
-  ACCENT_PRESETS,
-  ACCENT_VAR_NAMES,
   normalizeThemeId,
   normalizeHexColor,
   getThemePreset,
-  computeAccentVars,
 } from './theme.js';
 import {
   stripChatPrefixes,
+  parseRawLabs,
+  computeLabFlag,
   buildTrendedLabs,
   resolvePatientFromRelay,
   buildLabRelayMessage,
@@ -245,12 +244,12 @@ function safeRemoveItem(key) {
   } catch {}
 }
 
-let roundsCompactMode = safeGetItem(PREFS_COMPACT_KEY, 'false') === 'true';
-const expandedCompactIds = new Set();
+const expandedRowIds = new Set();
+const expandedApIds = new Set();
 const rawSavedSettingsTab = safeGetItem(SETTINGS_TAB_KEY, 'appearance');
 let activeSettingsTab = VALID_SETTINGS_TABS.has(rawSavedSettingsTab) ? rawSavedSettingsTab : 'appearance';
-let currentThemeId = normalizeThemeId(safeGetItem(THEME_KEY, 'midnight'));
-let currentAccentHex = normalizeHexColor(safeGetItem(ACCENT_KEY, ''));
+let currentThemeId = normalizeThemeId(safeGetItem(THEME_KEY, 'obsidian'));
+let backupBannerDismissed = false;
 
 const SETTINGS_PANEL_IDS = {
   appearance: 'settingsPanelAppearance',
@@ -340,7 +339,7 @@ function renderShiftScheduleSettings() {
     presetHost.innerHTML = Object.values(SHIFT_SCHEDULE_PRESETS)
       .map((preset) => {
         const isMatch = JSON.stringify(normalizeShiftSchedule(preset.shifts)) === currentKey;
-        return `<button type="button" class="btn sm-btn ${isMatch ? 'primary' : ''}" data-shift-preset="${esc(preset.id)}" aria-pressed="${isMatch}">${esc(preset.name)}</button>`;
+        return `<button type="button" class="${isMatch ? 'primary' : 'btn-secondary'} sm-btn" data-shift-preset="${esc(preset.id)}" aria-pressed="${isMatch}">${esc(preset.name)}</button>`;
       })
       .join('');
   }
@@ -352,7 +351,7 @@ function renderShiftScheduleSettings() {
           <div class="shift-slot-row" data-slot-idx="${idx}">
             <input type="time" class="shift-time-input" value="${esc(slot.time)}" aria-label="Shift ${idx + 1} start time">
             <input type="text" class="shift-label-input" maxlength="20" value="${esc(slot.label)}" placeholder="Label (e.g. 7am)" aria-label="Shift ${idx + 1} label">
-            <button type="button" class="btn sm-btn danger shift-slot-del-btn" data-del-idx="${idx}" aria-label="Remove shift ${esc(slot.label)}" ${canDel ? '' : 'disabled'}>${uiIcon('x')}</button>
+            <button type="button" class="ghost-action danger-ghost shift-slot-del-btn" data-del-idx="${idx}" aria-label="Remove shift ${esc(slot.label)}" ${canDel ? '' : 'disabled'}>${uiIcon('x')}</button>
           </div>`;
       })
       .join('');
@@ -396,70 +395,35 @@ function setSettingsTab(tabId, { persist = true, focus = false } = {}) {
   }
 }
 
-function applyAppearance(themeId = currentThemeId, accentHex = currentAccentHex, { persist = true } = {}) {
+function applyAppearance(themeId = currentThemeId, accentOrOpts = {}, maybeOpts = {}) {
+  const opts =
+    accentOrOpts && typeof accentOrOpts === 'object' ? accentOrOpts : maybeOpts || {};
+  const persist = opts.persist !== false;
   const preset = getThemePreset(themeId);
   currentThemeId = preset.id;
-  currentAccentHex = normalizeHexColor(accentHex);
 
   const root = document.documentElement;
   root.dataset.theme = preset.id;
+  for (const varName of ['--accent', '--accent-strong', '--accent-border', '--accent-dim', '--accent-soft', '--accent-tint', '--accent-txt', '--accent-on-solid']) {
+    root.style.removeProperty(varName);
+  }
 
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', preset.themeColor);
 
-  const accentVars = currentAccentHex ? computeAccentVars(currentAccentHex, preset.mode) : null;
-  if (accentVars) {
-    for (const [varName, value] of Object.entries(accentVars)) {
-      root.style.setProperty(varName, value);
-    }
-  } else {
-    for (const varName of ACCENT_VAR_NAMES) {
-      root.style.removeProperty(varName);
-    }
-  }
-
   if (persist) {
     safeSetItem(THEME_KEY, preset.id);
-    if (preset.mode === 'dark') {
-      safeSetItem(LAST_DARK_THEME_KEY, preset.id);
-    }
-    if (currentAccentHex) {
-      safeSetItem(ACCENT_KEY, currentAccentHex);
-    } else {
-      safeRemoveItem(ACCENT_KEY);
-    }
+    safeRemoveItem(ACCENT_KEY);
   }
 
   if ($('themeStatusPill')) {
-    $('themeStatusPill').textContent = currentAccentHex ? `${preset.name} · Custom Accent` : preset.name;
-  }
-
-  const quickBtn = $('quickThemeToggleBtn');
-  if (quickBtn) {
-    const isLight = preset.mode === 'light';
-    quickBtn.innerHTML = uiIcon(isLight ? 'moon' : 'sun');
-    const nextLabel = isLight ? 'Switch to dark theme' : 'Switch to Daylight Ward theme';
-    quickBtn.title = nextLabel;
-    quickBtn.setAttribute('aria-label', nextLabel);
+    $('themeStatusPill').textContent = preset.name;
   }
 
   if ($('themePaletteGrid')) {
     $('themePaletteGrid').querySelectorAll('.theme-swatch-card').forEach((card) => {
       card.setAttribute('aria-checked', String(card.dataset.themeId === preset.id));
     });
-  }
-
-  if ($('accentPresetsRow')) {
-    $('accentPresetsRow').querySelectorAll('.accent-dot').forEach((dot) => {
-      dot.classList.toggle('active', Boolean(currentAccentHex) && dot.dataset.accent === currentAccentHex);
-    });
-  }
-
-  if ($('customAccentInput')) {
-    $('customAccentInput').value = currentAccentHex || preset.swatches[2];
-  }
-  if ($('resetAccentBtn')) {
-    $('resetAccentBtn').disabled = !currentAccentHex;
   }
 }
 
@@ -476,63 +440,22 @@ function renderAppearanceControls() {
           <span class="theme-swatch-dots" aria-hidden="true">${dots}</span>
           <span class="theme-swatch-meta">
             <span class="theme-swatch-name">${esc(preset.name)}</span>
-            <span class="theme-swatch-mode">${preset.mode === 'light' ? 'Light · High Brightness' : 'Dark · Night Duty'}</span>
+            <span class="theme-swatch-mode">${preset.mode === 'light' ? 'Light · Ink & Paper' : 'Dark · True Obsidian'}</span>
           </span>
         </button>`;
     }).join('');
-  }
-
-  const row = $('accentPresetsRow');
-  if (row) {
-    row.innerHTML = ACCENT_PRESETS.map((a) => `
-      <button type="button" class="accent-dot" data-accent="${a.hex}" title="${esc(a.name)}" aria-label="Accent color ${esc(a.name)}" style="background:${a.hex}"></button>
-    `).join('');
   }
 }
 
 function initAppearanceSettings() {
   renderAppearanceControls();
-  applyAppearance(currentThemeId, currentAccentHex, { persist: false });
+  applyAppearance(currentThemeId, { persist: false });
 
   if ($('themePaletteGrid')) {
     $('themePaletteGrid').addEventListener('click', (e) => {
       const card = e.target.closest('.theme-swatch-card[data-theme-id]');
       if (!card) return;
-      applyAppearance(card.dataset.themeId, currentAccentHex, { persist: true });
-    });
-  }
-
-  if ($('accentPresetsRow')) {
-    $('accentPresetsRow').addEventListener('click', (e) => {
-      const dot = e.target.closest('.accent-dot[data-accent]');
-      if (!dot) return;
-      applyAppearance(currentThemeId, dot.dataset.accent, { persist: true });
-    });
-  }
-
-  if ($('customAccentInput')) {
-    $('customAccentInput').addEventListener('input', (e) => {
-      const val = normalizeHexColor(e.target.value);
-      if (val) applyAppearance(currentThemeId, val, { persist: true });
-    });
-  }
-
-  if ($('resetAccentBtn')) {
-    $('resetAccentBtn').addEventListener('click', () => {
-      applyAppearance(currentThemeId, '', { persist: true });
-    });
-  }
-
-  if ($('quickThemeToggleBtn')) {
-    $('quickThemeToggleBtn').addEventListener('click', () => {
-      const cur = getThemePreset(currentThemeId);
-      if (cur.mode === 'light') {
-        const lastDark = normalizeThemeId(safeGetItem(LAST_DARK_THEME_KEY, 'midnight'));
-        const targetDark = getThemePreset(lastDark).mode === 'dark' ? lastDark : 'midnight';
-        applyAppearance(targetDark, currentAccentHex, { persist: true });
-      } else {
-        applyAppearance('daylight', currentAccentHex, { persist: true });
-      }
+      applyAppearance(card.dataset.themeId, { persist: true });
     });
   }
 }
@@ -726,16 +649,18 @@ async function shareOrDownload({
 /* ---------- dirty state, undo stack, autosave & modal controller ---------- */
 function updateSaveStatusPill(state = 'saved') {
   const pill = $('saveStatusPill');
+  const saveBtn = $('saveBtn');
+  if (saveBtn) saveBtn.classList.toggle('is-dirty', state !== 'saved');
   if (!pill) return;
   if (state === 'saving') {
     pill.innerHTML = `${uiIcon('refresh')} Saving…`;
-    pill.className = 'pill';
+    pill.className = 'status-meta';
   } else if (state === 'unsaved') {
     pill.textContent = 'Unsaved';
-    pill.className = 'pill warn';
+    pill.className = 'status-meta warn';
   } else {
     pill.innerHTML = `${uiIcon('check')} Saved`;
-    pill.className = 'pill safe';
+    pill.className = 'status-meta safe';
   }
 }
 
@@ -814,7 +739,7 @@ function markCompanionStale() {
   if (!companionStale && gp.textContent !== 'CHECKING') {
     companionStale = true;
     gp.textContent = 'REBUILD NEEDED';
-    gp.className = 'pill warn';
+    gp.className = 'status-meta warn';
     $('copyBtn').disabled = true;
     $('sendBtn').disabled = true;
     lastSafe = null;
@@ -822,18 +747,27 @@ function markCompanionStale() {
 }
 
 function updateBackupReminderUi() {
-  const pill = $('backupReminderPill');
-  if (!pill) return;
+  const dot = $('navSettingsBackupDot');
+  const banner = $('backupReminderBanner');
+  const bannerText = $('backupBannerText');
+
   if (!notes.length) {
-    pill.hidden = true;
+    if (dot) dot.hidden = true;
+    if (banner) banner.hidden = true;
     return;
   }
+
   const lastAt = Number(safeGetItem(BACKUP_AT_KEY, '0'));
   const hoursSince = lastAt ? (Date.now() - lastAt) / 3600000 : Infinity;
-  pill.hidden = hoursSince < 24;
-  pill.title = lastAt
-    ? `Last backup was ${Math.round(hoursSince)}h ago — tap to back up`
-    : 'No full workspace backup yet — tap to back up';
+  const overdue = hoursSince >= 24;
+
+  if (dot) dot.hidden = !overdue;
+  if (banner) banner.hidden = !overdue || backupBannerDismissed;
+  if (bannerText) {
+    bannerText.textContent = lastAt
+      ? `Last workspace backup was ${Math.round(hoursSince)}h ago — export a local JSON snapshot.`
+      : 'No local workspace backup yet — export a JSON snapshot.';
+  }
 }
 
 function persistRecoveryDraftSync() {
@@ -993,13 +927,13 @@ async function refreshStorageAndPwaStatus({ requestPersist = false } = {}) {
   if (persistPill) {
     if (persisted === true) {
       persistPill.textContent = 'PERSISTENT';
-      persistPill.className = 'pill safe';
+      persistPill.className = 'status-meta safe';
     } else if (persisted === false) {
       persistPill.textContent = 'BEST-EFFORT';
-      persistPill.className = 'pill warn';
+      persistPill.className = 'status-meta warn';
     } else {
       persistPill.textContent = 'LOCAL ONLY';
-      persistPill.className = 'pill';
+      persistPill.className = 'status-meta';
     }
   }
 
@@ -1047,12 +981,17 @@ function updateDutyClockUi() {
   const el = $('roundsShiftClock');
   if (!el) return;
   const duty = getDutyDateStrings(new Date(), shiftSchedule);
-  const today = getTodayDateStrings();
   const shift = duty.shiftLabel || defaultShiftForHour();
   const dutyKey = `${duty.mmddyyyy}:${shift}`;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const parts = String(duty.mmddyyyy || '').split(/[-/]/);
+  const shortDate =
+    parts.length >= 2 && Number(parts[0]) >= 1 && Number(parts[0]) <= 12
+      ? `${months[Number(parts[0]) - 1]} ${Number(parts[1])}`
+      : duty.mmddyyyy;
   el.textContent = duty.isPostMidnightCarryover
-    ? `Duty Date: ${duty.mmddyyyy} (${shift} post-midnight) · Calendar: ${today.mmddyyyy}`
-    : `Duty Date: ${today.mmddyyyy} · Shift Window: ${shift}`;
+    ? `${shortDate} · ${shift} Shift (post-midnight)`
+    : `${shortDate} · ${shift} Shift`;
   if (lastDutyKey && lastDutyKey !== dutyKey && currentMode === 'rounds') {
     renderRounds();
   }
@@ -1167,7 +1106,36 @@ async function copyTextWithFallback(
 }
 
 /* ---------- view switcher ---------- */
+const MODE_TITLES = {
+  rounds: 'Rounds',
+  editor: 'Chart Editor',
+  library: 'Charts',
+  scratch: 'Quick Notes',
+  settings: 'Settings',
+};
+
+const MODE_SUBTITLES = {
+  editor: 'Local chart · Auto-saved',
+  library: 'All local patient charts',
+  scratch: 'Drips, protocols & scratchpad',
+  settings: 'Device-only preferences',
+};
+
+function closeAllMenus() {
+  const roundsMenu = $('roundsMoreMenu');
+  const roundsMoreBtn = $('roundsMoreBtn');
+  if (roundsMenu) roundsMenu.hidden = true;
+  if (roundsMoreBtn) roundsMoreBtn.setAttribute('aria-expanded', 'false');
+  document.querySelectorAll('.row-more-menu:not([hidden])').forEach((m) => {
+    m.hidden = true;
+  });
+  document.querySelectorAll('.row-more-btn[aria-expanded="true"]').forEach((b) => {
+    b.setAttribute('aria-expanded', 'false');
+  });
+}
+
 async function setMode(mode) {
+  closeAllMenus();
   if (currentMode === 'rounds' && mode !== 'rounds') {
     lastRoundsScrollY = window.scrollY;
   }
@@ -1185,6 +1153,14 @@ async function setMode(mode) {
   $('scratchSection').hidden = mode !== 'scratch';
   $('settingsSection').hidden = mode !== 'settings';
 
+  if ($('headerModeTitle')) $('headerModeTitle').textContent = MODE_TITLES[mode] || 'Kardex';
+  if ($('roundsShiftClock')) $('roundsShiftClock').hidden = mode !== 'rounds';
+  if ($('headerModeSubtitle')) {
+    $('headerModeSubtitle').textContent = MODE_SUBTITLES[mode] || '';
+    $('headerModeSubtitle').hidden = mode === 'rounds';
+  }
+  if ($('roundsHeaderActions')) $('roundsHeaderActions').hidden = mode !== 'rounds';
+
   const navMap = [
     ['navRoundsBtn', 'rounds'],
     ['navEditorBtn', 'editor'],
@@ -1199,12 +1175,14 @@ async function setMode(mode) {
   }
 
   if (mode === 'rounds') {
-    $('shieldStatus').textContent = 'LOCAL ONLY';
-    $('shieldStatus').className = 'pill';
+    if ($('shieldStatus')) {
+      $('shieldStatus').textContent = 'LOCAL ONLY';
+      $('shieldStatus').className = 'status-meta';
+    }
     renderRounds();
     requestAnimationFrame(() => {
       const card = lastEditedRoundsId
-        ? document.querySelector(`.scut-card[data-id="${CSS.escape(lastEditedRoundsId)}"]`)
+        ? document.querySelector(`.ledger-row[data-id="${CSS.escape(lastEditedRoundsId)}"]`)
         : null;
       if (card && typeof card.scrollIntoView === 'function') {
         card.scrollIntoView({ behavior: 'auto', block: 'nearest' });
@@ -1249,9 +1227,10 @@ function renderRoundsFilterChips(parsedPatients = null) {
   const needsUpdateCount = active.filter((p) => !p.isUpdatedToday).length;
   const openTasksCardsCount = active.filter((p) => p.pending.some((t) => !t.checked)).length;
 
-  const mkStaticChip = (filterKey, label, countId, countVal) => {
+  const mkStaticChip = (filterKey, label, countId, countVal, warnZeroCheck = false) => {
     const isAct = activeFilter === filterKey;
-    return `<button type="button" class="chip ${isAct ? 'active' : ''}" data-filter="${esc(filterKey)}" aria-pressed="${isAct}">${label} <span class="chip-count" id="${countId}">${countVal}</span></button>`;
+    const warnCls = warnZeroCheck && countVal > 0 ? ' is-warn' : '';
+    return `<button type="button" class="chip ${isAct ? 'active' : ''}" data-filter="${esc(filterKey)}" aria-pressed="${isAct}">${label} <span class="chip-count${warnCls}" id="${countId}">${countVal}</span></button>`;
   };
 
   const customHtml = customCategories
@@ -1272,11 +1251,11 @@ function renderRoundsFilterChips(parsedPatients = null) {
 
   host.innerHTML = [
     mkStaticChip('active', 'All Active', 'chipCountActive', active.length),
-    mkStaticChip('needs-update', `${uiIcon('alert')} Needs Update`, 'chipCountNeedsUpdate', needsUpdateCount),
-    mkStaticChip('open-tasks', `${uiIcon('pin')} Open Tasks`, 'chipCountOpenTasks', openTasksCardsCount),
+    mkStaticChip('needs-update', 'Needs Update', 'chipCountNeedsUpdate', needsUpdateCount, true),
+    mkStaticChip('open-tasks', 'Open Tasks', 'chipCountOpenTasks', openTasksCardsCount),
     customHtml,
     mkStaticChip('all', 'All Charts', 'chipCountAll', parsed.length),
-    `<button type="button" id="addRoundsCategoryBtn" class="chip add-cat-chip" title="Create a custom patient category tab">${uiIcon('plus')} Tab</button>`,
+    `<button type="button" id="addRoundsCategoryBtn" class="chip add-cat-chip" title="Create a custom patient category tab">+ Tab</button>`,
   ].join('');
 
   host.querySelectorAll('.chip[data-filter]').forEach((chip) => {
@@ -1363,30 +1342,110 @@ function getFilteredSortedRoundsPatients(parsedPatients = null) {
   return filtered;
 }
 
+function formatApCompactHtml(pt) {
+  const raw = String(pt.ap || '').trim();
+  if (!raw) return '';
+  const list = raw.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
+  if (!list.length) return '';
+  const apExpanded = expandedApIds.has(pt.id);
+  if (list.length <= 3 || apExpanded) {
+    return `AP: ${esc(list.join(', '))}`;
+  }
+  const shortTop = list.slice(0, 3).map((s) => s.replace(/^Dr\.?\s+/i, '').trim());
+  return `AP: ${esc(shortTop.join(', '))} <button type="button" class="ap-more-btn" data-ap-id="${esc(pt.id)}" title="Show all ${list.length} attending physicians" aria-label="Show ${list.length - 3} more attending physicians">+${list.length - 3}</button>`;
+}
+
+function formatCompactDemographics(pt) {
+  const ageSex = pt.age && pt.sex
+    ? `${pt.age}${pt.sex}`
+    : pt.age
+      ? `${pt.age}yo`
+      : pt.sex || '';
+  const wt = pt.weight ? `${String(pt.weight).replace(/\s*kg$/i, '')}kg` : '';
+  return [ageSex, wt, pt.service || ''].filter(Boolean);
+}
+
+function formatShortStatusDate(dateStr) {
+  const clean = String(dateStr || '').trim();
+  if (!clean) return 'No Date';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const m = clean.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+  if (m && Number(m[1]) >= 1 && Number(m[1]) <= 12) {
+    return `${months[Number(m[1]) - 1]} ${Number(m[2])}`;
+  }
+  return clean;
+}
+
+function formatKvTokenHtml(segment) {
+  const clean = String(segment || '').trim();
+  if (!clean) return '';
+  const colonMatch = clean.match(/^([A-Za-z0-9/+-]+)\s*[:=]\s*(.+)$/);
+  if (colonMatch) {
+    return `<span class="ledger-tok"><span class="tok-k">${esc(colonMatch[1])}</span> <strong class="tok-v">${esc(colonMatch[2].trim())}</strong></span>`;
+  }
+  const spaceMatch = clean.match(/^(BP|HR|PR|RR|Tmax|Temp|T|SpO2|O2(?:\s*sat)?|Ppeak|Pplat|BUR|TV|VTE|VT|MV|EMV|PEEP|FiO2|FIO2|FT|fTotal|I:E|PIP|In|Out|FB|Net)\s+(.+)$/i);
+  if (spaceMatch) {
+    return `<span class="ledger-tok"><span class="tok-k">${esc(spaceMatch[1])}</span> <strong class="tok-v">${esc(spaceMatch[2].trim())}</strong></span>`;
+  }
+  return `<span class="ledger-tok"><strong class="tok-v">${esc(clean)}</strong></span>`;
+}
+
+function formatMiddotStreamHtml(rawStr) {
+  const parts = String(rawStr || '')
+    .split(/\s*\|\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) return '';
+  return parts.map(formatKvTokenHtml).join('<span class="ledger-dot" aria-hidden="true"> · </span>');
+}
+
+function formatLedgerIoHtml(ioStr, cumFb, ageSuffix = '') {
+  const ioMain = formatMiddotStreamHtml(String(ioStr || '').replace(/\s*·\s*24h:\s*/i, ' · 24h: '));
+  const cumHtml = cumFb
+    ? `<div class="ledger-io-sub" title="${esc(cumFb.breakdownText)}${cumFb.hasPartialDay ? ' (includes shift-summed day)' : ''}">3d Cum ${esc(cumFb.totalText)} (${esc(String(cumFb.breakdownText || '').replace(/\s*\|\s*/g, ' · '))})</div>`
+    : '';
+  return `${ioMain}${ageSuffix}${cumHtml}`;
+}
+
+function formatLedgerLabsHtml(labsStr) {
+  const raw = String(labsStr || '').trim();
+  if (!raw) return '';
+  const items = parseRawLabs(raw);
+  if (!items.length) {
+    return esc(raw.replace(/\s*\|\s*/g, ' · '));
+  }
+  const tokens = items.map((item) => {
+    const flag = computeLabFlag(item.key, item.num, item.explicitFlag || '');
+    const abnCls = flag === 'H' || flag === 'L' ? ' lab-abn' : '';
+    const arrow = flag === 'H' ? ' ↑' : flag === 'L' ? ' ↓' : '';
+    const prev = item.dictatedPrevious ? ` <span class="lab-prev">(${esc(item.dictatedPrevious)})</span>` : '';
+    return `<span class="ledger-tok"><span class="tok-k">${esc(item.key)}</span> <strong class="tok-v${abnCls}">${esc(item.value)}${arrow}</strong>${prev}</span>`;
+  });
+  return tokens.join('<span class="ledger-dot" aria-hidden="true"> · </span>');
+}
+
 function renderRounds() {
   const container = $('roundsGrid');
-  container.classList.toggle('compact-grid', roundsCompactMode);
-  if ($('roundsSection')) $('roundsSection').classList.toggle('compact-mode', roundsCompactMode);
+  const footerSummary = $('roundsFooterSummary');
   updateDutyClockUi();
   if ($('roundsSortSelect')) $('roundsSortSelect').value = roundsSortMode;
-  if ($('roundsCompactBtn')) {
-    $('roundsCompactBtn').classList.toggle('active', roundsCompactMode);
-    $('roundsCompactBtn').setAttribute('aria-pressed', String(roundsCompactMode));
-  }
   const sampleBtn = $('loadSyntheticBtn');
   if (sampleBtn) sampleBtn.hidden = notes.length > 0;
 
   if (!notes.length) {
     container.innerHTML = `
-      <div style="grid-column: 1/-1; text-align: center; padding: 40px 20px; color: var(--mut);">
-        <p style="font-size: 16px; margin-bottom: 8px;">No patient charts yet on this device.</p>
-        <p style="font-size: 13px; margin-bottom: 16px;">Add a new patient or load the synthetic demo census to test rounds mode.</p>
-        <button type="button" id="emptyLoadBtn" class="primary" style="margin-right: 8px;">Load Sample Census</button>
-        <button type="button" id="emptyNewBtn" class="btn">+ Add Patient</button>
+      <div class="ledger-empty">
+        <p class="ledger-empty-title">No patient charts yet on this device.</p>
+        <p class="ledger-empty-sub">Add a new patient or load synthetic rounds charts to preview.</p>
+        <div class="ledger-empty-actions">
+          <button type="button" id="emptyLoadBtn" class="primary">Load Sample Census</button>
+          <button type="button" id="emptyNewBtn" class="btn-secondary">+ Add Patient</button>
+        </div>
       </div>`;
     const emptyLoad = $('emptyLoadBtn'), emptyNew = $('emptyNewBtn');
     if (emptyLoad) emptyLoad.onclick = loadSampleCensus;
     if (emptyNew) emptyNew.onclick = newNoteAndEdit;
+    if (footerSummary) footerSummary.textContent = '';
     updateCensusStats([]);
     return;
   }
@@ -1401,43 +1460,130 @@ function renderRounds() {
 
   const filtered = getFilteredSortedRoundsPatients(parsedPatients);
 
+  const expandAllBtn = $('roundsToggleExpandAllBtn');
+  if (expandAllBtn) {
+    const allOpen = filtered.length > 0 && filtered.every((p) => expandedRowIds.has(p.id));
+    expandAllBtn.querySelector('span').textContent = allOpen ? 'Collapse All' : 'Expand All';
+    expandAllBtn.dataset.allOpen = String(allOpen);
+  }
+
   if (!filtered.length) {
-    container.innerHTML = `
-      <div style="grid-column: 1/-1; text-align: center; padding: 30px; color: var(--mut);">
-        No patients match the current filter (${esc(activeFilter)}) or search.
-      </div>`;
+    container.innerHTML = `<div class="ledger-empty">No patients match the current filter or search.</div>`;
+    if (footerSummary) footerSummary.textContent = '0 SHOWN';
     return;
   }
 
   container.innerHTML = filtered
     .map((pt) => {
       const isStale = pt.isCensus && !pt.isCharity && !pt.isUpdatedToday;
-      let statusTag = '';
+      const isExpanded = expandedRowIds.has(pt.id);
+
+      let statusHtml = '';
       if (!pt.isCensus && !pt.isCharity) {
-        statusTag = `<span class="status-tag discharged">Discharged</span>`;
+        statusHtml = `<span class="ledger-status muted">Discharged</span>`;
       } else if (pt.isCharity) {
-        statusTag = `<span class="status-tag charity">Charity</span>`;
+        statusHtml = `<span class="ledger-status muted">Charity</span>`;
       } else if (pt.isUpdatedToday) {
-        statusTag = `<span class="status-tag fresh">${uiIcon('check')} ${esc(pt.latestShift || 'Today')}</span>`;
+        statusHtml = `<span class="ledger-status ok">✓ ${esc(pt.latestShift || 'Today')}</span>`;
       } else {
-        statusTag = `<span class="status-tag stale">${uiIcon('alert')} Needs Update (${esc(pt.latestDate || 'None')})</span>`;
+        statusHtml = `<span class="ledger-status warn">Needs Update · ${esc(formatShortStatusDate(pt.latestDate))}</span>`;
       }
 
-      const extraCatTags = (pt.categories || [])
-        .filter((c) => !(pt.isCharity && c.toLowerCase() === 'charity'))
-        .map((c) => `<span class="status-tag category">${esc(c)}</span>`)
-        .join('');
+      const demoParts = formatCompactDemographics(pt);
+      const compactApHtml = formatApCompactHtml(pt);
+      const compactMetaLine = [...demoParts.map((d) => esc(d)), compactApHtml].filter(Boolean).join(' <span class="ledger-dot">·</span> ');
 
-      const metaParts = [
-        pt.age ? `${esc(pt.age)}yo` : '',
-        pt.sex ? esc(pt.sex) : '',
-        pt.weight ? `${esc(String(pt.weight).replace(/\s*kg$/i, ''))} kg` : '',
-        pt.service ? esc(pt.service) : '',
-        pt.ap ? `AP: ${esc(pt.ap)}` : '',
-      ].filter(Boolean);
+      const expandedDemoLine = demoParts.map((d) => esc(d)).join(' · ');
+      const expandedApLine = pt.ap ? `AP: ${esc(pt.ap)}` : '';
 
-      // Pending items
-      const pendingHtml = pt.pending.length
+      const ageSuffix = !pt.isUpdatedToday && pt.latestDate
+        ? ` <span class="ledger-age">(${esc(formatShortStatusDate(pt.latestDate))})</span>`
+        : '';
+
+      const paramRows = [];
+      if (pt.vitals) {
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">VS</div>
+            <div class="ledger-v">${formatMiddotStreamHtml(pt.vitals)}${ageSuffix}</div>
+          </div>`);
+      }
+      if (pt.vent) {
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">VENT</div>
+            <div class="ledger-v">${formatMiddotStreamHtml(pt.vent)}${ageSuffix}</div>
+          </div>`);
+      }
+      if (pt.io || pt.cumulativeFb) {
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">I&amp;O</div>
+            <div class="ledger-v">${pt.io ? formatLedgerIoHtml(pt.io, pt.cumulativeFb, ageSuffix) : formatLedgerIoHtml('', pt.cumulativeFb)}</div>
+          </div>`);
+      }
+      if (pt.hgt) {
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">HGT</div>
+            <div class="ledger-v">${esc(pt.hgt.replace(/\s*\|\s*/g, ' · '))}${ageSuffix}</div>
+          </div>`);
+      }
+      if (pt.labs) {
+        paramRows.push(`
+          <div class="ledger-kv is-labs">
+            <div class="ledger-labs-head">
+              <span class="ledger-k">LABS</span>
+              <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">All →</button>
+            </div>
+            <div class="ledger-v ledger-labs-vals">${formatLedgerLabsHtml(pt.labs)}${ageSuffix}</div>
+          </div>`);
+      } else {
+        paramRows.push(`
+          <div class="ledger-kv is-labs">
+            <div class="ledger-labs-head">
+              <span class="ledger-k">LABS</span>
+              <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">Open Labs →</button>
+            </div>
+            <div class="ledger-v muted">No labs logged yet</div>
+          </div>`);
+      }
+
+      const medsAgeSuffix =
+        pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
+          ? ` (${formatShortStatusDate(pt.medicationsDate)})`
+          : '';
+      const medsAccordion = pt.medications && pt.medications.length
+        ? `<details class="ledger-accordion">
+            <summary>
+              <span class="acc-title">Medications${esc(medsAgeSuffix)}</span>
+              <span class="acc-right"><span class="acc-count">${pt.medications.length}</span>${uiIcon('chevron-right')}</span>
+            </summary>
+            <ul class="ledger-meds-list">${pt.medications.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+          </details>`
+        : '';
+
+      const planGroups = Array.isArray(pt.servicePlanGroups) ? pt.servicePlanGroups : [];
+      const planCount = planGroups.length || (pt.servicePlans ? pt.servicePlans.length : 0);
+      const plansContent = planGroups.length
+        ? `<div class="ledger-plans-grid">${planGroups
+            .map(
+              (g) => `<div class="ledger-plan-tag">${esc(g.tag)}</div><div class="ledger-plan-txt">${esc(g.text)}</div>`
+            )
+            .join('')}</div>`
+        : `<ul class="ledger-meds-list">${(pt.servicePlans || []).map((pl) => `<li>${esc(pl)}</li>`).join('')}</ul>`;
+      const plansAccordion = planCount
+        ? `<details class="ledger-accordion">
+            <summary>
+              <span class="acc-title">Service Plans</span>
+              <span class="acc-right"><span class="acc-count">${planCount}</span>${uiIcon('chevron-right')}</span>
+            </summary>
+            ${plansContent}
+          </details>`
+        : '';
+
+      const openPendingCount = pt.pending.filter((p) => !p.checked).length;
+      const pendingItemsHtml = pt.pending.length
         ? pt.pending
             .map(
               (item) => `
@@ -1447,124 +1593,155 @@ function renderRounds() {
           </label>`
             )
             .join('')
-        : '<div class="no-pending">No pending orders/labs charted.</div>';
-
-      const openPendingCount = pt.pending.filter((p) => !p.checked).length;
-      const ageSuffix = !pt.isUpdatedToday && pt.latestDate ? ` <span class="metric-age">(${esc(pt.latestDate)})</span>` : '';
-
-      // Metrics pills
-      const metricPills = [];
-      if (pt.vitals) metricPills.push(`<span class="metric-pill"><b>VS:</b> ${esc(pt.vitals)}${ageSuffix}</span>`);
-      if (pt.vent) metricPills.push(`<span class="metric-pill"><b>Vent:</b> ${esc(pt.vent)}${ageSuffix}</span>`);
-      if (pt.io) metricPills.push(`<span class="metric-pill"><b>I&amp;O:</b> ${esc(pt.io)}${ageSuffix}</span>`);
-      if (pt.cumulativeFb) {
-        metricPills.push(
-          `<span class="metric-pill cum-fb" title="${esc(pt.cumulativeFb.breakdownText)}${
-            pt.cumulativeFb.hasPartialDay ? ' (includes shift-summed day)' : ''
-          }"><b>${esc(pt.cumulativeFb.label)}:</b> ${esc(pt.cumulativeFb.totalText)} <span class="cf-meta">(${esc(
-            pt.cumulativeFb.breakdownText
-          )})</span></span>`
-        );
-      }
-      if (pt.hgt) metricPills.push(`<span class="metric-pill"><b>HGT:</b> ${esc(pt.hgt)}${ageSuffix}</span>`);
-      if (pt.labs) {
-        metricPills.push(
-          `<button type="button" class="metric-pill labs-link" data-id="${pt.id}" title="Open full Lab Results &amp; flowsheet"><b>Labs:</b> ${esc(pt.labs)}${ageSuffix} <span class="labs-link-cta" aria-hidden="true">View all →</span></button>`
-        );
-      }
-      if (pt.drips) metricPills.push(`<span class="metric-pill drip"><b>Drips:</b> ${esc(pt.drips)}${ageSuffix}</span>`);
-
-      const medsAgeSuffix =
-        pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
-          ? ` <span class="metric-age">(${esc(pt.medicationsDate)})</span>`
-          : '';
-      const medsHtml =
-        pt.medications && pt.medications.length
-          ? `<details class="scut-meds-details">
-              <summary>${uiIcon('pill')} Medications (${pt.medications.length})${medsAgeSuffix}</summary>
-              <ul class="scut-meds-list">${pt.medications.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
-            </details>`
-          : '';
-
-      const plansHtml =
-        pt.servicePlans && pt.servicePlans.length
-          ? `<details class="scut-plans-details">
-              <summary>${uiIcon('clipboard-list')} Service Plans (${pt.servicePlans.length})</summary>
-              <ul class="scut-plans-list">${pt.servicePlans.map((pl) => `<li>${esc(pl)}</li>`).join('')}</ul>
-            </details>`
-          : '';
-
-      const compactParts = [];
-      if (pt.vitals) compactParts.push(`VS: ${pt.vitals}`);
-      if (pt.drips) compactParts.push(`Drips: ${pt.drips}`);
-      if (pt.medications && pt.medications.length) compactParts.push(`${pt.medications.length} meds`);
-      compactParts.push(`${openPendingCount} open`);
-
-      const isExpanded = roundsCompactMode && expandedCompactIds.has(pt.id);
+        : '';
 
       return `
-      <div class="scut-card ${isStale ? 'stale' : ''} ${roundsCompactMode ? 'compact' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
-        <div class="scut-head${roundsCompactMode ? ' is-collapsible' : ''}"${
-        roundsCompactMode
-          ? ` role="button" tabindex="0" aria-expanded="${isExpanded}" title="${
-              isExpanded ? 'Tap to collapse patient card' : 'Tap to expand patient card'
-            }" data-toggle-compact-id="${pt.id}"`
-          : ''
-      }>
-          <div>
-            <span class="room-badge">${esc(pt.room || 'Unassigned')}</span>
-            <div class="pt-title">${esc(pt.name)}</div>
-            <div class="pt-meta">${metaParts.join(' · ')}</div>
+      <article class="ledger-row ${isStale ? 'is-overdue' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
+        <div class="ledger-head" role="button" tabindex="0" aria-expanded="${isExpanded}" data-toggle-row-id="${pt.id}">
+          <div class="ledger-head-top">
+            <div class="ledger-id-group">
+              <span class="ledger-bed">${esc(pt.room || 'Unassigned')}</span>
+              <span class="ledger-name">${esc(pt.name)}</span>
+            </div>
+            <div class="ledger-head-status">
+              ${statusHtml}
+              ${isExpanded ? `<span class="ledger-chevron is-open" aria-hidden="true">${uiIcon('chevron-down')}</span>` : ''}
+            </div>
           </div>
-          <div class="scut-head-right">
-            <div class="scut-status-tags">${statusTag}${extraCatTags}${
-              roundsCompactMode ? `<span class="compact-chevron" aria-hidden="true">${uiIcon('chevron-right')}</span>` : ''
-            }</div>
-            <button type="button" class="open-labs-btn" data-id="${pt.id}" title="Open Lab Results summary" aria-label="Open Lab Results for ${esc(pt.name)}">${uiIcon('flask')}<span>Labs</span></button>
-          </div>
+          <div class="ledger-meta-compact">${compactMetaLine}</div>
+          ${expandedDemoLine ? `<div class="ledger-meta-expanded">${expandedDemoLine}</div>` : ''}
+          ${expandedApLine ? `<div class="ledger-ap-expanded">${expandedApLine}</div>` : ''}
         </div>
 
-        <div class="scut-assessment">
-          <strong>Working Impression</strong>
-          ${esc(pt.assessment || 'No working impression entered yet.')}
+        <div class="ledger-compact-bar">
+          <div class="ledger-compact-actions">
+            <button type="button" class="ghost-action dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
+            <button type="button" class="ghost-action shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
+            <button type="button" class="ghost-action copy-update-btn" data-id="${pt.id}">${uiIcon('copy')}<span>Copy</span></button>
+            <div class="row-more-wrap">
+              <button type="button" class="ghost-action row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
+              <div class="popover-menu row-more-menu" role="menu" hidden>
+                <button type="button" class="popover-menu-item open-chart-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pencil')}<span>Open Chart</span></button>
+                <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
+                <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
+                <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="ledger-chevron-btn" data-toggle-row-id="${pt.id}" aria-label="Expand ${esc(pt.name)}">${uiIcon('chevron-down')}</button>
         </div>
 
-        <div class="scut-compact-line">${esc(compactParts.join(' · '))}</div>
-        ${metricPills.length ? `<div class="scut-metrics">${metricPills.join('')}</div>` : ''}
-        ${medsHtml}
-        ${plansHtml}
-
-        <div class="scut-pending">
-          <div class="pending-hdr">
-            <span>Pending items</span>
-            <span class="pending-count">${openPendingCount} open</span>
+        <div class="ledger-body">
+          ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
+          ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${esc(pt.drips)}</span></div>` : ''}
+          <div class="ledger-params">${paramRows.join('')}</div>
+          ${medsAccordion}
+          ${plansAccordion}
+          <div class="ledger-pending">
+            <div class="ledger-pending-hdr">PENDING · ${openPendingCount}</div>
+            ${pendingItemsHtml ? `<div class="pending-items">${pendingItemsHtml}</div>` : ''}
+            <div class="pending-add-row">
+              <input type="text" class="pending-add-input" enterkeyhint="done" autocapitalize="sentences" data-note-id="${pt.id}" placeholder="+ Quick add pending item..." aria-label="Add pending task for ${esc(pt.name)}">
+            </div>
           </div>
-          <div class="pending-items">${pendingHtml}</div>
-          <div class="pending-add-row">
-            <input type="text" class="pending-add-input" enterkeyhint="done" autocapitalize="sentences" data-note-id="${pt.id}" placeholder="+ Quick add pending item..." aria-label="Add pending task for ${esc(pt.name)}">
-            <button type="button" class="btn sm-btn pending-add-btn" data-note-id="${pt.id}" aria-label="Save pending item">+</button>
+          <div class="ledger-footer">
+            <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
+            <button type="button" class="ledger-btn-subtle dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
+            <button type="button" class="ledger-btn-subtle shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
+            <button type="button" class="ledger-btn-icon copy-update-btn" data-id="${pt.id}" title="Copy update text" aria-label="Copy update">${uiIcon('copy')}</button>
+            <div class="row-more-wrap">
+              <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
+              <div class="popover-menu row-more-menu" role="menu" hidden>
+                <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
+                <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
+                <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
+              </div>
+            </div>
           </div>
         </div>
-
-        <div class="scut-footer">
-          <div class="scut-footer-primary">
-            <button type="button" class="dictate-btn" data-id="${pt.id}" title="Dictate bedside SOAP" aria-label="Dictate">${uiIcon('mic')}<span class="scut-btn-label"> Dictate</span></button>
-            <button type="button" class="open-chart-btn" data-id="${pt.id}" title="Open Chart" aria-label="Open Chart">${uiIcon('pencil')}<span class="scut-btn-label"> Open Chart</span></button>
-          </div>
-          <div class="scut-footer-secondary">
-            <button type="button" class="shift-btn" data-id="${pt.id}" title="Add Update" aria-label="Add Update">${uiIcon('plus')}<span class="scut-btn-label"> Add Update</span></button>
-            <button type="button" class="copy-update-btn" data-id="${pt.id}" title="Copy latest update as clean plain text" aria-label="Copy Update">${uiIcon('share')}<span class="scut-btn-label"> Copy Update</span></button>
-            <button type="button" class="calc-btn" data-id="${pt.id}" title="Renal calculators, drip rates &amp; safety audit" aria-label="Calc">${uiIcon('calc')}<span class="scut-btn-label"> Calc</span></button>
-            <button type="button" class="pitch-btn" data-id="${pt.id}" title="Generate 30s Bedside Presentation" aria-label="Pitch">${uiIcon('ai-brain')}<span class="scut-btn-label"> Pitch</span></button>
-          </div>
-        </div>
-      </div>`;
+      </article>`;
     })
     .join('');
 
-  // Wire card events
+  if (footerSummary) {
+    const activeAll = parsedPatients.filter((p) => p.isCensus && !p.isCharity);
+    const updatedToday = activeAll.filter((p) => p.isUpdatedToday).length;
+    const duty = getDutyDateStrings(new Date(), shiftSchedule);
+    const shiftUpper = String(duty.shiftLabel || defaultShiftForHour()).toUpperCase();
+    footerSummary.textContent = `${filtered.length} SHOWN · ${updatedToday}/${activeAll.length} UPDATED FOR ${shiftUpper}`;
+  }
+
+  // Wire row expand/collapse & inline AP toggle
+  const toggleRow = (id) => {
+    if (!id) return;
+    closeAllMenus();
+    const row = container.querySelector(`.ledger-row[data-id="${CSS.escape(id)}"]`);
+    const next = !expandedRowIds.has(id);
+    if (next) expandedRowIds.add(id);
+    else expandedRowIds.delete(id);
+    if (row) row.classList.toggle('expanded', next);
+    const head = row?.querySelector('.ledger-head[data-toggle-row-id]');
+    if (head) head.setAttribute('aria-expanded', String(next));
+  };
+
+  container.querySelectorAll('.ledger-head[data-toggle-row-id]').forEach((headEl) => {
+    headEl.onclick = (e) => {
+      if (e.target.closest('.ap-more-btn, button, a')) return;
+      toggleRow(headEl.dataset.toggleRowId);
+    };
+    headEl.onkeydown = (e) => {
+      if (e.target.closest('.ap-more-btn, button, a')) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleRow(headEl.dataset.toggleRowId);
+      }
+    };
+  });
+
+  container.querySelectorAll('.ledger-chevron-btn[data-toggle-row-id]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      toggleRow(btn.dataset.toggleRowId);
+    };
+  });
+
+  container.querySelectorAll('.ap-more-btn[data-ap-id]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.apId;
+      if (!id) return;
+      expandedApIds.add(id);
+      renderRounds();
+    };
+  });
+
+  container.querySelectorAll('.row-more-btn').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const menu = btn.parentElement?.querySelector('.row-more-menu');
+      if (!menu) return;
+      const willOpen = menu.hidden;
+      closeAllMenus();
+      if (!willOpen) return;
+      menu.classList.remove('align-right', 'open-up');
+      menu.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+      const btnRect = btn.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      if (btnRect.left + menuRect.width > window.innerWidth - 12) {
+        menu.classList.add('align-right');
+      }
+      const bottomLimit = window.innerHeight - (window.innerWidth <= 820 ? 68 : 16);
+      if (btnRect.bottom + menuRect.height + 8 > bottomLimit) {
+        menu.classList.add('open-up');
+      }
+    };
+  });
+
+  // Wire row actions
   async function openPatientLabsTab(id) {
     if (!id) return;
+    closeAllMenus();
     await select(id);
     setEditorView('labs');
     await setMode('editor');
@@ -1578,41 +1755,18 @@ function renderRounds() {
     });
   }
 
-  if (roundsCompactMode) {
-    container.querySelectorAll('.scut-head[data-toggle-compact-id]').forEach((headEl) => {
-      const toggleCompactCard = () => {
-        const id = headEl.dataset.toggleCompactId;
-        if (!id) return;
-        const card = headEl.closest('.scut-card');
-        const nextExpanded = !expandedCompactIds.has(id);
-        if (nextExpanded) expandedCompactIds.add(id);
-        else expandedCompactIds.delete(id);
-        if (card) card.classList.toggle('expanded', nextExpanded);
-        headEl.setAttribute('aria-expanded', String(nextExpanded));
-        headEl.setAttribute(
-          'title',
-          nextExpanded ? 'Tap to collapse patient card' : 'Tap to expand patient card'
-        );
-      };
-      headEl.onclick = (e) => {
-        if (e.target.closest('.open-labs-btn')) return;
-        toggleCompactCard();
-      };
-      headEl.onkeydown = (e) => {
-        if (e.target.closest('.open-labs-btn')) return;
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          toggleCompactCard();
-        }
-      };
-    });
-  }
   container.querySelectorAll('.dictate-btn').forEach((btn) => {
-    btn.onclick = () => openDictateModal(btn.dataset.id, btn);
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
+      openDictateModal(btn.dataset.id, btn);
+    };
   });
 
   container.querySelectorAll('.open-chart-btn').forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      closeAllMenus();
       await select(btn.dataset.id);
       await setMode('editor');
     };
@@ -1625,50 +1779,42 @@ function renderRounds() {
     };
   });
 
-  container.querySelectorAll('.metric-pill.labs-link').forEach((btn) => {
-    btn.onclick = async () => {
-      await openPatientLabsTab(btn.dataset.id);
+  container.querySelectorAll('.shift-btn').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
+      openShiftModal(btn.dataset.id, btn);
     };
   });
 
-  container.querySelectorAll('.shift-btn').forEach((btn) => {
-    btn.onclick = () => openShiftModal(btn.dataset.id, btn);
-  });
-
   container.querySelectorAll('.copy-update-btn').forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
       const note = notes.find((n) => n.id === btn.dataset.id);
       if (note) copyUpdateTextForContent(note.content, note);
     };
   });
 
   container.querySelectorAll('.calc-btn').forEach((btn) => {
-    btn.onclick = () => openCalcModal(btn.dataset.id, 'audit', btn);
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
+      openCalcModal(btn.dataset.id, 'audit', btn);
+    };
   });
 
   container.querySelectorAll('.pitch-btn').forEach((btn) => {
-    btn.onclick = () => {
-      openWithPrompt(
-        btn.dataset.id,
-        'Give a high-yield, 30-second bedside presentation for attending rounds (Assessment, Overnight events, Key Labs, Drips, and Today\'s Plan).'
-      );
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
+      openPitchModal(btn.dataset.id, PITCH_PRESETS[0].prompt, btn);
     };
   });
 
   container.querySelectorAll('.pending-check').forEach((chk) => {
     chk.onchange = async (e) => {
       await handleTogglePending(e.target.dataset.noteId, e.target.dataset.task, e.target.checked);
-    };
-  });
-
-  container.querySelectorAll('.pending-add-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const id = btn.dataset.noteId;
-      const inp = container.querySelector(`.pending-add-input[data-note-id="${CSS.escape(id)}"]`);
-      if (!inp) return;
-      const val = inp.value.trim();
-      if (!val) return inp.focus();
-      await handleQuickAddPending(id, val);
     };
   });
 
@@ -1684,19 +1830,6 @@ function renderRounds() {
 }
 
 function updateCensusStats(parsed) {
-  const active = parsed.filter((p) => p.isCensus && !p.isCharity);
-  const updatedToday = active.filter((p) => p.isUpdatedToday).length;
-  const needsUpdateCount = active.filter((p) => !p.isUpdatedToday).length;
-  let totalPending = 0;
-  for (const pt of active) {
-    totalPending += pt.pending.filter((p) => !p.checked).length;
-  }
-
-  if ($('statActive')) $('statActive').textContent = active.length;
-  if ($('statUpdated')) $('statUpdated').textContent = updatedToday;
-  if ($('statNeedsUpdate')) $('statNeedsUpdate').textContent = needsUpdateCount;
-  if ($('statPending')) $('statPending').textContent = totalPending;
-
   renderRoundsFilterChips(parsed);
 }
 
@@ -1990,9 +2123,9 @@ function renderShiftGuidedForm() {
                 <div class="shift-field-card-head">
                   <label for="sfPe">Physical Exam</label>
                   <div class="shift-pe-actions">
-                    ${prevPe ? '<button type="button" class="btn sm-btn subtle" data-sf-pe-preset="prev" title="Copy Physical Exam from previous shift">Previous PE</button>' : ''}
-                    <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="normal">Normal PE</button>
-                    <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="clear">Clear</button>
+                    ${prevPe ? '<button type="button" class="ghost-action" data-sf-pe-preset="prev" title="Copy Physical Exam from previous shift">Previous PE</button>' : ''}
+                    <button type="button" class="ghost-action" data-sf-pe-preset="normal">Normal PE</button>
+                    <button type="button" class="ghost-action" data-sf-pe-preset="clear">Clear</button>
                   </div>
                 </div>
                 <textarea id="sfPe" data-sf-key="pe" rows="4" placeholder="Focused physical exam findings...">${esc(shiftFormValues.pe)}</textarea>
@@ -2467,7 +2600,7 @@ function renderHandoverPreview() {
     modeLbl.innerHTML = `${uiIcon('alert')} Viewing: Raw PHI (Local Only)`;
     toggleBtn.innerHTML = `${uiIcon('shield')} Preview De-identified`;
     pill.textContent = 'LOCAL ONLY';
-    pill.className = 'pill';
+    pill.className = 'status-meta';
     if (rawCopyBtn) rawCopyBtn.disabled = false;
     $('copyHandoverDeidBtn').disabled = false;
     if (exportBtn) exportBtn.innerHTML = `${uiIcon('download')} Export Raw .md`;
@@ -2483,7 +2616,7 @@ function renderHandoverPreview() {
     : `${uiIcon('shield')} Viewing: De-identified Summary (Rooms Retained · Raw Copy Locked)`;
   toggleBtn.innerHTML = `${uiIcon('clipboard-list')} Show Raw Local`;
   pill.textContent = bad ? `BLOCKED · ${leaks.length}` : 'PHI CLEARED';
-  pill.className = 'pill ' + (bad ? 'block' : 'safe');
+  pill.className = 'status-meta ' + (bad ? 'block' : 'safe');
   if (rawCopyBtn) rawCopyBtn.disabled = true;
   $('copyHandoverDeidBtn').disabled = bad;
   if (exportBtn) exportBtn.innerHTML = `${uiIcon('shield')} Export De-id .md`;
@@ -2785,6 +2918,216 @@ async function openWithPrompt(noteId, promptText) {
   toast('Prompt staged for Companion — review preview');
 }
 
+const PITCH_PRESETS = [
+  {
+    id: '30s',
+    prompt:
+      'Give a high-yield, 30-second bedside presentation for attending rounds (Assessment, Overnight events, Key Labs, Drips, and Today\'s Plan).',
+  },
+  {
+    id: 'oneliner',
+    prompt:
+      'Summarize this patient in a crisp 1-liner plus active critical issues and today\'s top 3 priorities.',
+  },
+  {
+    id: 'soap',
+    prompt:
+      'Convert the latest shift chart into a concise structured SOAP oral presentation for rounds.',
+  },
+  {
+    id: 'overnight',
+    prompt:
+      'Highlight only the significant interval events, abnormal labs/imaging trends, active drips/med changes, and pending items for today.',
+  },
+];
+
+let pitchNoteId = null;
+let pitchSourceContent = '';
+let pitchProfile = { name: '', aliases: [], room: '' };
+let pitchSafeText = '';
+let pitchBusy = false;
+
+function getPitchProfileForNote(note, content) {
+  const parsed = parseChart(content || '', note || {});
+  return {
+    name: parsed.name && parsed.name !== 'Unknown Patient' ? parsed.name : '',
+    aliases: Array.isArray(parsed.aliases) ? parsed.aliases : [],
+    room: parsed.room && parsed.room !== 'Unassigned' ? parsed.room : '',
+  };
+}
+
+function updatePitchGenerateBtnLabel(text) {
+  const btn = $('pitchGenerateBtn');
+  if (!btn) return;
+  btn.innerHTML = `${uiIcon('sparkles')} ${esc(text)}`;
+}
+
+function refreshPitchGuard() {
+  const promptEl = $('pitchPromptInput');
+  const promptText = promptEl ? promptEl.value : '';
+  const r = redact(pitchSourceContent, pitchProfile);
+  pitchSafeText = r.text;
+
+  const qLeaks = findLeaks(promptText, pitchProfile);
+  const leaks = [...r.report.leaks, ...qLeaks];
+  const bad = leaks.length > 0;
+
+  if ($('pitchSafePreview')) {
+    $('pitchSafePreview').innerHTML = esc(r.text).replace(/\[PATIENT\]/g, '<mark>[PATIENT]</mark>');
+  }
+
+  const redactedItems = r.report.replacements.map((x) => esc(x.original)).join(', ') || 'none';
+  if ($('pitchRedactedMeta')) {
+    $('pitchRedactedMeta').textContent = `(${r.report.replacements.length} redacted${bad ? ` · ${leaks.length} leak` : ''})`;
+  }
+  if ($('pitchReport')) {
+    $('pitchReport').innerHTML = `Redacted: <b>${redactedItems}</b><br>Room kept: <b>${esc(
+      r.report.rooms.join(', ') || 'none found'
+    )}</b>${
+      bad
+        ? `<br><span class="bad">Leaks: ${esc(
+            leaks.map((x) => x.value).join(', ')
+          )} — edit the prompt or chart profile before sending.</span>`
+        : ''
+    }`;
+  }
+
+  if ($('pitchGuardPill')) {
+    $('pitchGuardPill').textContent = bad ? `BLOCKED · ${leaks.length}` : 'PHI CLEARED';
+    $('pitchGuardPill').className = `status-meta ${bad ? 'block' : 'safe'}`;
+  }
+
+  if (bad && $('pitchPreviewDetails')) {
+    $('pitchPreviewDetails').open = true;
+  }
+
+  if ($('pitchCopyPromptBtn')) $('pitchCopyPromptBtn').disabled = bad;
+  if ($('pitchGenerateBtn')) $('pitchGenerateBtn').disabled = bad || pitchBusy;
+
+  const endpoint = $('endpoint')?.value.trim() || '';
+  const model = $('model')?.value.trim() || '';
+  const apiKey = $('apiKey')?.value.trim() || '';
+  if ($('pitchConnMeta')) {
+    if (navigator.onLine === false) {
+      $('pitchConnMeta').textContent = 'Offline · Copy Safe Prompt ready';
+    } else if (endpoint && model && apiKey) {
+      $('pitchConnMeta').textContent = `Ready · ${model}`;
+    } else {
+      $('pitchConnMeta').textContent = 'Copy Safe Prompt ready · configure AI in Settings to generate inline';
+    }
+  }
+
+  return !bad;
+}
+
+function syncPitchPresetChips(promptText) {
+  const trimmed = String(promptText || '').trim();
+  const matched = PITCH_PRESETS.find((p) => p.prompt === trimmed);
+  document.querySelectorAll('#pitchPresets [data-pitch-preset]').forEach((btn) => {
+    const active = Boolean(matched && btn.dataset.pitchPreset === matched.id);
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function openPitchModal(noteId, initialPrompt = PITCH_PRESETS[0].prompt, triggerEl = null) {
+  const note = notes.find((n) => n.id === noteId);
+  if (!note) return;
+
+  pitchNoteId = noteId;
+  pitchSourceContent =
+    currentMode === 'editor' && currentId === noteId ? $('noteText').value : note.content || '';
+  pitchProfile = getPitchProfileForNote(note, pitchSourceContent);
+  pitchBusy = false;
+
+  const parsed = parseChart(pitchSourceContent, note);
+  const subtitle = parsed.room && parsed.room !== 'Unassigned'
+    ? `${parsed.room} · ${parsed.name}`
+    : parsed.name;
+  if ($('pitchModalSubtitle')) $('pitchModalSubtitle').textContent = subtitle;
+
+  if ($('pitchPromptInput')) $('pitchPromptInput').value = initialPrompt || PITCH_PRESETS[0].prompt;
+  syncPitchPresetChips($('pitchPromptInput')?.value || '');
+
+  if ($('pitchPreviewDetails')) $('pitchPreviewDetails').open = false;
+  if ($('pitchReplyWrap')) $('pitchReplyWrap').hidden = true;
+  if ($('pitchReply')) $('pitchReply').textContent = '';
+  if ($('pitchCopyReplyBtn')) $('pitchCopyReplyBtn').disabled = true;
+  updatePitchGenerateBtnLabel('Generate Pitch');
+
+  refreshPitchGuard();
+  openModalEl($('pitchModal'), triggerEl, $('pitchGenerateBtn'));
+}
+
+function closePitchModal() {
+  pitchBusy = false;
+  updatePitchGenerateBtnLabel('Generate Pitch');
+  closeModalEl($('pitchModal'));
+}
+
+async function generatePitchInModal() {
+  if (pitchBusy) return;
+  if (!refreshPitchGuard()) {
+    return toast('PHI leak detected — clear blocked terms first');
+  }
+
+  let payload = '';
+  try {
+    payload = buildPayload(pitchSafeText, $('pitchPromptInput').value, pitchProfile);
+  } catch (e) {
+    return toast(e.message);
+  }
+
+  const replyWrap = $('pitchReplyWrap');
+  const replyEl = $('pitchReply');
+  const copyReplyBtn = $('pitchCopyReplyBtn');
+
+  if (navigator.onLine === false) {
+    if (replyWrap && replyEl) {
+      replyWrap.hidden = false;
+      replyEl.textContent = 'Device is offline — use Copy Safe Prompt below to paste into an external AI chat safely.';
+    }
+    return toast('Device is offline — use Copy Safe Prompt');
+  }
+
+  const endpoint = $('endpoint')?.value.trim().replace(/\/$/, '') || '';
+  const model = $('model')?.value.trim() || '';
+  const apiKey = $('apiKey')?.value.trim() || '';
+  if (!endpoint || !model || !apiKey) {
+    if (replyWrap && replyEl) {
+      replyWrap.hidden = false;
+      replyEl.textContent =
+        'Configure Endpoint, Model, and API Key under Settings → Companion AI to generate pitches inline, or click "Copy Safe Prompt" below.';
+    }
+    if (copyReplyBtn) copyReplyBtn.disabled = true;
+    return toast('Set endpoint, model & API key in Settings first (or use Copy Safe Prompt)');
+  }
+
+  const reqNoteId = pitchNoteId;
+  pitchBusy = true;
+  if ($('pitchGenerateBtn')) $('pitchGenerateBtn').disabled = true;
+  updatePitchGenerateBtnLabel('Generating…');
+  if (replyWrap) replyWrap.hidden = false;
+  if (replyEl) replyEl.textContent = 'Thinking…';
+  if (copyReplyBtn) copyReplyBtn.disabled = true;
+
+  try {
+    const text = await callAiChat({ endpoint, model, apiKey, prompt: payload });
+    if (pitchNoteId !== reqNoteId || $('pitchModal')?.hidden) return;
+    if (replyEl) replyEl.textContent = text;
+    if (copyReplyBtn) copyReplyBtn.disabled = !String(text || '').trim();
+    updatePitchGenerateBtnLabel('Regenerate');
+  } catch (e) {
+    if (pitchNoteId !== reqNoteId || $('pitchModal')?.hidden) return;
+    if (replyEl) replyEl.textContent = `Request failed: ${e.message}`;
+    if (copyReplyBtn) copyReplyBtn.disabled = true;
+    updatePitchGenerateBtnLabel('Generate Pitch');
+  } finally {
+    pitchBusy = false;
+    refreshPitchGuard();
+  }
+}
+
 async function loadSampleCensus() {
   const samples = getSyntheticCensusData();
   const existingSamples = samples.filter((s) => notes.some((n) => n.id === s.id));
@@ -2953,11 +3296,11 @@ function updateScratchFilterChipCounts() {
   const chips = document.querySelectorAll('#scratchFilterChips .chip');
   chips.forEach((chip) => {
     const cat = chip.dataset.cat;
-    const baseLabel = chip.dataset.baseLabel || chip.textContent.replace(/\s*\(\d+\)$/, '');
+    const baseLabel = (chip.dataset.baseLabel || chip.textContent.replace(/\s*\(\d+\)$/, '')).trim();
     chip.dataset.baseLabel = baseLabel;
     const count =
       cat === 'all' ? scratchNotes.length : scratchNotes.filter((n) => n.category === cat).length;
-    chip.textContent = `${baseLabel} (${count})`;
+    chip.innerHTML = `${esc(baseLabel)} <span class="chip-count">${count}</span>`;
     chip.setAttribute('aria-pressed', String(chip.classList.contains('active')));
   });
 }
@@ -2973,7 +3316,7 @@ function renderScratchNotes() {
         <p style="margin: 0 0 12px;">No quick notes yet. Jot down drip dilutions, infusion preps, or clinical reminders.</p>
         <div class="row" style="justify-content: center;">
           <button type="button" id="emptyNewScratchBtn" class="primary">${uiIcon('plus')} New Note</button>
-          <button type="button" id="emptyLoadSampleScratchBtn" class="btn">${uiIcon('droplet')} Load Sample Drip Prep</button>
+          <button type="button" id="emptyLoadSampleScratchBtn" class="btn-secondary">${uiIcon('droplet')} Load Sample Drip Prep</button>
         </div>
       </div>`;
     const newBtn = $('emptyNewScratchBtn');
@@ -3019,9 +3362,9 @@ function renderScratchNotes() {
       return `
       <div class="scratch-card ${n.pinned ? 'pinned' : ''}" data-id="${n.id}">
         <div class="scratch-head">
-          <div>
-            <h3 class="scratch-title">${n.pinned ? `${uiIcon('pin')} ` : ''}${esc(n.title || 'Untitled Note')}</h3>
-            ${updatedTxt ? `<div class="cf-meta">Updated ${esc(updatedTxt)}</div>` : ''}
+          <div class="scratch-title-wrap">
+            <h3 class="scratch-title">${esc(n.title || 'Untitled Note')}</h3>
+            ${updatedTxt ? `<div class="cf-meta">${n.pinned ? '<span class="scratch-pin-tag">PINNED</span> · ' : ''}Updated ${esc(updatedTxt)}</div>` : n.pinned ? '<div class="cf-meta"><span class="scratch-pin-tag">PINNED</span></div>' : ''}
           </div>
           <span class="scratch-cat-badge">${esc(n.category || 'Scratchpad')}</span>
         </div>
@@ -3029,19 +3372,19 @@ function renderScratchNotes() {
           n.body
             ? `<div class="scratch-body" data-id="${n.id}">${esc(n.body)}</div>${
                 isLong
-                  ? `<button type="button" class="btn sm-btn subtle scratch-expand-btn" data-id="${n.id}">Expand</button>`
+                  ? `<button type="button" class="ghost-action scratch-expand-btn" data-id="${n.id}">Expand</button>`
                   : ''
               }`
             : '<div class="cf-meta">No details added yet.</div>'
         }
         <div class="scratch-foot">
-          <button type="button" class="btn subtle scratch-copy-btn" data-id="${n.id}">${uiIcon('copy')} Copy</button>
-          <button type="button" class="btn subtle scratch-insert-btn" data-id="${n.id}" ${
+          <button type="button" class="ghost-action scratch-copy-btn" data-id="${n.id}">${uiIcon('copy')} Copy</button>
+          <button type="button" class="ghost-action scratch-insert-btn" data-id="${n.id}" ${
             targetChart ? `title="Insert into ${esc(targetChart.room || targetChart.title)}"` : 'title="Select a chart first"'
           }>${uiIcon('plus')} Chart</button>
-          <button type="button" class="btn subtle scratch-pin-btn" data-id="${n.id}">${n.pinned ? 'Unpin' : `${uiIcon('pin')} Pin`}</button>
-          <button type="button" class="btn subtle scratch-edit-btn" data-id="${n.id}">${uiIcon('pencil')} Edit</button>
-          <button type="button" class="btn danger scratch-del-btn" data-id="${n.id}" aria-label="Delete ${esc(n.title || 'note')}">${uiIcon('trash')}</button>
+          <button type="button" class="ghost-action scratch-pin-btn" data-id="${n.id}">${n.pinned ? 'Unpin' : `${uiIcon('pin')} Pin`}</button>
+          <button type="button" class="ghost-action scratch-edit-btn" data-id="${n.id}">${uiIcon('pencil')} Edit</button>
+          <button type="button" class="ghost-action scratch-del-btn" data-id="${n.id}" aria-label="Delete ${esc(n.title || 'note')}">${uiIcon('trash')}</button>
         </div>
       </div>`;
     })
@@ -3204,13 +3547,19 @@ function renderInboxQueue() {
           : item.status === 'unresolved'
             ? `${uiIcon('alert')} Unresolved`
             : 'Pending';
+      const statusCls =
+        item.status === 'filed'
+          ? 'safe'
+          : item.status === 'unresolved'
+            ? 'warn'
+            : '';
       return `
         <div class="inbox-queue-item-wrap">
           <button type="button" class="inbox-queue-item ${item.id === inboxSelectedQueueId ? 'active' : ''}" data-id="${item.id}">
             <span class="inbox-queue-snippet">${esc(firstLine)}</span>
-            <span class="inbox-status ${esc(item.status)}">${statusLbl}</span>
+            <span class="status-meta inbox-status ${esc(item.status)}${statusCls ? ` ${statusCls}` : ''}">${statusLbl}</span>
           </button>
-          <button type="button" class="btn close-btn inbox-del-btn" data-id="${item.id}" title="Remove" aria-label="Remove queued item">${uiIcon('x')}</button>
+          <button type="button" class="close-btn inbox-del-btn" data-id="${item.id}" title="Remove" aria-label="Remove queued item">${uiIcon('x')}</button>
         </div>`;
     })
     .join('');
@@ -3336,17 +3685,17 @@ function updateInboxDryRun() {
     const p = parseChart(targetNote.content, targetNote);
     if (!p.isCensus) {
       censusFlag.textContent = 'DISCHARGED (census: false)';
-      censusFlag.className = 'pill block';
+      censusFlag.className = 'status-meta block';
     } else if (p.isCharity) {
       censusFlag.textContent = 'CHARITY';
-      censusFlag.className = 'pill';
+      censusFlag.className = 'status-meta';
     } else {
       censusFlag.textContent = 'ACTIVE CENSUS';
-      censusFlag.className = 'pill safe';
+      censusFlag.className = 'status-meta safe';
     }
   } else {
     censusFlag.textContent = 'NO PATIENT';
-    censusFlag.className = 'pill';
+    censusFlag.className = 'status-meta';
   }
 
   const cleaned = stripChatPrefixes(rawText);
@@ -3589,11 +3938,11 @@ function readCalcOverrides() {
 
 function renderRenalCardHtml(title, res, charted) {
   const hasCalc = res && res.status === 'OK';
-  const badgeCls = hasCalc ? 'calculated' : 'missing';
+  const badgeCls = hasCalc ? 'calculated safe' : 'missing warn';
   const badgeTxt = hasCalc ? 'CALCULATED' : 'NOT AVAILABLE';
   const mainVal = hasCalc ? `${esc(res.value)} <span style="font-size:12px;font-weight:600;">${esc(res.unit)}</span>` : esc(res.message);
   const chartedNote = charted
-    ? `<div class="calc-sub"><span class="calc-badge charted">CHARTED</span> ${esc(charted.value)} ${esc(res.unit)}${charted.date ? ` (${esc(charted.date)})` : ''}</div>`
+    ? `<div class="calc-sub"><span class="status-meta calc-badge charted">CHARTED</span> ${esc(charted.value)} ${esc(res.unit)}${charted.date ? ` (${esc(charted.date)})` : ''}</div>`
     : '';
   const inputsNote = hasCalc ? `<div class="calc-sub">Inputs: ${esc(res.inputsSummary)}</div>` : '';
 
@@ -3601,7 +3950,7 @@ function renderRenalCardHtml(title, res, charted) {
     <div class="calc-card${hasCalc ? '' : ' missing'}">
       <div class="calc-card-head">
         <span class="calc-card-title">${esc(title)}</span>
-        <span class="calc-badge ${badgeCls}">${badgeTxt}</span>
+        <span class="status-meta calc-badge ${badgeCls}">${badgeTxt}</span>
       </div>
       <div class="calc-val${hasCalc ? '' : ' missing-txt'}">${mainVal}</div>
       ${inputsNote}
@@ -3952,25 +4301,25 @@ function updateWhisperUiStatus(statusOverride = null, detail = '') {
   const isCached = cachedWhisperModels.has(selectedWhisperModel);
 
   let pillText = 'NOT DOWNLOADED';
-  let pillCls = 'pill';
+  let pillCls = 'status-meta';
   if (status === 'loading') {
     pillText = 'DOWNLOADING...';
-    pillCls = 'pill';
+    pillCls = 'status-meta';
   } else if (status === 'transcribing') {
     pillText = 'TRANSCRIBING...';
-    pillCls = 'pill safe';
+    pillCls = 'status-meta safe';
   } else if (status === 'error') {
     pillText = 'ERROR';
-    pillCls = 'pill block';
+    pillCls = 'status-meta block';
   } else if (isLoaded) {
     pillText = 'READY (IN MEMORY)';
-    pillCls = 'pill safe';
+    pillCls = 'status-meta safe';
   } else if (isCached && cachedWhisperRuntimeReady) {
     pillText = 'CACHED OFFLINE';
-    pillCls = 'pill safe';
+    pillCls = 'status-meta safe';
   } else if (isCached) {
     pillText = 'WEIGHTS CACHED (WARM ONCE)';
-    pillCls = 'pill warn';
+    pillCls = 'status-meta warn';
   }
 
   const settingsBadge = $('whisperSettingsBadge');
@@ -4583,7 +4932,7 @@ function renderList() {
         <p style="margin: 0 0 10px;">No patient charts yet on this device.</p>
         <div class="row" style="justify-content: center;">
           <button type="button" id="libEmptyNewBtn" class="primary">${uiIcon('plus')} New Patient</button>
-          <button type="button" id="libEmptySampleBtn" class="btn">${uiIcon('sparkles')} Load Sample Census</button>
+          <button type="button" id="libEmptySampleBtn" class="btn-secondary">${uiIcon('sparkles')} Load Sample Census</button>
         </div>
       </div>`;
     if ($('libEmptyNewBtn')) $('libEmptyNewBtn').onclick = () => openAdmitModal({ mode: 'new', triggerEl: $('libEmptyNewBtn') });
@@ -4600,25 +4949,30 @@ function renderList() {
     .map(({ note: n, parsed }) => {
       const openTasks = parsed.pending.filter((t) => !t.checked).length;
       const badge = !parsed.isCensus && !parsed.isCharity
-        ? '<span class="status-tag discharged">Discharged</span>'
+        ? '<span class="status-meta">Discharged</span>'
         : parsed.isCharity
           ? '<span class="status-tag charity">Charity</span>'
-          : '<span class="status-tag fresh">Active</span>';
+          : '<span class="status-meta safe">Active</span>';
       const extraBadges = (parsed.categories || [])
         .filter((c) => !(parsed.isCharity && c.toLowerCase() === 'charity'))
         .map((c) => `<span class="status-tag category">${esc(c)}</span>`)
         .join('');
       const dxPreview = parsed.assessment ? ` · ${esc(parsed.assessment.slice(0, 64))}${parsed.assessment.length > 64 ? '…' : ''}` : '';
+      const bedLabel = parsed.room ? formatRoomLabel(parsed.room) : '—';
+      const displayName = parsed.name || n.title || 'Untitled';
       return `
         <div class="item ${n.id === currentId ? 'active' : ''}">
           <button type="button" class="item-main-btn" data-id="${n.id}">
-            <b>${esc(n.title || 'Untitled')}</b>
-            <small>${esc(formatRoomLabel(parsed.room))} · ${openTasks} open task(s)${dxPreview} · ${new Date(n.updated).toLocaleDateString()}</small>
+            <span class="item-main-head">
+              <span class="ledger-bed">${esc(bedLabel)}</span>
+              <span class="lib-item-name">${esc(displayName)}</span>
+            </span>
+            <small>${openTasks} open${dxPreview} · ${new Date(n.updated).toLocaleDateString()}</small>
           </button>
           <div class="item-row-actions">
             ${badge}
             ${extraBadges}
-            <button type="button" class="btn sm-btn subtle lib-toggle-census-btn" data-id="${n.id}" title="${parsed.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${parsed.isCensus ? 'Discharge' : 'Readmit'}</button>
+            <button type="button" class="ghost-action lib-toggle-census-btn" data-id="${n.id}" title="${parsed.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${parsed.isCensus ? 'Discharge' : 'Readmit'}</button>
           </div>
         </div>`;
     })
@@ -4901,6 +5255,31 @@ function computeNoteTitle(name, room, fallback = 'Untitled note') {
   return cleanRoom ? `${cleanName} - ${cleanRoom}` : cleanName;
 }
 
+function renderEditorNoteTitle(name, room, fallback = 'Untitled note') {
+  const el = $('noteTitle');
+  if (!el) return;
+  const cleanName = String(name || '').trim();
+  const rawRoom = String(room || '').trim();
+  const cleanRoom =
+    rawRoom && rawRoom.toLowerCase() !== 'unassigned' ? formatRoomLabel(rawRoom) : '';
+  let displayName = cleanName || fallback || 'Untitled note';
+  if (cleanRoom) {
+    const bareRoom = rawRoom.replace(/^Room\s+/i, '').trim();
+    const candidates = [...new Set([rawRoom, cleanRoom, bareRoom].filter(Boolean))];
+    for (const r of candidates) {
+      const escaped = r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\s*-\\s*(?:Room\\s+)?${escaped}$`, 'i');
+      if (re.test(displayName)) {
+        displayName = displayName.replace(re, '').trim() || displayName;
+        break;
+      }
+    }
+    el.innerHTML = `<span class="ledger-bed">${esc(cleanRoom)}</span> <span class="editor-title-name">${esc(displayName)}</span>`;
+  } else {
+    el.innerHTML = `<span class="editor-title-name">${esc(displayName)}</span>`;
+  }
+}
+
 function syncProfileInputsToMarkdown() {
   const fields = {
     name: $('nameInput').value.trim(),
@@ -4925,7 +5304,9 @@ function syncProfileInputsToMarkdown() {
   const n = notes.find((x) => x.id === currentId);
   const autoOld = n ? computeNoteTitle(n.name, n.room) : 'Untitled note';
   if (!n || !n.title || n.title === 'Untitled note' || n.title === autoOld) {
-    $('noteTitle').textContent = computeNoteTitle(fields.name, fields.room);
+    renderEditorNoteTitle(fields.name, fields.room, 'Untitled note');
+  } else {
+    renderEditorNoteTitle(n.title, fields.room, n.title);
   }
   updateProfileSummary();
 }
@@ -5027,15 +5408,21 @@ function renderChartLabsSummary() {
     ? `${summary.patient.room} · ${summary.patient.name}`
     : summary.patient.name;
 
+  const metaParts = [`<span>${summary.counts.totalRows} analytes</span>`];
+  if (summary.counts.abnormalRows > 0) {
+    metaParts.push(`<span class="labs-meta-flagged">${summary.counts.abnormalRows} flagged</span>`);
+  }
+  if (summary.counts.columns > 0) {
+    metaParts.push(`<span>${summary.counts.columns} timepoints</span>`);
+  }
+  if (summary.counts.diagnostics > 0) {
+    metaParts.push(`<span>${summary.counts.diagnostics} diagnostics</span>`);
+  }
+
   const metaHtml = `
     <div class="labs-summary-meta">
       <div class="labs-meta-title">${esc(patientTitle)}</div>
-      <div class="labs-meta-badges">
-        <span class="labs-meta-pill">${summary.counts.totalRows} analytes</span>
-        ${summary.counts.abnormalRows > 0 ? `<span class="labs-meta-pill is-abnormal">${summary.counts.abnormalRows} flagged</span>` : ''}
-        ${summary.counts.columns > 0 ? `<span class="labs-meta-pill">${summary.counts.columns} timepoints</span>` : ''}
-        ${summary.counts.diagnostics > 0 ? `<span class="labs-meta-pill">${summary.counts.diagnostics} diagnostics</span>` : ''}
-      </div>
+      <div class="labs-meta-inline">${metaParts.join('<span class="labs-meta-sep" aria-hidden="true"> · </span>')}</div>
     </div>
   `;
 
@@ -5375,7 +5762,7 @@ function renderChartTimeline() {
                       <div class="field"><label>Out</label><input class="tl-q-out" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="e.g. 650"></div>
                       <div class="field"><label>Unit</label><select class="tl-q-io-unit" aria-label="Timeline I&amp;O unit"><option value="ml" selected>mL</option><option value="L">L</option></select></div>
                       <div class="field"><label>+ Pending Task</label><input class="tl-q-task" enterkeyhint="done" autocapitalize="sentences" placeholder="Add checklist item"></div>
-                      <div class="field align-end"><button type="button" class="btn subtle tl-apply-quick-btn" data-key="${esc(entryKey)}">${uiIcon('bolt')} Insert Fields</button></div>
+                      <div class="field align-end"><button type="button" class="btn-secondary sm-btn tl-apply-quick-btn" data-key="${esc(entryKey)}">${uiIcon('bolt')} Insert Fields</button></div>
                     </div>
                   </div>
                   <label class="lbl">Block Markdown</label>
@@ -5388,8 +5775,8 @@ function renderChartTimeline() {
                     )}" data-date-idx="${dateOcc}" data-shift-idx="${s.shiftIndex}" data-orig-shift="${esc(
               s.shift
             )}" data-key="${esc(entryKey)}">${uiIcon('save')} Save Entry</button>
-                    <button type="button" class="btn tl-cancel-entry-btn">Cancel</button>
-                    <button type="button" class="btn danger tl-delete-entry-btn" data-date="${esc(
+                    <button type="button" class="btn-secondary tl-cancel-entry-btn">Cancel</button>
+                    <button type="button" class="ghost-action danger-ghost tl-delete-entry-btn" data-date="${esc(
                       g.date
                     )}" data-date-idx="${dateOcc}" data-shift-idx="${s.shiftIndex}">${uiIcon('trash')} Delete Block</button>
                   </div>
@@ -5451,8 +5838,8 @@ function renderChartTimeline() {
               <div class="timeline-shift-head">
                 <span class="timeline-shift-badge">${esc(s.shift)}</span>
                 <div class="row tight">
-                  <button type="button" class="btn subtle tl-edit-btn" data-key="${esc(entryKey)}">${uiIcon('pencil')} Edit</button>
-                  <button type="button" class="btn subtle tl-copy-btn" data-key="${esc(entryKey)}">${uiIcon('share')} Copy Update</button>
+                  <button type="button" class="ghost-action tl-edit-btn" data-key="${esc(entryKey)}">${uiIcon('pencil')} Edit</button>
+                  <button type="button" class="ghost-action tl-copy-btn" data-key="${esc(entryKey)}">${uiIcon('share')} Copy Update</button>
                 </div>
               </div>
               ${pills.length ? `<div class="timeline-badges">${pills.join('')}</div>` : ''}
@@ -5709,7 +6096,15 @@ async function select(id, opts = {}) {
   updateSaveStatusPill('saved');
   updateUndoButton();
 
-  $('noteTitle').textContent = n.title || 'Untitled note';
+  const selectMeta = metaOf(n.content);
+  const autoOld = computeNoteTitle(n.name, n.room);
+  const hasCustomTitle =
+    Boolean(n.title) && n.title !== 'Untitled note' && n.title !== autoOld;
+  const titleName = hasCustomTitle
+    ? n.title
+    : n.name || selectMeta.name || selectMeta.patient || n.title || 'Untitled note';
+  const titleRoom = n.room || selectMeta.room || selectMeta.bed || '';
+  renderEditorNoteTitle(titleName, titleRoom, n.title || 'Untitled note');
   $('noteText').value = n.content;
   populateProfileInputs(n, n.content, false);
   renderAdmittingHistoryCard(n.content);
@@ -5721,9 +6116,11 @@ async function select(id, opts = {}) {
   $('reply').hidden = true;
   $('preview').textContent = 'Press "Build redacted preview".';
   $('guardPill').textContent = 'CHECKING';
-  $('guardPill').className = 'pill';
-  $('shieldStatus').textContent = 'LOCAL ONLY';
-  $('shieldStatus').className = 'pill';
+  $('guardPill').className = 'status-meta';
+  if ($('shieldStatus')) {
+    $('shieldStatus').textContent = 'LOCAL ONLY';
+    $('shieldStatus').className = 'status-meta';
+  }
   companionStale = false;
   $('copyBtn').disabled = $('sendBtn').disabled = true;
   const detailsEl = $('profileDetails');
@@ -5797,7 +6194,9 @@ async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
     !n.title || n.title === 'Untitled note' || n.title === prevAutoTitle
       ? computeNoteTitle(nameVal, roomVal)
       : n.title;
-  $('noteTitle').textContent = nextTitle;
+  const isCustomTitle =
+    Boolean(n.title) && n.title !== 'Untitled note' && n.title !== prevAutoTitle;
+  renderEditorNoteTitle(isCustomTitle ? nextTitle : nameVal, roomVal, nextTitle);
   const updatedNote = {
     ...n,
     content: text,
@@ -5858,9 +6257,11 @@ function buildPreview() {
   const bad = leaks.length > 0;
   companionStale = false;
   $('guardPill').textContent = bad ? `BLOCKED · ${leaks.length}` : 'PHI CLEARED';
-  $('guardPill').className = 'pill ' + (bad ? 'block' : 'safe');
-  $('shieldStatus').textContent = bad ? 'SEND BLOCKED' : 'LOCAL ONLY';
-  $('shieldStatus').className = 'pill ' + (bad ? 'block' : 'safe');
+  $('guardPill').className = 'status-meta ' + (bad ? 'block' : 'safe');
+  if ($('shieldStatus')) {
+    $('shieldStatus').textContent = bad ? 'SEND BLOCKED' : 'LOCAL ONLY';
+    $('shieldStatus').className = 'status-meta ' + (bad ? 'block' : 'safe');
+  }
   $('copyBtn').disabled = $('sendBtn').disabled = bad;
   const redacted = r.report.replacements.map((x) => esc(x.original)).join(', ') || 'none';
   $('report').innerHTML = `Redacted: <b>${redacted}</b><br>Room kept: <b>${esc(
@@ -5993,10 +6394,10 @@ function openRestoreModal(payload, triggerEl = null) {
       const localMatch = notes.find((l) => l.id === c.id);
       const localNewer = localMatch && (localMatch.updated || 0) > (c.updated || 0);
       const badge = !localMatch
-        ? '<span class="pill safe">New</span>'
+        ? '<span class="status-meta safe">New</span>'
         : localNewer
-          ? '<span class="pill warn">Local Newer</span>'
-          : '<span class="pill">Match</span>';
+          ? '<span class="status-meta warn">Local Newer</span>'
+          : '<span class="status-meta">Match</span>';
       return `<div class="restore-preview-row"><span>${esc(c.title || c.name || c.id)} (${esc(c.room || 'Unassigned')})</span>${badge}</div>`;
     })
     .join('');
@@ -6069,7 +6470,7 @@ function updateApiKeyStatusPill() {
   if (!pill) return;
   const hasKey = Boolean($('apiKey')?.value.trim());
   pill.textContent = hasKey ? 'LOADED IN RAM' : 'NO KEY IN RAM';
-  pill.className = 'pill ' + (hasKey ? 'safe' : '');
+  pill.className = 'status-meta' + (hasKey ? ' safe' : '');
 }
 
 function extractRelayFooterText() {
@@ -6083,13 +6484,41 @@ function extractRelayFooterText() {
 
 /* ---------- wire up ---------- */
 // Header status & PWA banners
-if ($('backupReminderPill')) {
-  $('backupReminderPill').onclick = runFullWorkspaceBackup;
-  $('backupReminderPill').onkeydown = (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      runFullWorkspaceBackup();
+if ($('backupBannerNowBtn')) $('backupBannerNowBtn').onclick = runFullWorkspaceBackup;
+if ($('backupBannerDismissBtn')) {
+  $('backupBannerDismissBtn').onclick = () => {
+    backupBannerDismissed = true;
+    if ($('backupReminderBanner')) $('backupReminderBanner').hidden = true;
+  };
+}
+if ($('roundsBackupMenuBtn')) {
+  $('roundsBackupMenuBtn').onclick = () => {
+    closeAllMenus();
+    runFullWorkspaceBackup();
+  };
+}
+if ($('roundsMoreBtn')) {
+  $('roundsMoreBtn').onclick = (e) => {
+    e.stopPropagation();
+    const menu = $('roundsMoreMenu');
+    if (!menu) return;
+    const willOpen = menu.hidden;
+    closeAllMenus();
+    menu.hidden = !willOpen;
+    $('roundsMoreBtn').setAttribute('aria-expanded', String(willOpen));
+  };
+}
+if ($('roundsToggleExpandAllBtn')) {
+  $('roundsToggleExpandAllBtn').onclick = () => {
+    const allOpen = $('roundsToggleExpandAllBtn').dataset.allOpen === 'true';
+    const visibleIds = getFilteredSortedRoundsPatients().map((p) => p.id);
+    if (allOpen) {
+      visibleIds.forEach((id) => expandedRowIds.delete(id));
+    } else {
+      visibleIds.forEach((id) => expandedRowIds.add(id));
     }
+    closeAllMenus();
+    renderRounds();
   };
 }
 if ($('swDismissBtn')) {
@@ -6234,10 +6663,10 @@ $('navEditorBtn').onclick = () => setMode('editor');
 $('navLibraryBtn').onclick = () => setMode('library');
 $('navScratchBtn').onclick = () => setMode('scratch');
 $('navSettingsBtn').onclick = () => setMode('settings');
-$('backToRoundsBtn').onclick = () => setMode('rounds');
-$('backToRoundsFromLibraryBtn').onclick = () => setMode('rounds');
-$('backToRoundsFromScratchBtn').onclick = () => setMode('rounds');
-$('backToRoundsFromSettingsBtn').onclick = () => setMode('rounds');
+if ($('backToRoundsBtn')) $('backToRoundsBtn').onclick = () => setMode('rounds');
+if ($('backToRoundsFromLibraryBtn')) $('backToRoundsFromLibraryBtn').onclick = () => setMode('rounds');
+if ($('backToRoundsFromScratchBtn')) $('backToRoundsFromScratchBtn').onclick = () => setMode('rounds');
+if ($('backToRoundsFromSettingsBtn')) $('backToRoundsFromSettingsBtn').onclick = () => setMode('rounds');
 $('openSettingsFromEditorBtn').onclick = () => {
   setMode('settings');
   setSettingsTab('ai');
@@ -6317,10 +6746,7 @@ $('saveScratchBtn').onclick = saveScratchNote;
 $('cancelScratchBtn').onclick = () => closeScratchEditor(false);
 $('cancelScratchFootBtn').onclick = () => closeScratchEditor(false);
 
-// Rounds toolbar, KPI stat filters & custom category add forms
-document.querySelectorAll('.census-summary .stat-card').forEach((card) => {
-  card.onclick = () => setActiveRoundsFilter(card.dataset.statFilter || 'active');
-});
+// Rounds toolbar & custom category add forms
 if ($('roundsAddCatForm')) {
   $('roundsAddCatForm').onsubmit = (e) => {
     e.preventDefault();
@@ -6386,14 +6812,6 @@ if ($('roundsSortSelect')) {
     renderRounds();
   };
 }
-if ($('roundsCompactBtn')) {
-  $('roundsCompactBtn').onclick = () => {
-    roundsCompactMode = !roundsCompactMode;
-    expandedCompactIds.clear();
-    safeSetItem(PREFS_COMPACT_KEY, String(roundsCompactMode));
-    renderRounds();
-  };
-}
 
 $('bedSearchInput').oninput = (e) => {
   searchQuery = e.target.value;
@@ -6401,15 +6819,28 @@ $('bedSearchInput').oninput = (e) => {
 };
 
 $('copyCensusBtn').onclick = async () => {
+  closeAllMenus();
   const report = formatDailyCensusReport(notes);
   await copyTextWithFallback(report, 'Daily census copied to clipboard', 'Copy Daily Census');
 };
 
-$('handoverBtn').onclick = () => openHandoverModal($('handoverBtn'));
-$('inboxBtn').onclick = () => openInboxModal(null, $('inboxBtn'));
+$('handoverBtn').onclick = () => {
+  closeAllMenus();
+  openHandoverModal($('handoverBtn'));
+};
+$('inboxBtn').onclick = () => {
+  closeAllMenus();
+  openInboxModal(null, $('inboxBtn'));
+};
 
-$('quickNewPtBtn').onclick = newNoteAndEdit;
-$('loadSyntheticBtn').onclick = loadSampleCensus;
+$('quickNewPtBtn').onclick = (e) => {
+  closeAllMenus();
+  newNoteAndEdit(e?.currentTarget || $('quickNewPtBtn'));
+};
+$('loadSyntheticBtn').onclick = () => {
+  closeAllMenus();
+  loadSampleCensus();
+};
 
 // Editor actions & Patient Switcher
 if ($('editorPatientSelect')) {
@@ -6538,11 +6969,12 @@ $('deleteBtn').onclick = async () => {
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   clearTimeout(chartAutosaveTimer);
   dirtyChart = false;
+  updateSaveStatusPill('saved');
   await remove(currentId);
   currentId = null;
   await refresh();
   $('noteText').value = '';
-  $('noteTitle').textContent = 'Untitled note';
+  renderEditorNoteTitle('', '', 'Untitled note');
   await setMode('rounds');
   toast(`Deleted ${deletedNote.room || deletedNote.title || 'chart'}`, {
     onUndo: async () => {
@@ -6566,7 +6998,7 @@ $('exportBtn').onclick = async () => {
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   syncProfileInputsToMarkdown();
   const liveContent = $('noteText').value;
-  const title = $('noteTitle').textContent || n.title || 'note';
+  const title = n.title || $('noteTitle').textContent || 'note';
   await shareOrDownload({
     filename: title.replace(/[/\\]/g, '_') + '.md',
     text: liveContent,
@@ -6581,7 +7013,7 @@ $('exportDeidBtn').onclick = async () => {
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   syncProfileInputsToMarkdown();
   const r = redact($('noteText').value, profile());
-  const outName = redactFilename(($('noteTitle').textContent || n.title) + '.md', profile());
+  const outName = redactFilename((n.title || $('noteTitle').textContent || 'note') + '.md', profile());
   const shared = await shareOrDownload({
     filename: outName,
     text: r.text,
@@ -7892,7 +8324,7 @@ function updateAdmitWhisperStatus(customText = null) {
   if (!pill) return;
   if (customText) {
     pill.textContent = customText;
-    pill.className = 'pill';
+    pill.className = 'status-meta';
     return;
   }
   const st = whisperCtrl.getState();
@@ -7900,19 +8332,19 @@ function updateAdmitWhisperStatus(customText = null) {
   const isCached = cachedWhisperModels.has(selectedWhisperModel);
   if (admitRecorder.isRecording()) {
     pill.textContent = 'RECORDING';
-    pill.className = 'pill block';
+    pill.className = 'status-meta block';
   } else if (st.status === 'transcribing') {
     pill.textContent = 'TRANSCRIBING...';
-    pill.className = 'pill safe';
+    pill.className = 'status-meta safe';
   } else if (isLoaded) {
     pill.textContent = 'WHISPER READY';
-    pill.className = 'pill safe';
+    pill.className = 'status-meta safe';
   } else if (isCached && cachedWhisperRuntimeReady) {
     pill.textContent = 'WHISPER CACHED';
-    pill.className = 'pill safe';
+    pill.className = 'status-meta safe';
   } else {
     pill.textContent = 'MIC / KEYBOARD READY';
-    pill.className = 'pill';
+    pill.className = 'status-meta';
   }
 }
 
@@ -8402,6 +8834,60 @@ if ($('admitWhisperTranscribeBtn')) {
   };
 }
 
+// Bedside Pitch pop-up modal actions
+if ($('pitchModalClose')) $('pitchModalClose').onclick = closePitchModal;
+if ($('pitchPromptInput')) {
+  $('pitchPromptInput').oninput = () => {
+    syncPitchPresetChips($('pitchPromptInput').value);
+    refreshPitchGuard();
+  };
+}
+document.querySelectorAll('#pitchPresets [data-pitch-preset]').forEach((btn) => {
+  btn.onclick = () => {
+    const preset = PITCH_PRESETS.find((p) => p.id === btn.dataset.pitchPreset);
+    if (!preset || !$('pitchPromptInput')) return;
+    $('pitchPromptInput').value = preset.prompt;
+    syncPitchPresetChips(preset.prompt);
+    refreshPitchGuard();
+  };
+});
+if ($('pitchCopyPromptBtn')) {
+  $('pitchCopyPromptBtn').onclick = () => {
+    if (!refreshPitchGuard()) return toast('PHI leak detected — clear blocked terms first');
+    try {
+      const payload = buildPayload(pitchSafeText, $('pitchPromptInput').value, pitchProfile);
+      copyTextWithFallback(payload, 'Copied de-identified Pitch prompt', 'Copy Safe Pitch Prompt');
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+}
+if ($('pitchGenerateBtn')) {
+  $('pitchGenerateBtn').onclick = generatePitchInModal;
+}
+if ($('pitchCopyReplyBtn')) {
+  $('pitchCopyReplyBtn').onclick = () => {
+    const replyText = $('pitchReply')?.textContent.trim();
+    if (!replyText) return;
+    copyTextWithFallback(replyText, 'Pitch copied', 'Copy Bedside Pitch');
+  };
+}
+if ($('pitchOpenChartBtn')) {
+  $('pitchOpenChartBtn').onclick = async () => {
+    const id = pitchNoteId;
+    closePitchModal();
+    if (!id) return;
+    await select(id);
+    await setMode('editor');
+  };
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.header-more-wrap, .row-more-wrap')) {
+    closeAllMenus();
+  }
+});
+
 // Modal backdrop clicks & global keyboard shortcuts
 document.querySelectorAll('.modal-overlay').forEach((overlay) => {
   overlay.addEventListener('click', (e) => {
@@ -8412,11 +8898,15 @@ document.querySelectorAll('.modal-overlay').forEach((overlay) => {
     else if (overlay.id === 'handoverModal') closeHandoverModal();
     else if (overlay.id === 'inboxModal') closeInboxModal(false);
     else if (overlay.id === 'calcModal') closeCalcModal();
+    else if (overlay.id === 'pitchModal') closePitchModal();
     else if (overlay.id === 'restoreModal' || overlay.id === 'manualCopyModal') closeModalEl(overlay);
   });
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (!activeModalEl || activeModalEl.hidden)) {
+    closeAllMenus();
+  }
   if (activeModalEl && !activeModalEl.hidden) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -8426,6 +8916,7 @@ document.addEventListener('keydown', (e) => {
       else if (activeModalEl.id === 'handoverModal') closeHandoverModal();
       else if (activeModalEl.id === 'inboxModal') closeInboxModal(false);
       else if (activeModalEl.id === 'calcModal') closeCalcModal();
+      else if (activeModalEl.id === 'pitchModal') closePitchModal();
       else closeModalEl(activeModalEl);
       return;
     }

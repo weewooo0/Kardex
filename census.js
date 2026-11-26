@@ -1444,11 +1444,21 @@ export function parseChart(content, note = {}) {
 
   // Extract Service Plans & Pending items from latest shift block (prevents cross-shift duplication)
   let servicePlans = extractServicePlansFromBlock(latestShiftBlock);
+  let servicePlanGroups = extractServicePlanGroupsFromBlock(latestShiftBlock);
   if (servicePlans.length === 0 && isAddendumOnlyBlock(latestShiftBlock)) {
     for (let i = 1; i < searchBlocks.length; i++) {
       const prevPlans = extractServicePlansFromBlock(searchBlocks[i]);
       if (prevPlans.length > 0) {
         servicePlans = prevPlans;
+        break;
+      }
+    }
+  }
+  if (servicePlanGroups.length === 0 && isAddendumOnlyBlock(latestShiftBlock)) {
+    for (let i = 1; i < searchBlocks.length; i++) {
+      const prevGroups = extractServicePlanGroupsFromBlock(searchBlocks[i]);
+      if (prevGroups.length > 0) {
+        servicePlanGroups = prevGroups;
         break;
       }
     }
@@ -1499,6 +1509,7 @@ export function parseChart(content, note = {}) {
     medications,
     medicationsDate,
     servicePlans,
+    servicePlanGroups,
     pending: pendingResult.pending,
   };
 }
@@ -1724,6 +1735,86 @@ function extractServicePlansFromBlock(blockText) {
   }
 
   return plans;
+}
+
+function normalizeServicePlanTag(rawPrefix) {
+  const clean = String(rawPrefix || '').trim();
+  if (!clean || /^service$/i.test(clean)) return 'SERVICE';
+  if (/^ids?$/i.test(clean)) return 'ID';
+  return clean.toUpperCase();
+}
+
+export function extractServicePlanGroupsFromBlock(blockText) {
+  const lines = String(blockText || '').split('\n');
+  const groups = [];
+  let curTag = '';
+  let curItems = [];
+
+  const flushGroup = () => {
+    if (!curTag || !curItems.length) {
+      curItems = [];
+      return;
+    }
+    if (curTag === 'SERVICE') {
+      for (const item of curItems) {
+        groups.push({ tag: 'SERVICE', text: item });
+      }
+    } else {
+      const existing = groups.find((g) => g.tag === curTag);
+      const joined = curItems.join('; ');
+      if (existing) existing.text = `${existing.text}; ${joined}`;
+      else groups.push({ tag: curTag, text: joined });
+    }
+    curItems = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (/^(?:\*{0,2})(?:Generic|General|Routine)\s+Plans?(?:\*{0,2})\s*:/i.test(trimmed)) {
+      flushGroup();
+      curTag = '';
+      continue;
+    }
+
+    const planHeaderMatch = trimmed.match(
+      /^(?:\*{0,2})(?:Service|([A-Za-z][A-Za-z\s/&+-]{1,30}))\s+Plans?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i
+    );
+    if (planHeaderMatch && !/^#{2,3}\s+/.test(trimmed)) {
+      const prefix = (planHeaderMatch[1] || 'Service').trim();
+      if (!/^(?:generic|general|routine)$/i.test(prefix)) {
+        flushGroup();
+        curTag = normalizeServicePlanTag(prefix);
+        const inlineItem = (planHeaderMatch[2] || '').trim();
+        if (inlineItem && !/^none$/i.test(inlineItem)) {
+          curItems.push(inlineItem.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim());
+        }
+        continue;
+      }
+    }
+
+    if (curTag) {
+      if (
+        !trimmed ||
+        /^#{2,3}\s+/.test(trimmed) ||
+        /^(?:\*{0,2})(?:If\s+ok|Pending|Vitals|VS|Vent|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Meds?|Thank\s+you|Footer)\b/i.test(
+          trimmed
+        )
+      ) {
+        flushGroup();
+        curTag = '';
+        continue;
+      }
+
+      const item = trimmed.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim();
+      if (item && !/^none$/i.test(item)) {
+        curItems.push(item);
+      }
+    }
+  }
+
+  flushGroup();
+  return groups;
 }
 
 function isMedPlaceholder(text) {

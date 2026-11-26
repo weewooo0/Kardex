@@ -1,38 +1,17 @@
 export const THEME_PRESETS = [
   {
-    id: 'midnight',
-    name: 'Midnight Teal',
+    id: 'obsidian',
+    name: 'True Obsidian',
     mode: 'dark',
-    themeColor: '#0b1020',
-    swatches: ['#0b1020', '#141b2e', '#5eead4'],
+    themeColor: '#0C0C0D',
+    swatches: ['#0C0C0D', '#161618', '#F5F5F4'],
   },
   {
-    id: 'amoled',
-    name: 'AMOLED Black',
-    mode: 'dark',
-    themeColor: '#000000',
-    swatches: ['#000000', '#0c0f14', '#2dd4bf'],
-  },
-  {
-    id: 'slate',
-    name: 'Slate Cobalt',
-    mode: 'dark',
-    themeColor: '#0f172a',
-    swatches: ['#0f172a', '#1e293b', '#60a5fa'],
-  },
-  {
-    id: 'charcoal',
-    name: 'Warm Charcoal',
-    mode: 'dark',
-    themeColor: '#141210',
-    swatches: ['#141210', '#1f1c19', '#fbbf24'],
-  },
-  {
-    id: 'daylight',
-    name: 'Daylight Ward',
+    id: 'paper',
+    name: 'Ink & Paper',
     mode: 'light',
-    themeColor: '#f1f5f9',
-    swatches: ['#f1f5f9', '#ffffff', '#0f766e'],
+    themeColor: '#F7F7F5',
+    swatches: ['#F7F7F5', '#FFFFFF', '#111111'],
   },
 ];
 
@@ -60,7 +39,18 @@ const THEME_MAP = new Map(THEME_PRESETS.map((p) => [p.id, p]));
 
 export function normalizeThemeId(id) {
   const key = String(id || '').trim().toLowerCase();
-  return THEME_MAP.has(key) ? key : 'midnight';
+  if (key === 'paper' || key === 'daylight' || key === 'light') return 'paper';
+  if (
+    key === 'obsidian' ||
+    key === 'midnight' ||
+    key === 'amoled' ||
+    key === 'slate' ||
+    key === 'charcoal' ||
+    key === 'dark'
+  ) {
+    return 'obsidian';
+  }
+  return 'obsidian';
 }
 
 export function getThemePreset(id) {
