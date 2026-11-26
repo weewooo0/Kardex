@@ -1467,7 +1467,11 @@ function renderRounds() {
         );
       }
       if (pt.hgt) metricPills.push(`<span class="metric-pill"><b>HGT:</b> ${esc(pt.hgt)}${ageSuffix}</span>`);
-      if (pt.labs) metricPills.push(`<span class="metric-pill"><b>Labs:</b> ${esc(pt.labs)}${ageSuffix}</span>`);
+      if (pt.labs) {
+        metricPills.push(
+          `<button type="button" class="metric-pill labs-link" data-id="${pt.id}" title="Open full Lab Results &amp; flowsheet"><b>Labs:</b> ${esc(pt.labs)}${ageSuffix} <span class="labs-link-cta" aria-hidden="true">View all →</span></button>`
+        );
+      }
       if (pt.drips) metricPills.push(`<span class="metric-pill drip"><b>Drips:</b> ${esc(pt.drips)}${ageSuffix}</span>`);
 
       const medsAgeSuffix =
@@ -1512,9 +1516,12 @@ function renderRounds() {
             <div class="pt-title">${esc(pt.name)}</div>
             <div class="pt-meta">${metaParts.join(' · ')}</div>
           </div>
-          <div class="scut-status-tags">${statusTag}${extraCatTags}${
-        roundsCompactMode ? `<span class="compact-chevron" aria-hidden="true">${uiIcon('chevron-right')}</span>` : ''
-      }</div>
+          <div class="scut-head-right">
+            <div class="scut-status-tags">${statusTag}${extraCatTags}${
+              roundsCompactMode ? `<span class="compact-chevron" aria-hidden="true">${uiIcon('chevron-right')}</span>` : ''
+            }</div>
+            <button type="button" class="open-labs-btn" data-id="${pt.id}" title="Open Lab Results summary" aria-label="Open Lab Results for ${esc(pt.name)}">${uiIcon('flask')}<span>Labs</span></button>
+          </div>
         </div>
 
         <div class="scut-assessment">
@@ -1556,6 +1563,21 @@ function renderRounds() {
     .join('');
 
   // Wire card events
+  async function openPatientLabsTab(id) {
+    if (!id) return;
+    await select(id);
+    setEditorView('labs');
+    await setMode('editor');
+    requestAnimationFrame(() => {
+      const bar = document.querySelector('#editorSection .editor-view-bar');
+      if (bar && typeof bar.scrollIntoView === 'function') {
+        bar.scrollIntoView({ behavior: 'auto', block: 'start' });
+      } else {
+        window.scrollTo(0, 0);
+      }
+    });
+  }
+
   if (roundsCompactMode) {
     container.querySelectorAll('.scut-head[data-toggle-compact-id]').forEach((headEl) => {
       const toggleCompactCard = () => {
@@ -1572,8 +1594,12 @@ function renderRounds() {
           nextExpanded ? 'Tap to collapse patient card' : 'Tap to expand patient card'
         );
       };
-      headEl.onclick = toggleCompactCard;
+      headEl.onclick = (e) => {
+        if (e.target.closest('.open-labs-btn')) return;
+        toggleCompactCard();
+      };
       headEl.onkeydown = (e) => {
+        if (e.target.closest('.open-labs-btn')) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           toggleCompactCard();
@@ -1589,6 +1615,19 @@ function renderRounds() {
     btn.onclick = async () => {
       await select(btn.dataset.id);
       await setMode('editor');
+    };
+  });
+
+  container.querySelectorAll('.open-labs-btn').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      await openPatientLabsTab(btn.dataset.id);
+    };
+  });
+
+  container.querySelectorAll('.metric-pill.labs-link').forEach((btn) => {
+    btn.onclick = async () => {
+      await openPatientLabsTab(btn.dataset.id);
     };
   });
 
@@ -1748,6 +1787,7 @@ function populateShiftFormDefaults() {
   const carryPend = $('cfPending') ? $('cfPending').checked : true;
   const carryPlans = $('cfServicePlans') ? $('cfServicePlans').checked : true;
   const carryStanding = $('cfStanding') ? $('cfStanding').checked : true;
+  const carryFeeding = $('cfFeeding') ? $('cfFeeding').checked : Boolean(cfData.feeding);
   const carryPe = $('cfPe') ? $('cfPe').checked : Boolean(cfData.pe);
 
   shiftFormValues = {
@@ -1765,6 +1805,7 @@ function populateShiftFormDefaults() {
     ioUnit: 'ml',
     io24: '',
     vent: carryStanding ? cfData.vent || '' : '',
+    feeding: carryFeeding ? cfData.feeding || '' : '',
     pe: carryPe && cfData.pe ? cfData.pe : DEFAULT_NORMAL_PE_TEXT,
     assessment: parsed.assessment || '',
     drips: carryStanding ? cfData.drips || '' : '',
@@ -1936,6 +1977,12 @@ function renderShiftGuidedForm() {
                 <label for="sfVent">Ventilator Settings</label>
                 <input id="sfVent" data-sf-key="vent" value="${esc(shiftFormValues.vent)}" placeholder="e.g. AC/VC Vt 420 | PEEP 8 | FiO2 40%">
               </div>`);
+          } else if (sub.id === 'feeding') {
+            subParts.push(`
+              <div class="field">
+                <label for="sfFeeding">Diet / Feeding</label>
+                <textarea id="sfFeeding" data-sf-key="feeding" rows="2" placeholder="e.g. DAT, Soft diet, Novasource 1 bot q6h, NPO">${esc(shiftFormValues.feeding)}</textarea>
+              </div>`);
           } else if (sub.id === 'pe') {
             const prevPe = extractCarryForwardData(shiftingSourceContent).pe;
             subParts.push(`
@@ -2043,6 +2090,7 @@ function applyCarryForwardToggleToShiftForm(changedId = null) {
   const carryPend = $('cfPending')?.checked !== false;
   const carryPlans = $('cfServicePlans')?.checked !== false;
   const carryStanding = $('cfStanding')?.checked !== false;
+  const carryFeeding = Boolean($('cfFeeding')?.checked);
   const carryPe = Boolean($('cfPe')?.checked);
 
   const domMap = {};
@@ -2061,6 +2109,10 @@ function applyCarryForwardToggleToShiftForm(changedId = null) {
     domMap.sfVent = shiftFormValues.vent;
     domMap.sfDrips = shiftFormValues.drips;
     domMap.sfMeds = shiftFormValues.meds;
+  }
+  if (!changedId || changedId === 'cfFeeding') {
+    shiftFormValues.feeding = carryFeeding ? cfData.feeding || '' : '';
+    domMap.sfFeeding = shiftFormValues.feeding;
   }
   if (!changedId || changedId === 'cfPe') {
     shiftFormValues.pe = carryPe && cfData.pe ? cfData.pe : '';
@@ -2118,6 +2170,12 @@ function openShiftModal(noteId, triggerEl = null) {
   $('cfServicePlans').checked = true;
   $('cfStanding').checked = true;
 
+  const hasPrevFeeding = Boolean(cfData.feeding);
+  if ($('cfFeeding')) {
+    $('cfFeeding').checked = hasPrevFeeding;
+    $('cfFeeding').disabled = !hasPrevFeeding;
+  }
+
   const hasPrevPe = Boolean(cfData.pe);
   if ($('cfPe')) {
     $('cfPe').checked = hasPrevPe;
@@ -2134,6 +2192,15 @@ function openShiftModal(noteId, triggerEl = null) {
     .filter(Boolean)
     .join(' + ');
   $('cfStandingMeta').textContent = `(${standingParts || 'none'})`;
+  if ($('cfFeedingMeta')) {
+    if (hasPrevFeeding) {
+      const firstLine = cfData.feeding.split('\n')[0].trim();
+      const shortFeeding = firstLine.length > 42 ? `${firstLine.slice(0, 39)}...` : firstLine;
+      $('cfFeedingMeta').textContent = `(${shortFeeding})`;
+    } else {
+      $('cfFeedingMeta').textContent = '(none in prior shifts)';
+    }
+  }
   if ($('cfPeMeta')) {
     const lineCount = cfData.pe ? cfData.pe.split('\n').filter((l) => l.trim()).length : 0;
     const srcLabel = cfData.peSource === 'admitting' ? 'from admitting PE' : 'from prior shift';
@@ -2474,18 +2541,34 @@ function cloneConfig(cfg) {
 
 function normalizeTemplateSections(cfg) {
   const out = cloneConfig(cfg || DEFAULT_TEMPLATE_CONFIG);
+  const needsV2Migration = !(Number(out.configVersion) >= 2);
   const objSec = (out.sections || []).find((s) => s.id === 'objective');
   if (objSec) {
     if (!Array.isArray(objSec.subItems)) objSec.subItems = [];
     for (const reqSub of [
-      { id: 'io24', label: '24h Fluid Balance (6am)', enabled: false },
+      { id: 'io', label: 'Intake & Output (I&O)', enabled: true },
+      { id: 'io24', label: '24h Fluid Balance (6am)', enabled: true },
       { id: 'vent', label: 'Ventilator Settings', enabled: false },
     ]) {
       if (!objSec.subItems.some((sub) => sub.id === reqSub.id)) {
         objSec.subItems.push({ ...reqSub });
       }
     }
+    if (!objSec.subItems.some((sub) => sub.id === 'feeding')) {
+      const peIdx = objSec.subItems.findIndex((sub) => sub.id === 'pe');
+      const feedingSub = { id: 'feeding', label: 'Diet / Feeding', enabled: true };
+      if (peIdx >= 0) objSec.subItems.splice(peIdx, 0, feedingSub);
+      else objSec.subItems.push(feedingSub);
+    }
+    if (needsV2Migration) {
+      for (const sub of objSec.subItems) {
+        if (sub && (sub.id === 'io' || sub.id === 'io24' || sub.id === 'feeding')) {
+          sub.enabled = true;
+        }
+      }
+    }
   }
+  out.configVersion = 2;
   return out;
 }
 
@@ -7148,7 +7231,7 @@ if ($('shiftDateInput')) {
     if (!shiftRawEdited) syncShiftPreviewFromForm({ forceRawUpdate: true });
   };
 }
-['cfPending', 'cfServicePlans', 'cfStanding', 'cfPe'].forEach((id) => {
+['cfPending', 'cfServicePlans', 'cfStanding', 'cfFeeding', 'cfPe'].forEach((id) => {
   if ($(id)) $(id).onchange = () => applyCarryForwardToggleToShiftForm(id);
 });
 

@@ -53,6 +53,7 @@ export const DEFAULT_NORMAL_PE_TEXT = [
 ].join('\n');
 
 export const DEFAULT_TEMPLATE_CONFIG = {
+  configVersion: 2,
   header: 'Good day {{ap}}\n\nUpdate on your patient',
   showName: true,
   showAgeSex: true,
@@ -66,9 +67,10 @@ export const DEFAULT_TEMPLATE_CONFIG = {
       enabled: true,
       subItems: [
         { id: 'vitals', label: 'Vital signs', enabled: true },
-        { id: 'io', label: 'Intake & Output (I&O)', enabled: false },
-        { id: 'io24', label: '24h Fluid Balance (6am)', enabled: false },
+        { id: 'io', label: 'Intake & Output (I&O)', enabled: true },
+        { id: 'io24', label: '24h Fluid Balance (6am)', enabled: true },
         { id: 'vent', label: 'Ventilator Settings', enabled: false },
+        { id: 'feeding', label: 'Diet / Feeding', enabled: true },
         { id: 'pe', label: 'Physical Exam', enabled: true },
       ],
     },
@@ -80,6 +82,7 @@ export const DEFAULT_TEMPLATE_CONFIG = {
 };
 
 export const MORNING_TEMPLATE_CONFIG = {
+  configVersion: 2,
   header: 'Good day {{ap}}\n\nUpdate on your patient',
   showName: true,
   showAgeSex: true,
@@ -94,8 +97,9 @@ export const MORNING_TEMPLATE_CONFIG = {
       subItems: [
         { id: 'vitals', label: 'Vital signs', enabled: true },
         { id: 'io', label: 'Intake & Output (I&O)', enabled: true },
-        { id: 'io24', label: '24h Fluid Balance (6am)', enabled: false },
+        { id: 'io24', label: '24h Fluid Balance (6am)', enabled: true },
         { id: 'vent', label: 'Ventilator Settings', enabled: false },
+        { id: 'feeding', label: 'Diet / Feeding', enabled: true },
         { id: 'pe', label: 'Physical Exam', enabled: true },
       ],
     },
@@ -142,6 +146,8 @@ export function compileTemplateConfig(config = DEFAULT_TEMPLATE_CONFIG) {
             subBlocks.push('24h Net:');
           } else if (sub.id === 'vent') {
             subBlocks.push('Vent: {{vent}}');
+          } else if (sub.id === 'feeding') {
+            subBlocks.push('Feeding: {{feeding}}');
           } else if (sub.id === 'pe') {
             subBlocks.push(DEFAULT_NORMAL_PE_TEXT);
           }
@@ -2163,6 +2169,45 @@ export function extractLatestPeFromChart(content) {
   return { pe: '', source: '' };
 }
 
+const FEEDING_STOP_LINE_RE =
+  /^(?:#{2,3}\s+|---+$|(?:\*{0,2})(?:HGTs?|CBGs?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Shift\s+I&O|I&O|Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Labs?|Laboratory(?:\s+updates?)?|PE|Physical\s+Exam(?:ination)?|Subjective|Objective|Assessment|Impression|Working\s+Impression|Problem\s+list)(?:\*{0,2})\s*:|(?:\*{0,2})(?:HGTs?|CBGs?|Medications?|Meds?|Pending|Plans?|Drips?|On\s+hold)(?:\*{0,2})\s*$|Thank\s+you\b|BP\b|HR\b|PR\b|RR\b|Tmax\b|Temp\b|O2\b|24\s*-?\s*h(?:r|rs|our|ours)?\b|I\s+-|O\s+-|I\s+\d|O\s+\d)/i;
+
+function extractFeedingFromBlock(blockText) {
+  const lines = String(blockText || '').split('\n');
+  const out = [];
+  let inFeeding = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!inFeeding) {
+      const m = trimmed.match(/^(?:[-*]\s*)?(?:\*{0,2})(?:Feeding|Diet|Nutrition)(?:\*{0,2})\s*:\s*(.*)$/i);
+      if (!m) continue;
+      inFeeding = true;
+      const inline = (m[1] || '').trim();
+      if (inline && !/^(?:none|n\/a)$/i.test(inline)) {
+        out.push(inline);
+      }
+      continue;
+    }
+
+    if (!trimmed) break;
+    if (
+      FEEDING_STOP_LINE_RE.test(trimmed) ||
+      PE_SYSTEM_PREFIX_RE.test(trimmed) ||
+      PE_GENERAL_SURVEY_RE.test(trimmed) ||
+      PE_FINDING_LINE_RE.test(trimmed)
+    ) {
+      break;
+    }
+    const cleaned = trimmed.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim();
+    if (cleaned && !/^(?:none|n\/a)$/i.test(cleaned)) {
+      out.push(cleaned);
+    }
+  }
+
+  return out.join('\n').trim();
+}
+
 export function extractStandingDictationContext(content) {
   const text = String(content || '');
   const allShiftsDesc = splitAnyShiftBlocks(text)
@@ -2186,8 +2231,7 @@ export function extractStandingDictationContext(content) {
       onHold = extractLabeledListFromBlock(blk, /^(?:\*{0,2})(?:On\s+hold|Hold|Held)(?:\*{0,2}):\s*(.*)$/i);
     }
     if (!feeding) {
-      const fMatch = blk.match(/^(?:\*{0,2})(?:Feeding|Diet|Nutrition)(?:\*{0,2}):\s*(.+)$/im);
-      if (fMatch && fMatch[1].trim()) feeding = fMatch[1].trim();
+      feeding = extractFeedingFromBlock(blk);
     }
     const metrics = extractClinicalMetricsFromBlock(blk);
     if (!drips && metrics.drips) drips = metrics.drips;
@@ -2266,6 +2310,7 @@ export function extractCarryForwardData(content) {
       servicePlans: [],
       vent: '',
       drips: '',
+      feeding: '',
       pe: '',
       peSource: '',
       hasPriorBlock: false,
@@ -2306,13 +2351,17 @@ export function extractCarryForwardData(content) {
     }
   }
 
-  // Standing lines: Vent & Drips
+  // Standing lines: Vent, Drips & Feeding
   let vent = '';
   let drips = '';
+  let feeding = '';
   let dripsEvaluated = false;
 
   for (let i = 0; i < candidateBlocks.length; i++) {
     const blk = candidateBlocks[i];
+    if (!feeding) {
+      feeding = extractFeedingFromBlock(blk);
+    }
     for (const line of blk.split('\n')) {
       const trimmed = line.trim();
       if (!vent && /^(?:[-*]\s*)?(?:Vent(?:ilator)?|Vent\s+Settings|Settings):\s*(.+)$/i.test(trimmed)) {
@@ -2327,7 +2376,7 @@ export function extractCarryForwardData(content) {
         dripsEvaluated = true;
       }
     }
-    if (vent && dripsEvaluated) break;
+    if (vent && feeding && dripsEvaluated) break;
     // Do not reach across prior structured shifts for drips if primary block explicitly omitted drips, unless primary is addendum
     if (i === 0 && !primaryAddendum) {
       dripsEvaluated = true;
@@ -2342,6 +2391,7 @@ export function extractCarryForwardData(content) {
     servicePlans,
     vent,
     drips,
+    feeding,
     pe: peInfo.pe,
     peSource: peInfo.source,
     hasPriorBlock: segment.hasShiftHeading,
@@ -2368,6 +2418,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   const carryPending = options.carryPending !== false;
   const carryServicePlans = options.carryServicePlans !== false;
   const carryStanding = options.carryStanding !== false;
+  const carryFeeding = options.carryFeeding !== undefined ? options.carryFeeding !== false : carryStanding;
   const carryPe = options.carryPe !== false;
 
   const hasExplicitAssessment = /\{\{\s*(?:assessment|problem[_\s]+list)\s*\}\}/i.test(tpl);
@@ -2397,6 +2448,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   // 2. Double-brace placeholders (including friendly layman aliases)
   const ventVal = carryStanding ? data.vent : '';
   const dripsVal = carryStanding ? data.drips : '';
+  const feedingVal = carryFeeding ? data.feeding : '';
   const peVal = carryPe ? data.pe : '';
   const pendingVal = carryPending ? data.openPending.map((p) => `- [ ] ${p}`).join('\n') : '';
   const servicePlansVal = carryServicePlans ? data.servicePlans.map((p) => `- ${p}`).join('\n') : '';
@@ -2426,6 +2478,10 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
     date,
     vent: ventVal,
     drips: dripsVal,
+    feeding: feedingVal,
+    diet: feedingVal,
+    'diet/feeding': feedingVal,
+    nutrition: feedingVal,
     pe: peVal,
     physical_exam: peVal,
     'physical exam': peVal,
@@ -2434,7 +2490,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
     'service plans': servicePlansVal,
   };
 
-  const optionalLineRe = /^(?:Vent:\s*)?\{\{\s*(drips|vent|pe|physical_exam|physical\s+exam|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
+  const optionalLineRe = /^(?:(?:Vent|Feeding|Diet):\s*)?\{\{\s*(drips|vent|feeding|diet|diet\/feeding|nutrition|pe|physical_exam|physical\s+exam|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
   const outLines = [];
   for (const line of rendered.split('\n')) {
     const trimmed = line.trim();
@@ -2515,6 +2571,7 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
     carryPending = true,
     carryServicePlans = true,
     carryStanding = true,
+    carryFeeding = carryStanding,
     carryPe = true,
     isMorningShift = false,
   } = options || {};
@@ -2551,6 +2608,10 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
   }
 
   lines.push(isMorning ? 'Shift I&O: In:  | Out:  | Net:  (24h Net: )' : 'Shift I&O: In:  | Out:  | Net: ');
+
+  if (carryFeeding && data.feeding) {
+    lines.push(data.feeding.includes('\n') ? `Feeding:\n${data.feeding}` : `Feeding: ${data.feeding}`);
+  }
 
   if (carryPe && data.pe) {
     lines.push(data.pe);
@@ -2751,6 +2812,13 @@ export function buildStructuredShiftUpdate({
           } else if (sub.id === 'vent') {
             const ventVal = String(values.vent || '').trim();
             if (ventVal) objParts.push(`Vent: ${ventVal}`);
+          } else if (sub.id === 'feeding') {
+            const feedingVal = String(values.feeding || '').trim();
+            if (feedingVal) {
+              objParts.push(
+                feedingVal.includes('\n') ? `Feeding:\n${feedingVal}` : `Feeding: ${feedingVal}`
+              );
+            }
           } else if (sub.id === 'pe') {
             const peVal = String(values.pe || '').trim();
             if (peVal) objParts.push(peVal);
