@@ -684,6 +684,10 @@ main {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
   gap: 14px;
 }
+.scut-grid.compact-grid {
+  align-items: start;
+  gap: 10px;
+}
 .scut-card {
   background: var(--card);
   border: 1px solid var(--line);
@@ -698,24 +702,55 @@ main {
 }
 .scut-card:hover { border-color: var(--info-border); }
 .scut-card.stale { border-left: 4px solid var(--warn); }
-.scut-card.compact .scut-metrics,
-.scut-card.compact .scut-meds-details,
-.scut-card.compact .scut-plans-details {
+.scut-card.compact {
+  padding: 12px 13px;
+  gap: 8px;
+}
+.scut-card.compact.expanded {
+  gap: 10px;
+}
+.scut-card.compact:not(.expanded) .scut-assessment,
+.scut-card.compact:not(.expanded) .scut-compact-line,
+.scut-card.compact:not(.expanded) .scut-metrics,
+.scut-card.compact:not(.expanded) .scut-meds-details,
+.scut-card.compact:not(.expanded) .scut-plans-details,
+.scut-card.compact:not(.expanded) .scut-pending {
   display: none;
 }
 .scut-compact-line {
   display: none;
-  font-size: 12px;
-  color: var(--txt-2);
-  background: var(--surface);
-  border: 1px solid var(--line-soft);
-  border-radius: 7px;
-  padding: 5px 8px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
 }
-.scut-card.compact .scut-compact-line {
-  display: block;
+.scut-card.compact .scut-head.is-collapsible {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 8px;
+  padding: 3px 4px;
+  margin: -3px -4px;
+  transition: background 0.12s ease;
+}
+.scut-card.compact .scut-head.is-collapsible:hover {
+  background: var(--surface);
+}
+.scut-card.compact .scut-head.is-collapsible:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.compact-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mut);
+  transition: transform 0.16s ease, color 0.16s ease;
+  margin-left: 2px;
+}
+.compact-chevron .ui-ico {
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+}
+.scut-card.compact.expanded .compact-chevron {
+  transform: rotate(90deg);
+  color: var(--accent);
 }
 
 .scut-head {
@@ -997,6 +1032,40 @@ main {
   text-align: center;
   white-space: nowrap;
 }
+.scut-card.compact:not(.expanded) .scut-footer {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 0;
+  padding-top: 8px;
+}
+.scut-card.compact:not(.expanded) .scut-footer-primary,
+.scut-card.compact:not(.expanded) .scut-footer-secondary {
+  display: contents;
+}
+.scut-card.compact:not(.expanded) .scut-footer button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 0;
+}
+.scut-card.compact:not(.expanded) .scut-footer .scut-btn-label {
+  display: none;
+}
+.scut-card.compact:not(.expanded) .scut-footer button .ui-ico {
+  width: 17px;
+  height: 17px;
+  vertical-align: middle;
+  margin: 0;
+}
+.scut-card.compact:not(.expanded) .scut-footer .dictate-btn { order: 1; }
+.scut-card.compact:not(.expanded) .scut-footer .shift-btn { order: 2; }
+.scut-card.compact:not(.expanded) .scut-footer .copy-update-btn { order: 3; }
+.scut-card.compact:not(.expanded) .scut-footer .open-chart-btn { order: 4; }
+.scut-card.compact:not(.expanded) .scut-footer .calc-btn { order: 5; }
+.scut-card.compact:not(.expanded) .scut-footer .pitch-btn { order: 6; }
 
 /* ==================== CHART EDITOR LAYOUT ==================== */
 .editor-topbar {
@@ -1713,6 +1782,10 @@ html.kb-open .modal-overlay {
   margin: 0;
   accent-color: var(--accent);
   flex-shrink: 0;
+}
+.cf-option:has(input:disabled) {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .cf-meta {
   font-size: 11.5px;
@@ -3452,6 +3525,7 @@ html.kb-open .modal-overlay {
   .pending-line { padding: 8px 4px; }
   .pending-line input[type="checkbox"] { width: 18px; height: 18px; }
   .scut-footer-primary button, .scut-footer-secondary button, .scratch-foot button { min-height: 44px; }
+  .scut-card.compact:not(.expanded) .scut-footer button { min-height: 44px; padding: 8px 0; }
   .census-summary { display: none; }
   .duty-clock-bar { margin-bottom: 6px; }
   .rounds-toolbar { flex-direction: column; align-items: stretch; gap: 7px; padding: 8px 10px; margin-bottom: 10px; min-width: 0; max-width: 100%; }

@@ -91,6 +91,7 @@ import {
   extractStandingDictationContext,
   buildClinicalDictationAiPrompt,
   parseAiDictationResponse,
+  applyDictationPeCarryover,
   verifyAppendedChart,
 } from './census.js';
 
@@ -237,6 +238,7 @@ function safeRemoveItem(key) {
 }
 
 let roundsCompactMode = safeGetItem(PREFS_COMPACT_KEY, 'false') === 'true';
+const expandedCompactIds = new Set();
 const rawSavedSettingsTab = safeGetItem(SETTINGS_TAB_KEY, 'appearance');
 let activeSettingsTab = VALID_SETTINGS_TABS.has(rawSavedSettingsTab) ? rawSavedSettingsTab : 'appearance';
 let currentThemeId = normalizeThemeId(safeGetItem(THEME_KEY, 'midnight'));
@@ -1341,6 +1343,7 @@ function getFilteredSortedRoundsPatients(parsedPatients = null) {
 
 function renderRounds() {
   const container = $('roundsGrid');
+  container.classList.toggle('compact-grid', roundsCompactMode);
   updateDutyClockUi();
   if ($('roundsSortSelect')) $('roundsSortSelect').value = roundsSortMode;
   if ($('roundsCompactBtn')) {
@@ -1470,15 +1473,25 @@ function renderRounds() {
       if (pt.medications && pt.medications.length) compactParts.push(`${pt.medications.length} meds`);
       compactParts.push(`${openPendingCount} open`);
 
+      const isExpanded = roundsCompactMode && expandedCompactIds.has(pt.id);
+
       return `
-      <div class="scut-card ${isStale ? 'stale' : ''} ${roundsCompactMode ? 'compact' : ''}" data-id="${pt.id}">
-        <div class="scut-head">
+      <div class="scut-card ${isStale ? 'stale' : ''} ${roundsCompactMode ? 'compact' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
+        <div class="scut-head${roundsCompactMode ? ' is-collapsible' : ''}"${
+        roundsCompactMode
+          ? ` role="button" tabindex="0" aria-expanded="${isExpanded}" title="${
+              isExpanded ? 'Tap to collapse patient card' : 'Tap to expand patient card'
+            }" data-toggle-compact-id="${pt.id}"`
+          : ''
+      }>
           <div>
             <span class="room-badge">${esc(pt.room || 'Unassigned')}</span>
             <div class="pt-title">${esc(pt.name)}</div>
             <div class="pt-meta">${metaParts.join(' · ')}</div>
           </div>
-          <div class="scut-status-tags">${statusTag}${extraCatTags}</div>
+          <div class="scut-status-tags">${statusTag}${extraCatTags}${
+        roundsCompactMode ? `<span class="compact-chevron" aria-hidden="true">${uiIcon('chevron-right')}</span>` : ''
+      }</div>
         </div>
 
         <div class="scut-assessment">
@@ -1505,14 +1518,14 @@ function renderRounds() {
 
         <div class="scut-footer">
           <div class="scut-footer-primary">
-            <button type="button" class="dictate-btn" data-id="${pt.id}" title="Dictate bedside SOAP">${uiIcon('mic')} Dictate</button>
-            <button type="button" class="open-chart-btn" data-id="${pt.id}">${uiIcon('pencil')} Open Chart</button>
+            <button type="button" class="dictate-btn" data-id="${pt.id}" title="Dictate bedside SOAP" aria-label="Dictate">${uiIcon('mic')}<span class="scut-btn-label"> Dictate</span></button>
+            <button type="button" class="open-chart-btn" data-id="${pt.id}" title="Open Chart" aria-label="Open Chart">${uiIcon('pencil')}<span class="scut-btn-label"> Open Chart</span></button>
           </div>
           <div class="scut-footer-secondary">
-            <button type="button" class="shift-btn" data-id="${pt.id}">${uiIcon('plus')} Add Update</button>
-            <button type="button" class="copy-update-btn" data-id="${pt.id}" title="Copy latest update as clean plain text">${uiIcon('share')} Copy Update</button>
-            <button type="button" class="calc-btn" data-id="${pt.id}" title="Renal calculators, drip rates &amp; safety audit">${uiIcon('calc')} Calc</button>
-            <button type="button" class="pitch-btn" data-id="${pt.id}" title="Generate 30s Bedside Presentation">${uiIcon('ai-brain')} Pitch</button>
+            <button type="button" class="shift-btn" data-id="${pt.id}" title="Add Update" aria-label="Add Update">${uiIcon('plus')}<span class="scut-btn-label"> Add Update</span></button>
+            <button type="button" class="copy-update-btn" data-id="${pt.id}" title="Copy latest update as clean plain text" aria-label="Copy Update">${uiIcon('share')}<span class="scut-btn-label"> Copy Update</span></button>
+            <button type="button" class="calc-btn" data-id="${pt.id}" title="Renal calculators, drip rates &amp; safety audit" aria-label="Calc">${uiIcon('calc')}<span class="scut-btn-label"> Calc</span></button>
+            <button type="button" class="pitch-btn" data-id="${pt.id}" title="Generate 30s Bedside Presentation" aria-label="Pitch">${uiIcon('ai-brain')}<span class="scut-btn-label"> Pitch</span></button>
           </div>
         </div>
       </div>`;
@@ -1520,6 +1533,31 @@ function renderRounds() {
     .join('');
 
   // Wire card events
+  if (roundsCompactMode) {
+    container.querySelectorAll('.scut-head[data-toggle-compact-id]').forEach((headEl) => {
+      const toggleCompactCard = () => {
+        const id = headEl.dataset.toggleCompactId;
+        if (!id) return;
+        const card = headEl.closest('.scut-card');
+        const nextExpanded = !expandedCompactIds.has(id);
+        if (nextExpanded) expandedCompactIds.add(id);
+        else expandedCompactIds.delete(id);
+        if (card) card.classList.toggle('expanded', nextExpanded);
+        headEl.setAttribute('aria-expanded', String(nextExpanded));
+        headEl.setAttribute(
+          'title',
+          nextExpanded ? 'Tap to collapse patient card' : 'Tap to expand patient card'
+        );
+      };
+      headEl.onclick = toggleCompactCard;
+      headEl.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggleCompactCard();
+        }
+      };
+    });
+  }
   container.querySelectorAll('.dictate-btn').forEach((btn) => {
     btn.onclick = () => openDictateModal(btn.dataset.id, btn);
   });
@@ -1680,6 +1718,7 @@ function populateShiftFormDefaults() {
   const carryPend = $('cfPending') ? $('cfPending').checked : true;
   const carryPlans = $('cfServicePlans') ? $('cfServicePlans').checked : true;
   const carryStanding = $('cfStanding') ? $('cfStanding').checked : true;
+  const carryPe = $('cfPe') ? $('cfPe').checked : Boolean(cfData.pe);
 
   shiftFormValues = {
     interimEvent: '',
@@ -1696,7 +1735,7 @@ function populateShiftFormDefaults() {
     ioUnit: 'ml',
     io24: '',
     vent: carryStanding ? cfData.vent || '' : '',
-    pe: DEFAULT_NORMAL_PE_TEXT,
+    pe: carryPe && cfData.pe ? cfData.pe : DEFAULT_NORMAL_PE_TEXT,
     assessment: parsed.assessment || '',
     drips: carryStanding ? cfData.drips || '' : '',
     meds: carryStanding ? (parsed.medications || []).join('\n') : '',
@@ -1868,11 +1907,13 @@ function renderShiftGuidedForm() {
                 <input id="sfVent" data-sf-key="vent" value="${esc(shiftFormValues.vent)}" placeholder="e.g. AC/VC Vt 420 | PEEP 8 | FiO2 40%">
               </div>`);
           } else if (sub.id === 'pe') {
+            const prevPe = extractCarryForwardData(shiftingSourceContent).pe;
             subParts.push(`
               <div class="field">
                 <div class="shift-field-card-head">
                   <label for="sfPe">Physical Exam</label>
                   <div class="shift-pe-actions">
+                    ${prevPe ? '<button type="button" class="btn sm-btn subtle" data-sf-pe-preset="prev" title="Copy Physical Exam from previous shift">Previous PE</button>' : ''}
                     <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="normal">Normal PE</button>
                     <button type="button" class="btn sm-btn subtle" data-sf-pe-preset="clear">Clear</button>
                   </div>
@@ -1945,7 +1986,17 @@ function renderShiftGuidedForm() {
 
   container.querySelectorAll('[data-sf-pe-preset]').forEach((btn) => {
     btn.onclick = () => {
-      const nextPe = btn.dataset.sfPePreset === 'normal' ? DEFAULT_NORMAL_PE_TEXT : '';
+      const preset = btn.dataset.sfPePreset;
+      let nextPe = '';
+      if (preset === 'prev') {
+        nextPe = extractCarryForwardData(shiftingSourceContent).pe || '';
+        if ($('cfPe') && !$('cfPe').disabled) $('cfPe').checked = Boolean(nextPe);
+      } else if (preset === 'normal') {
+        nextPe = DEFAULT_NORMAL_PE_TEXT;
+        if ($('cfPe')) $('cfPe').checked = false;
+      } else {
+        if ($('cfPe')) $('cfPe').checked = false;
+      }
       shiftFormValues.pe = nextPe;
       const peEl = $('sfPe');
       if (peEl) peEl.value = nextPe;
@@ -1956,26 +2007,36 @@ function renderShiftGuidedForm() {
   });
 }
 
-function applyCarryForwardToggleToShiftForm() {
+function applyCarryForwardToggleToShiftForm(changedId = null) {
   const cfData = extractCarryForwardData(shiftingSourceContent);
   const parsed = getShiftingParsedNote();
   const carryPend = $('cfPending')?.checked !== false;
   const carryPlans = $('cfServicePlans')?.checked !== false;
   const carryStanding = $('cfStanding')?.checked !== false;
+  const carryPe = Boolean($('cfPe')?.checked);
 
-  shiftFormValues.pending = carryPend ? (cfData.openPending || []).join('\n') : '';
-  shiftFormValues.servicePlans = carryPlans ? (cfData.servicePlans || []).join('\n') : '';
-  shiftFormValues.vent = carryStanding ? cfData.vent || '' : '';
-  shiftFormValues.drips = carryStanding ? cfData.drips || '' : '';
-  shiftFormValues.meds = carryStanding ? (parsed.medications || []).join('\n') : '';
+  const domMap = {};
+  if (!changedId || changedId === 'cfPending') {
+    shiftFormValues.pending = carryPend ? (cfData.openPending || []).join('\n') : '';
+    domMap.sfPending = shiftFormValues.pending;
+  }
+  if (!changedId || changedId === 'cfServicePlans') {
+    shiftFormValues.servicePlans = carryPlans ? (cfData.servicePlans || []).join('\n') : '';
+    domMap.sfServicePlans = shiftFormValues.servicePlans;
+  }
+  if (!changedId || changedId === 'cfStanding') {
+    shiftFormValues.vent = carryStanding ? cfData.vent || '' : '';
+    shiftFormValues.drips = carryStanding ? cfData.drips || '' : '';
+    shiftFormValues.meds = carryStanding ? (parsed.medications || []).join('\n') : '';
+    domMap.sfVent = shiftFormValues.vent;
+    domMap.sfDrips = shiftFormValues.drips;
+    domMap.sfMeds = shiftFormValues.meds;
+  }
+  if (!changedId || changedId === 'cfPe') {
+    shiftFormValues.pe = carryPe && cfData.pe ? cfData.pe : '';
+    domMap.sfPe = shiftFormValues.pe;
+  }
 
-  const domMap = {
-    sfPending: shiftFormValues.pending,
-    sfServicePlans: shiftFormValues.servicePlans,
-    sfVent: shiftFormValues.vent,
-    sfDrips: shiftFormValues.drips,
-    sfMeds: shiftFormValues.meds,
-  };
   for (const [id, val] of Object.entries(domMap)) {
     if ($(id)) $(id).value = val;
   }
@@ -2027,6 +2088,12 @@ function openShiftModal(noteId, triggerEl = null) {
   $('cfServicePlans').checked = true;
   $('cfStanding').checked = true;
 
+  const hasPrevPe = Boolean(cfData.pe);
+  if ($('cfPe')) {
+    $('cfPe').checked = hasPrevPe;
+    $('cfPe').disabled = !hasPrevPe;
+  }
+
   $('cfPendingMeta').textContent = cfData.hasPriorBlock
     ? `(${cfData.openPending.length} open · ${cfData.completedPendingCount} done dropped)`
     : '(new chart starter)';
@@ -2037,6 +2104,13 @@ function openShiftModal(noteId, triggerEl = null) {
     .filter(Boolean)
     .join(' + ');
   $('cfStandingMeta').textContent = `(${standingParts || 'none'})`;
+  if ($('cfPeMeta')) {
+    const lineCount = cfData.pe ? cfData.pe.split('\n').filter((l) => l.trim()).length : 0;
+    const srcLabel = cfData.peSource === 'admitting' ? 'from admitting PE' : 'from prior shift';
+    $('cfPeMeta').textContent = hasPrevPe
+      ? `(${srcLabel} · ${lineCount} line${lineCount === 1 ? '' : 's'})`
+      : '(none in prior shifts)';
+  }
 
   shiftPreviewDirty = false;
   shiftRawEdited = false;
@@ -5869,6 +5943,7 @@ if ($('roundsSortSelect')) {
 if ($('roundsCompactBtn')) {
   $('roundsCompactBtn').onclick = () => {
     roundsCompactMode = !roundsCompactMode;
+    expandedCompactIds.clear();
     safeSetItem(PREFS_COMPACT_KEY, String(roundsCompactMode));
     renderRounds();
   };
@@ -6408,7 +6483,9 @@ async function fileVoiceBlockToChart(rawMarkdownBody, statusVerb) {
   if (!note) return;
   const dateStr = isoToMmDdYyyy($('voiceDateInput')?.value) || getTodayDateStrings().mmddyyyy;
   const effectiveShift = resolveModalShiftHeading(dictatingShift, 'voiceInterimTimeInput');
-  note.content = appendShiftBlock(note.content, effectiveShift, dateStr, rawMarkdownBody, null, {
+  const baseContent =
+    currentMode === 'editor' && currentId === note.id ? $('noteText').value : note.content;
+  note.content = appendShiftBlock(baseContent, effectiveShift, dateStr, rawMarkdownBody, null, {
     tightSeam: true,
   });
   note.updated = Date.now();
@@ -6462,10 +6539,12 @@ $('voiceFormatSoapBtn').onclick = async () => {
     return toast('Set endpoint, model and API key in Settings first (or use Append Raw)');
   }
 
+  const sourceContent =
+    currentMode === 'editor' && currentId === note.id ? $('noteText').value : note.content;
   const ptProfile = profileForNote(note);
-  const parsedNote = parseChart(note.content, note);
+  const parsedNote = parseChart(sourceContent, note);
   const redactedResult = redact(transcript, ptProfile);
-  const standingRaw = extractStandingDictationContext(note.content);
+  const standingRaw = extractStandingDictationContext(sourceContent);
   const standingRedacted = redactStandingContext(standingRaw, ptProfile);
 
   const leaks = [
@@ -6548,7 +6627,13 @@ $('voiceFormatSoapBtn').onclick = async () => {
     });
 
     const formattedLocalName = formatPatientLastFirst(parsedNote.name);
-    const { noteBlock, flags } = parseAiDictationResponse(reply, formattedLocalName);
+    const parsedAi = parseAiDictationResponse(reply, formattedLocalName);
+    const peCarryResult =
+      dictatingShift === 'interim'
+        ? { noteBlock: parsedAi.noteBlock, carriedPe: false }
+        : applyDictationPeCarryover(parsedAi.noteBlock, standingRaw.pe, transcript);
+    const noteBlock = peCarryResult.noteBlock;
+    const flags = parsedAi.flags;
     stagedVoiceSoap = noteBlock;
     if ($('voiceSoapPreviewText')) $('voiceSoapPreviewText').value = noteBlock;
     if ($('voiceSoapReviewBox')) $('voiceSoapReviewBox').hidden = false;
@@ -6556,7 +6641,9 @@ $('voiceFormatSoapBtn').onclick = async () => {
       aiStatus.className = flags ? 'voice-ai-status warn' : 'voice-ai-status';
       aiStatus.textContent = flags
         ? `Verify flags before filing: ${flags}`
-        : '✓ Staged clinical update below — verify numbers and tap File Update to Chart.';
+        : peCarryResult.carriedPe
+          ? '✓ Staged clinical update below (PE carried over from prior shift) — verify numbers and tap File Update to Chart.'
+          : '✓ Staged clinical update below — verify numbers and tap File Update to Chart.';
     }
   } catch (err) {
     if (aiStatus) {
@@ -6668,8 +6755,8 @@ if ($('shiftDateInput')) {
     if (!shiftRawEdited) syncShiftPreviewFromForm({ forceRawUpdate: true });
   };
 }
-['cfPending', 'cfServicePlans', 'cfStanding'].forEach((id) => {
-  $(id).onchange = applyCarryForwardToggleToShiftForm;
+['cfPending', 'cfServicePlans', 'cfStanding', 'cfPe'].forEach((id) => {
+  if ($(id)) $(id).onchange = () => applyCarryForwardToggleToShiftForm(id);
 });
 
 $('shiftModalClose').onclick = () => closeShiftModal(false);

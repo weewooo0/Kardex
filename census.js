@@ -1801,31 +1801,135 @@ function extractLabeledListFromBlock(blockText, headerRegex) {
   return items;
 }
 
+const PE_SYSTEM_PREFIX_RE =
+  /^(?:General(?:\s+Survey)?|Gen|GS|Skin|Integument(?:ary)?|HEENT|Eyes?|ENT|Neck|Chest(?:\/Lungs)?|C\/L|Lungs?|Resp(?:iratory)?|Pulm(?:onary)?|Heart|CVS|Cardio(?:vascular)?|Cardiac|Abdomen|ABD|GI|GU|Genitourinary|Extremities|EXT|MSK|Musculoskeletal|Neuro(?:logic)?|CNS|DRE)\s*:/i;
+
+const PE_GENERAL_SURVEY_RE =
+  /^(?:Awake\b|Alert\b|Conscious\b|Drowsy\b|Lethargic\b|Stuporous\b|Obtunded\b|Comatose\b|Sedated\b|Intubated\b|GCS\b|RASS\b|In\s+(?:mild|moderate|severe)\s+(?:cardio)?respiratory\s+distress\b|Not\s+in\s+(?:cardio)?respiratory\s+distress\b|NIRD\b)/i;
+
+const PE_NON_SECTION_START_RE =
+  /^(?:\*{0,2})(?:Subjective|Assessment|Impression|Working\s+Impression|Problem\s+list|Labs?|Laboratory(?:\s+updates?)?|Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)(?:\*{0,2})\s*:/i;
+
+const PE_BARE_NON_SECTION_RE =
+  /^(?:\*{0,2})(?:Medications?|Meds?|Pending|Plans?|Drips?|On\s+hold)(?:\*{0,2})\s*$/i;
+
+const PE_SIGNATURE_RE = /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i;
+
+function isRecognizablePeStartLine(trimmed) {
+  return PE_SYSTEM_PREFIX_RE.test(trimmed) || PE_GENERAL_SURVEY_RE.test(trimmed);
+}
+
+function isPeStopLine(trimmed) {
+  return (
+    /^#{2,3}\s+/.test(trimmed) ||
+    /^---+$/.test(trimmed) ||
+    /^(?:\*{0,2})(?:Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Assessment|Impression|Working\s+Impression|Problem\s+list|Subjective|Objective|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
+      trimmed
+    ) ||
+    PE_BARE_NON_SECTION_RE.test(trimmed) ||
+    PE_SIGNATURE_RE.test(trimmed) ||
+    /^(?:BP|HR|RR|Tmax|Temp|O2(?:\s*sat)?)\b\s*[:\d]/i.test(trimmed) ||
+    /^(?:Shift\s+I&O|I&O|FWF|HGT)\b/i.test(trimmed) ||
+    /^(?:I|O)\s+\d/i.test(trimmed) ||
+    /^[IO]-\s*/i.test(trimmed)
+  );
+}
+
 function extractPeLinesFromBlock(blockText) {
   const lines = String(blockText || '').split('\n');
   const out = [];
   let inPe = false;
+  let inNonPeSection = false;
+  let sawExplicitHeader = false;
+
   for (const line of lines) {
     const trimmed = line.trim();
-    if (/^(?:HEENT|C\/L|CVS|ABD|EXT):/i.test(trimmed) || /^Awake,\s*/i.test(trimmed)) {
-      inPe = true;
-      out.push(trimmed);
-      continue;
-    }
-    if (inPe) {
-      if (
-        !trimmed ||
-        /^(?:\*{0,2})(?:Drips?|Meds?|Medications?|Pending|Service|Plans?|Generic|[A-Za-z\s/&+-]{2,25}\s+Plans?|Thank\s+you|Feeding|Diet|BP|HR|RR|Tmax|Temp|O2)/i.test(
-          trimmed
-        )
-      ) {
-        if (out.length > 0) break;
+
+    if (!inPe) {
+      if (!trimmed) {
+        inNonPeSection = false;
         continue;
       }
-      out.push(trimmed);
+
+      const peHdr = trimmed.match(/^(?:\*{0,2})(?:PE|Physical\s+Exam(?:ination)?)(?:\*{0,2}):\s*(.*)$/i);
+      if (peHdr) {
+        inPe = true;
+        inNonPeSection = false;
+        sawExplicitHeader = true;
+        const inline = (peHdr[1] || '').trim();
+        if (inline) out.push(inline);
+        continue;
+      }
+
+      if (
+        PE_NON_SECTION_START_RE.test(trimmed) ||
+        PE_BARE_NON_SECTION_RE.test(trimmed) ||
+        PE_SIGNATURE_RE.test(trimmed)
+      ) {
+        inNonPeSection = true;
+        continue;
+      }
+
+      if (!inNonPeSection && isRecognizablePeStartLine(trimmed)) {
+        inPe = true;
+        out.push(trimmed);
+      }
+      continue;
     }
+
+    if (!trimmed) {
+      if (out.length > 0) break;
+      continue;
+    }
+    if (isPeStopLine(trimmed)) {
+      if (out.length > 0) break;
+      inPe = false;
+      continue;
+    }
+    out.push(trimmed);
+  }
+
+  if (out.length > 0 && sawExplicitHeader && !isRecognizablePeStartLine(out[0])) {
+    return out.length === 1 ? `PE: ${out[0]}` : `PE:\n${out.join('\n')}`;
   }
   return out.join('\n');
+}
+
+export function extractLatestPeFromChart(content) {
+  const text = String(content || '').replace(/\r\n/g, '\n');
+  if (!text.trim()) return { pe: '', source: '' };
+
+  const allShiftsDesc = splitAnyShiftBlocks(text)
+    .map((s) => s.block)
+    .reverse();
+
+  for (const blk of allShiftsDesc) {
+    const pe = extractPeLinesFromBlock(blk);
+    if (pe) return { pe, source: 'shift' };
+  }
+
+  if (allShiftsDesc.length === 0) {
+    let withoutMetaAndAdmit = text.replace(/^---\s*\n[\s\S]*?\n---[ \t]*(?:\n|$)/, '');
+    const admitMatch = /^##\s*Admitting\s+History\s*$/im.exec(withoutMetaAndAdmit);
+    if (admitMatch) {
+      const afterStart = admitMatch.index + admitMatch[0].length;
+      const rest = withoutMetaAndAdmit.slice(afterStart);
+      const nextH2 = /^##\s+[^\n]+$/m.exec(rest);
+      const end = nextH2 ? afterStart + nextH2.index : withoutMetaAndAdmit.length;
+      const before = withoutMetaAndAdmit.slice(0, admitMatch.index).trimEnd();
+      const after = withoutMetaAndAdmit.slice(end).trimStart();
+      withoutMetaAndAdmit = [before, after].filter(Boolean).join('\n\n');
+    }
+    const fallbackPe = extractPeLinesFromBlock(withoutMetaAndAdmit);
+    if (fallbackPe) return { pe: fallbackPe, source: 'shift' };
+  }
+
+  const admit = extractAdmittingHistory(text);
+  if (admit?.hasData && admit.data?.pe && admit.data.pe.trim()) {
+    return { pe: admit.data.pe.trim(), source: 'admitting' };
+  }
+
+  return { pe: '', source: '' };
 }
 
 export function extractStandingDictationContext(content) {
@@ -1835,7 +1939,7 @@ export function extractStandingDictationContext(content) {
     .reverse();
   const blocks = allShiftsDesc.length ? allShiftsDesc : [text];
 
-  let pe = '';
+  let pe = extractLatestPeFromChart(text).pe;
   let meds = [];
   let onHold = [];
   let feeding = '';
@@ -1846,7 +1950,6 @@ export function extractStandingDictationContext(content) {
   const seenPlanHeaders = new Set();
 
   for (const blk of blocks) {
-    if (!pe) pe = extractPeLinesFromBlock(blk);
     if (!meds.length) meds = extractMedicationsFromBlock(blk);
     if (!onHold.length) {
       onHold = extractLabeledListFromBlock(blk, /^(?:\*{0,2})(?:On\s+hold|Hold|Held)(?:\*{0,2}):\s*(.*)$/i);
@@ -1932,6 +2035,8 @@ export function extractCarryForwardData(content) {
       servicePlans: [],
       vent: '',
       drips: '',
+      pe: '',
+      peSource: '',
       hasPriorBlock: false,
     };
   }
@@ -1998,12 +2103,16 @@ export function extractCarryForwardData(content) {
     }
   }
 
+  const peInfo = extractLatestPeFromChart(text);
+
   return {
     openPending,
     completedPendingCount,
     servicePlans,
     vent,
     drips,
+    pe: peInfo.pe,
+    peSource: peInfo.source,
     hasPriorBlock: segment.hasShiftHeading,
   };
 }
@@ -2028,11 +2137,13 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   const carryPending = options.carryPending !== false;
   const carryServicePlans = options.carryServicePlans !== false;
   const carryStanding = options.carryStanding !== false;
+  const carryPe = options.carryPe !== false;
 
   const hasExplicitAssessment = /\{\{\s*(?:assessment|problem[_\s]+list)\s*\}\}/i.test(tpl);
   const hasExplicitPlans = /\{\{\s*(?:pending|service[_\s]+plans)\s*\}\}/i.test(tpl);
   const hasExplicitVent = /\{\{\s*vent\s*\}\}/i.test(tpl);
   const hasExplicitDrips = /\{\{\s*drips\s*\}\}/i.test(tpl);
+  const hasExplicitPe = /\{\{\s*(?:pe|physical[_\s]+exam)\s*\}\}/i.test(tpl);
 
   let rendered = tpl;
 
@@ -2055,6 +2166,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   // 2. Double-brace placeholders (including friendly layman aliases)
   const ventVal = carryStanding ? data.vent : '';
   const dripsVal = carryStanding ? data.drips : '';
+  const peVal = carryPe ? data.pe : '';
   const pendingVal = carryPending ? data.openPending.map((p) => `- [ ] ${p}`).join('\n') : '';
   const servicePlansVal = carryServicePlans ? data.servicePlans.map((p) => `- ${p}`).join('\n') : '';
 
@@ -2083,12 +2195,15 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
     date,
     vent: ventVal,
     drips: dripsVal,
+    pe: peVal,
+    physical_exam: peVal,
+    'physical exam': peVal,
     pending: pendingVal,
     service_plans: servicePlansVal,
     'service plans': servicePlansVal,
   };
 
-  const optionalLineRe = /^(?:Vent:\s*)?\{\{\s*(drips|vent|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
+  const optionalLineRe = /^(?:Vent:\s*)?\{\{\s*(drips|vent|pe|physical_exam|physical\s+exam|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
   const outLines = [];
   for (const line of rendered.split('\n')) {
     const trimmed = line.trim();
@@ -2108,6 +2223,16 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   // 3. Parenthetical line placeholders
   rendered = rendered.replace(/^\(Age\)$/gim, () => ageSex || '(Age)');
   rendered = rendered.replace(/^\(Room\)$/gim, () => room || '(Room)');
+
+  if (carryPe && data.pe && !hasExplicitPe) {
+    const defaultMorningPeRe =
+      /^Awake,\s*NIRD\nHEENT:\s*Anicteric sclerae, pink palpebral conjunctivae\nC\/L:\s*ECE, clear breath sounds\nCVS:\s*DHS, regular rate and rhythm\nABD:\s*Soft, non-tender abdomen,?[ \t]*\nEXT:\s*Strong peripheral pulses, CRT <2 secs$/m;
+    if (rendered.includes(DEFAULT_NORMAL_PE_TEXT)) {
+      rendered = rendered.replace(DEFAULT_NORMAL_PE_TEXT, () => data.pe);
+    } else if (defaultMorningPeRe.test(rendered)) {
+      rendered = rendered.replace(defaultMorningPeRe, () => data.pe);
+    }
+  }
 
   // 4. Smart carry-forward injection when explicit tags are absent
   if (!hasExplicitAssessment && assessment) {
@@ -2159,6 +2284,7 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
     carryPending = true,
     carryServicePlans = true,
     carryStanding = true,
+    carryPe = true,
     isMorningShift = false,
   } = options || {};
   const data = extractCarryForwardData(content);
@@ -2194,6 +2320,10 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
   }
 
   lines.push(isMorning ? 'Shift I&O: In:  | Out:  | Net:  (24h Net: )' : 'Shift I&O: In:  | Out:  | Net: ');
+
+  if (carryPe && data.pe) {
+    lines.push(data.pe);
+  }
 
   if (carryStanding && data.drips) {
     lines.push(`Drips: ${data.drips}`);
@@ -2584,9 +2714,10 @@ STRICT DICTATION & CHARTING RULES:
 5. TEMPERATURE RULE: "afebrile" alone → omit Tmax line (mention "afebrile" only in subjective). "afebrile Tmax 36.6" → put "afebrile" in subjective AND "Tmax 36.6C" between RR and O2 sat.
 6. INTERVAL EVENTS: One observation per line. "No acute events but noted X" → drop "No acute events", keep only X.
 7. SINGLE ORDER RULE: If dictation is only a single standalone order/event with no shift data, start heading with ### Interim (${interimTimeLabel || 'time'}).
-8. NEVER CARRY FORWARD MEASURED VALUES: NEVER invent or carry forward I&O rows, HGT values, vent returns, or temperatures from prior blocks. Only carry standing sections (PE, Meds, On hold, Feeding, open **Pending items not resolved in this shift, subspecialty plans) when omitted from dictation.
-9. ORDERING & SECTION RULES:
-   - Omit empty sections completely (never output empty headers like empty **Pending:).
+8. NEVER CARRY FORWARD MEASURED VALUES: NEVER invent or carry forward I&O rows, HGT values, vent returns, or temperatures from prior blocks. Only carry standing sections (Physical Exam, Meds, On hold, Feeding, open **Pending items not resolved in this shift, subspecialty plans) when omitted from dictation.
+9. PHYSICAL EXAM CARRY-OVER (REQUIRED): If physical exam findings are NOT mentioned in the dictation AND "Previous PE" is provided in STANDING CONTEXT below, you MUST copy "Previous PE" verbatim into the <PE lines> section of a regular shift block (do NOT omit PE and do NOT replace it with generic normal PE). If the dictation mentions new or changed PE findings, chart the dictated PE (updating only changed findings). Omit standing PE only for single-order ### Interim blocks or if the dictation explicitly says to defer/omit PE.
+10. ORDERING & SECTION RULES:
+   - Omit empty sections completely (never output empty headers like empty **Pending:), EXCEPT carried-over standing sections (including Previous PE when provided and not dictated).
    - **Pending: goes AFTER Meds: and BEFORE all plan sections.
    - Named subspecialty plans go under their own headings (Pulmo plans:, Cardio plans:, etc.).
    - Generic Plans: go last before the signature.
@@ -2620,7 +2751,7 @@ O <n>
 Feeding: <line>
 FWF <n>
 
-<PE lines>
+<PE lines — dictated PE, or Previous PE verbatim if not mentioned>
 
 Drips:
 <drip line>
@@ -2682,6 +2813,65 @@ export function parseAiDictationResponse(rawReply, formattedPatientName = '') {
   }
 
   return { noteBlock, flags: flagsText };
+}
+
+export function applyDictationPeCarryover(noteBlock, previousPe, transcript = '') {
+  const cleanNote = String(noteBlock || '').replace(/\r\n/g, '\n').trim();
+  const cleanPe = String(previousPe || '').replace(/\r\n/g, '\n').trim();
+  if (!cleanNote || !cleanPe) {
+    return { noteBlock: cleanNote, carriedPe: false };
+  }
+
+  const firstHeadingMatch = cleanNote.match(/^###\s+([^\n]+)/);
+  if (firstHeadingMatch && isInterimShift(firstHeadingMatch[1])) {
+    return { noteBlock: cleanNote, carriedPe: false };
+  }
+
+  if (
+    transcript &&
+    /\b(?:no\s+(?:pe|physical\s+exam(?:ination)?)|omit\s+(?:pe|physical\s+exam(?:ination)?)|skip\s+(?:pe|physical\s+exam(?:ination)?)|(?:pe|physical\s+exam(?:ination)?)\s+(?:deferred|not\s+done|omitted|skipped))\b/i.test(
+      String(transcript)
+    )
+  ) {
+    return { noteBlock: cleanNote, carriedPe: false };
+  }
+
+  if (extractPeLinesFromBlock(cleanNote)) {
+    return { noteBlock: cleanNote, carriedPe: false };
+  }
+
+  const postPeSectionRe =
+    /^(?:\*{0,2})(?:Drips?|Infusions?|On\s+hold|Hold|Held|Meds?|Medications?|Current\s+Meds?|Pending|Service\s+Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Plans?)(?:\*{0,2})\s*:|^(?:\*{0,2})(?:Medications?|Meds?|Pending|Plans?|Drips?|On\s+hold)(?:\*{0,2})\s*$|^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i;
+
+  const lines = cleanNote.split('\n');
+  let insertIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const tr = lines[i].trim();
+    if (!tr || /^#{2,3}\s+/.test(tr)) continue;
+    if (postPeSectionRe.test(tr)) {
+      insertIdx = i;
+      break;
+    }
+  }
+
+  if (insertIdx > 0) {
+    const before = lines.slice(0, insertIdx).join('\n').trimEnd();
+    const after = lines.slice(insertIdx).join('\n').trimStart();
+    return {
+      noteBlock: `${before}\n\n${cleanPe}\n\n${after}`,
+      carriedPe: true,
+    };
+  }
+  if (insertIdx === 0) {
+    return {
+      noteBlock: `${cleanPe}\n\n${cleanNote}`,
+      carriedPe: true,
+    };
+  }
+  return {
+    noteBlock: `${cleanNote}\n\n${cleanPe}`,
+    carriedPe: true,
+  };
 }
 
 export function verifyAppendedChart(content) {
