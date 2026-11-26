@@ -1,24 +1,26 @@
 // Pure on-device Lab Trending & Chat Relay Parser ("Dump-to-Chart")
 // Follows CLINICAL-WORKFLOW-STE.md §5 (File relay messages) and §7 (Lab results)
 
-import { parseChart } from './census.js';
+import { parseChart, parseChartTimeline } from './census.js';
 
 export const LAB_SPECS = [
   // Chemistry
-  { key: 'Na', panel: 'Chemistry', aliases: ['na+', 'na', 'sodium'], low: 135, high: 145 },
-  { key: 'K', panel: 'Chemistry', aliases: ['k+', 'k', 'potassium'], low: 3.5, high: 5.0 },
+  { key: 'Na', panel: 'Chemistry', aliases: ['serum sodium', 'serum na+', 'serum na', 'na+', 'na', 'sodium'], low: 135, high: 145 },
+  { key: 'K', panel: 'Chemistry', aliases: ['serum potassium', 'serum k+', 'serum k', 'k+', 'k', 'potassium'], low: 3.5, high: 5.0 },
   { key: 'Cl', panel: 'Chemistry', aliases: ['cl-', 'cl', 'chloride'], low: 98, high: 107 },
-  { key: 'HCO3', panel: 'Chemistry', aliases: ['hco3-', 'hco3', 'bicarbonate', 'bicarb'], low: 22, high: 26 },
+  { key: 'HCO3', panel: 'Chemistry', aliases: ['hco3-', 'hco3', 'bicarbonate', 'bicarb', 'co2'], low: 22, high: 26 },
   { key: 'BUN', panel: 'Chemistry', aliases: ['bun', 'urea'], low: 7, high: 20 },
   { key: 'Cr', panel: 'Chemistry', aliases: ['serum creatinine', 'creatinine', 'crea', 'scr', 'cr'], low: 0.6, high: 1.2 },
   { key: 'eGFR', panel: 'Chemistry', aliases: ['egfr', 'gfr'], low: 60 },
   { key: 'Glu', panel: 'Chemistry', aliases: ['glucose', 'glu', 'fbs', 'rbs', 'cbg', 'hgt'], low: 70, high: 140 },
+  { key: 'iCa', panel: 'Chemistry', aliases: ['ionized calcium', 'ionized ca', 'ica'], low: 1.12, high: 1.32 },
   { key: 'Ca', panel: 'Chemistry', aliases: ['ca2+', 'calcium', 'ca'], low: 8.5, high: 10.5 },
   { key: 'Mg', panel: 'Chemistry', aliases: ['mg2+', 'magnesium', 'mg'], low: 1.7, high: 2.2 },
   { key: 'Phos', panel: 'Chemistry', aliases: ['phosphorus', 'phosphate', 'phos', 'po4'], low: 2.5, high: 4.5 },
   { key: 'Alb', panel: 'Chemistry', aliases: ['albumin', 'alb'], low: 3.5, high: 5.0 },
   { key: 'AST', panel: 'Chemistry', aliases: ['ast', 'sgot'], high: 40 },
   { key: 'ALT', panel: 'Chemistry', aliases: ['alt', 'sgpt'], high: 41 },
+  { key: 'ALP', panel: 'Chemistry', aliases: ['alkaline phosphatase', 'alk phos', 'alp'], high: 130 },
   { key: 'TBili', panel: 'Chemistry', aliases: ['total bilirubin', 't. bili', 'tbili', 'tbil', 'bilirubin'], high: 1.2 },
 
   // CBC
@@ -28,11 +30,14 @@ export const LAB_SPECS = [
   { key: 'Plt', panel: 'CBC', aliases: ['platelets', 'platelet', 'plt'], low: 150, high: 450 },
   { key: 'Neu', panel: 'CBC', aliases: ['neutrophils', 'neut', 'neu', 'segs', 'seg', 'pmn'], low: 40, high: 75 },
   { key: 'Lym', panel: 'CBC', aliases: ['lymphocytes', 'lymphs', 'lymph', 'lym'], low: 20, high: 45 },
+  { key: 'Mono', panel: 'CBC', aliases: ['monocytes', 'mono', 'mon'], low: 2, high: 10 },
+  { key: 'Eo', panel: 'CBC', aliases: ['eosinophils', 'eos', 'eo'], high: 5 },
 
   // ABG
   { key: 'pH', panel: 'ABG', aliases: ['ph'], low: 7.35, high: 7.45 },
   { key: 'pCO2', panel: 'ABG', aliases: ['paco2', 'pco2'], low: 35, high: 45 },
   { key: 'pO2', panel: 'ABG', aliases: ['pao2', 'po2'], low: 80, high: 100 },
+  { key: 'sO2', panel: 'ABG', aliases: ['sao2', 'so2'], low: 95, high: 100 },
   { key: 'BE', panel: 'ABG', aliases: ['base excess', 'be'], low: -2, high: 2 },
   { key: 'Lactate', panel: 'ABG', aliases: ['lactate', 'lac'], high: 2.0 },
 
@@ -42,7 +47,10 @@ export const LAB_SPECS = [
   { key: 'PT', panel: 'Cardiac/Other', aliases: ['protime', 'pt'], low: 11, high: 14 },
   { key: 'aPTT', panel: 'Cardiac/Other', aliases: ['aptt', 'ptt'], low: 25, high: 35 },
   { key: 'CRP', panel: 'Cardiac/Other', aliases: ['crp'], high: 5.0 },
-  { key: 'PCT', panel: 'Cardiac/Other', aliases: ['procalcitonin', 'pct'], high: 0.5 },
+  { key: 'PCT', panel: 'Cardiac/Other', aliases: ['procalcitonin', 'procal', 'pct'], high: 0.5 },
+  { key: 'TSH', panel: 'Cardiac/Other', aliases: ['tsh'], low: 0.4, high: 4.5 },
+  { key: 'FT3', panel: 'Cardiac/Other', aliases: ['ft3'] },
+  { key: 'FT4', panel: 'Cardiac/Other', aliases: ['ft4'] },
 ];
 
 const SPEC_BY_KEY = new Map(LAB_SPECS.map((s) => [s.key, s]));
@@ -69,8 +77,10 @@ const LAB_PAIR_RE = new RegExp(
     `(?:\\s*(?:is|was|trending\\s+(?:up|down)|[:=])\\s*|\\s+)` +
     `(-?\\d+(?:\\.\\d+)?)` +
     `(?:\\s*${UNIT_PART})?` +
+    `\\*{0,2}` +
     `(?:\\s*([HL])(?![\\p{L}\\p{N}]))?` +
-    `(?:\\s*\\(\\s*(-?\\d+(?:\\.\\d+)?)\\s*(?:[HL])?\\s*\\))?`,
+    `\\*{0,2}` +
+    `(?:\\s*\\(\\s*(-?\\d+(?:\\.\\d+)?)\\s*(?:[HL])?\\*{0,2}\\s*\\))?`,
   'giu'
 );
 
@@ -111,7 +121,10 @@ function isNonLabVitalLine(trimmed) {
   if (/^\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}:?/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:BP|HR|PR|RR|Temp|O2sat|SpO2|I-|O-|Fb)\b/i.test(trimmed)) {
+  if (/^(?:BP|HR|PR|RR|Tmax|Temp|O2sat|SpO2|O2|I-|O-|Fb)\b/i.test(trimmed)) {
+    return true;
+  }
+  if (/^(?:I|O)\s+(?:~|approx\.?\s*)?\d/i.test(trimmed)) {
     return true;
   }
   return false;
@@ -474,4 +487,600 @@ export function buildLabRelayMessage(trended, targetNote, footer = 'Thank you, d
     lines.push('', String(footer).trim());
   }
   return lines.join('\n').trim();
+}
+
+const CHART_LAB_PANELS = ['Chemistry', 'CBC', 'ABG', 'Cardiac/Other'];
+
+const LAB_UNITS_BY_KEY = {
+  Na: 'mmol/L',
+  K: 'mmol/L',
+  Cl: 'mmol/L',
+  HCO3: 'mmol/L',
+  BUN: 'mg/dL',
+  Cr: 'mg/dL',
+  eGFR: 'mL/min/1.73m²',
+  Glu: 'mg/dL',
+  iCa: 'mmol/L',
+  Ca: 'mg/dL',
+  Mg: 'mg/dL',
+  Phos: 'mg/dL',
+  Alb: 'g/dL',
+  AST: 'U/L',
+  ALT: 'U/L',
+  ALP: 'U/L',
+  TBili: 'mg/dL',
+  WBC: '×10⁹/L',
+  Hb: 'g/L',
+  Hct: '',
+  Plt: '×10⁹/L',
+  Neu: '%',
+  Lym: '%',
+  Mono: '%',
+  Eo: '%',
+  pH: '',
+  pCO2: 'mmHg',
+  pO2: 'mmHg',
+  sO2: '%',
+  BE: 'mmol/L',
+  Lactate: 'mmol/L',
+  'Troponin-I': 'ng/L',
+  INR: '',
+  PT: 'sec',
+  aPTT: 'sec',
+  CRP: 'mg/L',
+  PCT: 'ng/mL',
+  TSH: 'mIU/L',
+  FT3: 'pmol/L',
+  FT4: 'pmol/L',
+};
+
+const PANEL_PREFIX_RE = /^(?:ABG\/VBG|VBG|ABG|CBC|Chemistry|Chem|BMP|CMP|Electrolytes?|Lytes|Renal|LFTs?|Liver|Coags?|Coagulation|Cardiac|Inflammatory|Thyroid|iSTAT|Labs?)(?:\s+(?:w\/?\s*lactate|post[\s-]*HD|pre[\s-]*HD|repeat|\([^)]+\)))?\s*[:=-]\s*/i;
+
+const DIAGNOSTIC_PREFIX_RE = /^(?:CXR(?:\s+[^:=-]{1,40})?|Chest\s*X-?ray(?:\s+[^:=-]{1,40})?|12-?L(?:ead)?\s*ECG|ECG|EKG|2D\s*Echo(?:\s+w\/\s*Doppler)?|T?TE|CT(?:\s+[^:=-]{1,40})?|MRI(?:\s+[^:=-]{1,40})?|UTZ|Ultrasound(?:\s+[^:=-]{1,40})?|KUB|Abdominal\s*X-?ray|Blood\s*C\/?S(?:\s*x\s*\d+)?|Urine\s*C\/?S|Sputum\s*C\/?S|Wound\s*C\/?S|Endotracheal\s*Aspirate|ETA\s*C\/?S|C\/?S|GS\/?CS|Culture(?:\s+[^:=-]{1,30})?|FOBT|Urinalysis|UA|Stool\s*Exam|RPR|HBsAg|Anti-?HCV|HIV|COVID(?:-19)?|Swab|Biopsy)\b/i;
+
+function parseLabDateMs(dateStr) {
+  const m = String(dateStr || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  const year = Number(m[3]);
+  const dt = new Date(year, month - 1, day);
+  if (Number.isNaN(dt.getTime()) || dt.getMonth() !== month - 1 || dt.getDate() !== day) {
+    return null;
+  }
+  return dt.getTime();
+}
+
+function parseLabShiftRank(shiftStr, fallbackIdx = 0) {
+  const s = String(shiftStr || '').trim().toLowerCase();
+  if (!s || s === 'entry') return -1;
+  if (s === 'am' || s === 'morning') return 600;
+  if (s === 'pm' || s === 'afternoon') return 1400;
+  if (s === 'nod' || s === 'night') return 2200;
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (m) {
+    let h = Number(m[1]);
+    const min = m[2] ? Number(m[2]) : 0;
+    const ap = (m[3] || '').toLowerCase();
+    if (ap === 'pm' && h < 12) h += 12;
+    if (ap === 'am' && h === 12) h = 0;
+    if (h < 6 && !ap) h += 24;
+    return h * 100 + min;
+  }
+  return 1200 + fallbackIdx;
+}
+
+function formatLabShortDate(dateStr) {
+  const m = String(dateStr || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[1]}/${m[2]}`;
+  return String(dateStr || 'Undated').trim();
+}
+
+function formatRefRange(spec) {
+  if (!spec) return '';
+  const hasLow = Number.isFinite(spec.low);
+  const hasHigh = Number.isFinite(spec.high);
+  if (hasLow && hasHigh) return `${spec.low}-${spec.high}`;
+  if (hasLow) return `>=${spec.low}`;
+  if (hasHigh) return `<=${spec.high}`;
+  return '';
+}
+
+function formatDeltaText(delta) {
+  if (!Number.isFinite(delta) || delta === 0) return '';
+  const abs = Math.abs(delta);
+  const rounded = abs >= 10 ? Math.round(delta * 10) / 10 : Math.round(delta * 1000) / 1000;
+  if (rounded === 0) return '';
+  return `${rounded > 0 ? '+' : ''}${rounded}`;
+}
+
+function parseShiftLabEntries(labLines) {
+  const entries = Array.isArray(labLines)
+    ? labLines
+    : labLines != null && String(labLines).trim()
+      ? [String(labLines)]
+      : [];
+  const numericByKey = new Map();
+  const diagnostics = [];
+  let lastDiag = null;
+
+  for (const rawEntry of entries) {
+    const subLines = String(rawEntry || '')
+      .replace(/\r\n/g, '\n')
+      .split('\n');
+
+    for (const rawLine of subLines) {
+      const parts = rawLine.split('|');
+      for (const rawPart of parts) {
+        const part = rawPart.trim();
+        if (!part) continue;
+
+        const hasPanelPrefix = PANEL_PREFIX_RE.test(part);
+        const cleanedForLabs = part.replace(PANEL_PREFIX_RE, '').trim();
+
+        if (
+          !cleanedForLabs ||
+          /^FIO2\b(?:\s*[:=]|\s+\d)/i.test(part) ||
+          /^FIO2\b(?:\s*[:=]|\s+\d)/i.test(cleanedForLabs)
+        ) {
+          lastDiag = null;
+          continue;
+        }
+
+        const diagAfterPanel = hasPanelPrefix && DIAGNOSTIC_PREFIX_RE.test(cleanedForLabs);
+        const isDiagPrefix = DIAGNOSTIC_PREFIX_RE.test(part) || diagAfterPanel;
+        const sourceForDiag = diagAfterPanel ? cleanedForLabs : part;
+        const parsedLabs = !isDiagPrefix ? parseRawLabs(cleanedForLabs) : [];
+
+        if (parsedLabs.length > 0) {
+          lastDiag = null;
+          for (const item of parsedLabs) {
+            numericByKey.set(item.key, item);
+          }
+          continue;
+        }
+
+        if (isDiagPrefix) {
+          const diagHeaderMatch = sourceForDiag.match(
+            /^([A-Za-z0-9][A-Za-z0-9\s/().+-]{1,42}?)\s*(?:[:=]\s*|\s+[–—-]\s+)(.+)$/
+          );
+          const title = diagHeaderMatch ? diagHeaderMatch[1].trim() : sourceForDiag;
+          const body = diagHeaderMatch ? diagHeaderMatch[2].trim() : '';
+          const diag = { title, text: body || sourceForDiag };
+          diagnostics.push(diag);
+          lastDiag = diag;
+          continue;
+        }
+
+        const colonHeaderMatch = sourceForDiag.match(
+          /^([A-Za-z0-9][A-Za-z0-9\s/().+-]{1,42}?)\s*[:=]\s*(.+)$/
+        );
+        if (colonHeaderMatch) {
+          const title = colonHeaderMatch[1].trim();
+          const body = colonHeaderMatch[2].trim();
+          if (body && !/^\(?prev/i.test(title)) {
+            const diag = { title, text: body };
+            diagnostics.push(diag);
+            lastDiag = diag;
+          }
+          continue;
+        }
+
+        // Continuation line after an imaging/diagnostic header (e.g. CXR line 2 or Non-specific ST-T changes)
+        if (lastDiag && !/^[-–•\s]*$/.test(part)) {
+          const cleanedCont = part.replace(/^[-–•]\s*/, '').trim();
+          if (cleanedCont) {
+            lastDiag.text = lastDiag.text && lastDiag.text !== lastDiag.title
+              ? `${lastDiag.text}; ${cleanedCont}`
+              : cleanedCont;
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    items: [...numericByKey.values()],
+    diagnostics,
+  };
+}
+
+function csvCell(val) {
+  const s = String(val ?? '');
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+/**
+ * Extract structured panel-grouped lab results, chronological trend matrix,
+ * and imaging/diagnostics list from a patient chart markdown document.
+ */
+export function extractChartLabSummary(content, note = {}) {
+  const parsed = parseChart(content || '', note || {});
+  const timeline = parseChartTimeline(content || '');
+
+  const rawEntries = [];
+  let seq = 0;
+  for (let dIdx = 0; dIdx < timeline.length; dIdx++) {
+    const day = timeline[dIdx];
+    const dateMs = parseLabDateMs(day.date);
+    for (let sIdx = 0; sIdx < (day.shifts || []).length; sIdx++) {
+      const shift = day.shifts[sIdx];
+      if (!shift?.labs || !shift.labs.length) continue;
+      const parsedEntry = parseShiftLabEntries(shift.labs);
+      if (!parsedEntry.items.length && !parsedEntry.diagnostics.length) continue;
+
+      const shiftLabel = shift.shift && shift.shift !== 'Entry' ? shift.shift : '';
+      const fullLabel = shiftLabel ? `${day.date} ${shiftLabel}` : day.date;
+      const shortLabel = shiftLabel ? `${formatLabShortDate(day.date)} ${shiftLabel}` : formatLabShortDate(day.date);
+
+      rawEntries.push({
+        seq: seq++,
+        date: day.date,
+        shift: shift.shift || 'Entry',
+        fullLabel,
+        shortLabel,
+        dateMs,
+        dIdx,
+        shiftRank: parseLabShiftRank(shift.shift, sIdx),
+        items: parsedEntry.items,
+        diagnostics: parsedEntry.diagnostics,
+      });
+    }
+  }
+
+  // Sort oldest -> newest so chronological deltas flow forward accurately
+  const hasAnyDated = rawEntries.some((e) => e.dateMs !== null);
+  rawEntries.sort((a, b) => {
+    if (hasAnyDated) {
+      if (a.dateMs !== null && b.dateMs !== null && a.dateMs !== b.dateMs) {
+        return a.dateMs - b.dateMs;
+      }
+      if (a.dateMs !== b.dateMs) {
+        return a.dateMs === null ? -1 : 1;
+      }
+    }
+    if (a.dIdx !== b.dIdx) return a.dIdx - b.dIdx;
+    if (a.shiftRank !== b.shiftRank) return a.shiftRank - b.shiftRank;
+    return a.seq - b.seq;
+  });
+
+  const numericColumnsChrono = [];
+  const rowMap = new Map();
+  const diagnosticsChrono = [];
+
+  for (const entry of rawEntries) {
+    const colKey = `${entry.date}__${entry.shift}__${entry.seq}`;
+
+    if (entry.items.length) {
+      numericColumnsChrono.push({
+        key: colKey,
+        date: entry.date,
+        shift: entry.shift,
+        label: entry.fullLabel,
+        shortLabel: entry.shortLabel,
+      });
+
+      for (const item of entry.items) {
+        let row = rowMap.get(item.key);
+        if (!row) {
+          const spec = SPEC_BY_KEY.get(item.key);
+          row = {
+            key: item.key,
+            panel: item.panel || spec?.panel || 'Cardiac/Other',
+            unit: LAB_UNITS_BY_KEY[item.key] ?? '',
+            refRange: formatRefRange(spec),
+            valuesByCol: {},
+            latest: null,
+            prevNum: null,
+          };
+          rowMap.set(item.key, row);
+        }
+
+        const flag = computeLabFlag(item.key, item.num, item.explicitFlag || '');
+        const delta = row.prevNum !== null && Number.isFinite(item.num)
+          ? item.num - row.prevNum
+          : null;
+        const cell = {
+          colKey,
+          date: entry.date,
+          shift: entry.shift,
+          label: entry.fullLabel,
+          value: item.value,
+          num: item.num,
+          flag,
+          delta,
+          deltaText: formatDeltaText(delta),
+        };
+        row.valuesByCol[colKey] = cell;
+        row.latest = cell;
+        if (Number.isFinite(item.num)) {
+          row.prevNum = item.num;
+        }
+      }
+    }
+
+    for (let i = 0; i < entry.diagnostics.length; i++) {
+      const diag = entry.diagnostics[i];
+      diagnosticsChrono.push({
+        id: `${colKey}__diag_${i}`,
+        date: entry.date,
+        shift: entry.shift,
+        label: entry.fullLabel,
+        title: diag.title,
+        text: diag.text,
+      });
+    }
+  }
+
+  // Present newest-first columns and diagnostics for clinician readability
+  const columns = [...numericColumnsChrono].reverse();
+  const diagnostics = [...diagnosticsChrono].reverse();
+  const rows = [...rowMap.values()]
+    .map(({ prevNum: _prevNum, ...rest }) => rest)
+    .sort((a, b) => (SPEC_ORDER.get(a.key) ?? 999) - (SPEC_ORDER.get(b.key) ?? 999));
+
+  const latestByPanel = {};
+  const byPanelCounts = {};
+  const panels = [];
+  for (const panel of CHART_LAB_PANELS) {
+    const panelRows = rows.filter((r) => r.panel === panel);
+    if (panelRows.length) {
+      panels.push(panel);
+      latestByPanel[panel] = panelRows;
+      byPanelCounts[panel] = panelRows.length;
+    }
+  }
+
+  const abnormalRows = rows.filter((r) => Boolean(r.latest?.flag)).length;
+
+  return {
+    patient: {
+      name: parsed.name || 'Unknown Patient',
+      room: parsed.room || 'Unassigned',
+      age: parsed.age || '',
+      sex: parsed.sex || '',
+      weight: parsed.weight || '',
+      service: parsed.service || '',
+      ap: parsed.ap || '',
+    },
+    hasLabs: rows.length > 0 || diagnostics.length > 0,
+    hasNumericLabs: rows.length > 0,
+    hasDiagnostics: diagnostics.length > 0,
+    panels,
+    counts: {
+      totalRows: rows.length,
+      abnormalRows,
+      byPanel: byPanelCounts,
+      diagnostics: diagnostics.length,
+      columns: columns.length,
+    },
+    columns,
+    rows,
+    latestByPanel,
+    diagnostics,
+  };
+}
+
+export function filterLabSummary(summary, panelFilter = 'all') {
+  const filter = String(panelFilter || 'all');
+  const allRows = summary?.rows || [];
+  const allColumns = summary?.columns || [];
+  const allDiagnostics = summary?.diagnostics || [];
+
+  let rows = [];
+  let diagnostics = [];
+
+  if (filter === 'all') {
+    rows = allRows;
+    diagnostics = allDiagnostics;
+  } else if (filter === 'abnormal') {
+    rows = allRows.filter((r) => Boolean(r.latest?.flag));
+    diagnostics = [];
+  } else if (filter === 'diagnostics') {
+    rows = [];
+    diagnostics = allDiagnostics;
+  } else {
+    rows = allRows.filter((r) => r.panel === filter);
+    diagnostics = [];
+  }
+
+  // Keep only columns that have at least one value in the filtered rows
+  const columns = rows.length
+    ? allColumns.filter((col) => rows.some((row) => Boolean(row.valuesByCol?.[col.key])))
+    : [];
+
+  const latestByPanel = {};
+  const panels = [];
+  for (const panel of CHART_LAB_PANELS) {
+    const panelRows = rows.filter((r) => r.panel === panel);
+    if (panelRows.length) {
+      panels.push(panel);
+      latestByPanel[panel] = panelRows;
+    }
+  }
+
+  return {
+    rows,
+    columns,
+    panels,
+    latestByPanel,
+    diagnostics,
+  };
+}
+
+function formatPatientHeaderParts(patient = {}) {
+  const title = patient.room && patient.room !== 'Unassigned'
+    ? `${patient.room} - ${patient.name || 'Patient'}`
+    : (patient.name || 'Patient');
+  const metaParts = [];
+  if (patient.age || patient.sex) {
+    metaParts.push([patient.age ? `${patient.age}yo` : '', patient.sex || ''].filter(Boolean).join(' '));
+  }
+  if (patient.service) metaParts.push(patient.service);
+  if (patient.ap) metaParts.push(`AP: ${patient.ap}`);
+  return { title, meta: metaParts.join(' | ') };
+}
+
+export function formatChartLabSummaryText(summary, { panelFilter = 'all' } = {}) {
+  if (!summary || !summary.hasLabs) {
+    const { title } = formatPatientHeaderParts(summary?.patient);
+    return `LAB SUMMARY: ${title}\n\nNo laboratory or diagnostic results recorded.`;
+  }
+
+  const filtered = filterLabSummary(summary, panelFilter);
+  const { title, meta } = formatPatientHeaderParts(summary.patient);
+  const lines = [`LAB SUMMARY: ${title}`];
+  if (meta) lines.push(meta);
+
+  if (!filtered.rows.length && !filtered.diagnostics.length) {
+    lines.push('', 'No matching laboratory or diagnostic results for current filter.');
+    return lines.join('\n');
+  }
+
+  for (const panel of filtered.panels) {
+    lines.push('', `${panel.toUpperCase()}:`);
+    for (const row of filtered.latestByPanel[panel]) {
+      const latest = row.latest;
+      if (!latest) continue;
+      const unit = row.unit ? ` ${row.unit}` : '';
+      const flag = latest.flag ? ` [${latest.flag}]` : '';
+      const delta = latest.deltaText ? ` (${latest.deltaText})` : '';
+      const when = latest.label ? ` - ${latest.label}` : '';
+      lines.push(`- ${row.key}: ${latest.value}${unit}${flag}${delta}${when}`);
+    }
+  }
+
+  if (filtered.diagnostics.length) {
+    lines.push('', 'IMAGING & DIAGNOSTICS:');
+    for (const diag of filtered.diagnostics) {
+      const when = diag.label ? `[${diag.label}] ` : '';
+      const text = diag.text && diag.text !== diag.title
+        ? `${diag.title}: ${diag.text}`
+        : diag.title;
+      lines.push(`- ${when}${text}`);
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
+export function formatChartLabSummaryMarkdown(summary, { panelFilter = 'all' } = {}) {
+  const { title, meta } = formatPatientHeaderParts(summary?.patient);
+  const lines = [`# Lab Summary — ${title}`];
+  if (meta) lines.push('', meta);
+
+  if (!summary || !summary.hasLabs) {
+    lines.push('', '_No laboratory or diagnostic results recorded._');
+    return lines.join('\n');
+  }
+
+  const filtered = filterLabSummary(summary, panelFilter);
+  if (!filtered.rows.length && !filtered.diagnostics.length) {
+    lines.push('', '_No matching laboratory or diagnostic results for current filter._');
+    return lines.join('\n');
+  }
+
+  if (filtered.rows.length) {
+    lines.push('', '## Latest Results');
+    for (const panel of filtered.panels) {
+      const items = filtered.latestByPanel[panel].map((row) => {
+        const latest = row.latest;
+        const unit = row.unit ? ` ${row.unit}` : '';
+        const flag = latest.flag ? ` **[${latest.flag}]**` : '';
+        const delta = latest.deltaText ? ` (${latest.deltaText})` : '';
+        return `${row.key}: ${latest.value}${unit}${flag}${delta}`;
+      });
+      lines.push(`- **${panel}**: ${items.join(' | ')}`);
+    }
+
+    lines.push('', '## Lab Flowsheet');
+    const headerCells = ['Panel', 'Lab', 'Unit', 'Ref', ...filtered.columns.map((c) => c.shortLabel || c.label)];
+    const escMd = (v) => String(v ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    lines.push(`| ${headerCells.map(escMd).join(' | ')} |`);
+    lines.push(`| ${headerCells.map(() => '---').join(' | ')} |`);
+
+    for (const row of filtered.rows) {
+      const vals = filtered.columns.map((col) => {
+        const cell = row.valuesByCol[col.key];
+        if (!cell) return '—';
+        const flag = cell.flag ? ` [${cell.flag}]` : '';
+        return `${cell.value}${flag}`;
+      });
+      const mdRow = [row.panel, row.key, row.unit || '', row.refRange || '', ...vals];
+      lines.push(`| ${mdRow.map(escMd).join(' | ')} |`);
+    }
+  }
+
+  if (filtered.diagnostics.length) {
+    lines.push('', '## Imaging, ECG & Diagnostics');
+    for (const diag of filtered.diagnostics) {
+      const text = diag.text && diag.text !== diag.title
+        ? `**${diag.title}**: ${diag.text}`
+        : `**${diag.title}**`;
+      lines.push(`- (${diag.label}) ${text}`);
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
+export function formatChartLabSummaryCsv(summary, { panelFilter = 'all' } = {}) {
+  const filtered = filterLabSummary(summary || {}, panelFilter);
+  const headers = [
+    'Panel',
+    'Lab',
+    'Unit',
+    'RefRange',
+    'Latest',
+    'LatestFlag',
+    'Delta',
+    ...filtered.columns.map((c) => c.label),
+  ];
+  const lines = [headers.map(csvCell).join(',')];
+
+  for (const row of filtered.rows) {
+    const latest = row.latest;
+    const cols = filtered.columns.map((col) => {
+      const cell = row.valuesByCol[col.key];
+      if (!cell) return '';
+      return cell.flag ? `${cell.value} [${cell.flag}]` : cell.value;
+    });
+    lines.push(
+      [
+        row.panel,
+        row.key,
+        row.unit || '',
+        row.refRange || '',
+        latest ? latest.value : '',
+        latest ? latest.flag : '',
+        latest ? latest.deltaText : '',
+        ...cols,
+      ]
+        .map(csvCell)
+        .join(',')
+    );
+  }
+
+  for (const diag of filtered.diagnostics) {
+    const emptyTrend = filtered.columns.map(() => '');
+    lines.push(
+      [
+        'Diagnostics',
+        diag.title,
+        diag.label,
+        '',
+        diag.text,
+        '',
+        '',
+        ...emptyTrend,
+      ]
+        .map(csvCell)
+        .join(',')
+    );
+  }
+
+  return lines.join('\n');
 }

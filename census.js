@@ -882,6 +882,20 @@ export function extractClinicalMetricsFromBlock(blockText) {
   const dripParts = [];
   const hgtParts = [];
 
+  const labHdrParts = [];
+  let pendingLabPrefix = '';
+  const pushLabItem = (txt) => {
+    const clean = String(txt || '').trim();
+    if (!clean || /^none$/i.test(clean)) return;
+    if (pendingLabPrefix) {
+      labItems.push(`${pendingLabPrefix}: ${clean}`);
+      pendingLabPrefix = '';
+    } else {
+      labItems.push(clean);
+    }
+  };
+  void labHdrParts;
+
   const shiftIo = createStackedIOAccumulator();
   const dayIo = createStackedIOAccumulator();
   let ioContext = null; // 'shift' | '24h' | null
@@ -891,30 +905,36 @@ export function extractClinicalMetricsFromBlock(blockText) {
   let inServicePlans = false;
   let inMedsSection = false;
 
-  const isSectionBoundary = (trimmed) =>
+  const isSectionBoundary = (trimmed, { inLabs = false } = {}) =>
     /^#{2,3}\s+/.test(trimmed) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
       trimmed
     ) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
       trimmed
     ) ||
-    /^(?:BP|HR|PR|RR|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
+    /^(?:BP|HR|PR|RR|Tmax|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
       trimmed
     ) ||
-    /^(?:I|O|In|Out|Input|Output|Intake|Fluid\s+bal(?:ance)?|Net|Balance)\s*(?:[:=]|-(?:\s|$|\d))/i.test(
+    /^(?:I|O|In|Out|Input|Output|Intake)(?:\s*(?:[:=]|-(?=\s|$|\d))|\s+(?:~|approx\.?\s*)?\d)/i.test(trimmed) ||
+    /^(?:Fluid\s+bal(?:ance)?|Net|Balance)\s*(?:[:=]|-(?=\s|$|\d))/i.test(trimmed) ||
+    /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
       trimmed
     ) ||
-    /^(?:PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(trimmed) ||
-    /^(?:Ppeak|Pplat|VTE|VT|TV|MV|PEEP|FiO2|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(trimmed) ||
-    /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm)|\d{1,2}(?:am|pm)\s*-\s*\d{1,2}(?:am|pm))\s*:?$/i.test(
+    /^(?:Ppeak|Pplat|VTE|VT|TV|MV|EMV|PEEP|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(trimmed) ||
+    (!inLabs && /^FiO2\s*(?:[:=]\s*|\s+)\d/i.test(trimmed)) ||
+    /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\s*:?$/i.test(
       trimmed
     );
+
+  const STANDALONE_LAB_LINE_RE =
+    /^(?:[-*]\s*)?(?:Serum\s+)?(?:Na\+?|Sodium|K\+?|Potassium|Cl-?|Chloride|CO2|HCO3-?|Bicarb(?:onate)?|iCa|Ionized\s+Ca(?:lcium)?|Ca2?\+?|Calcium|Mg2?\+?|Magnesium|Phos(?:phorus|phate)?|PO4|BUN|Urea|Cr|Crea(?:tinine)?|SCr|eGFR|GFR|Alb(?:umin)?|AST|SGOT|ALT|SGPT|ALP|Alk\.?\s*Phos|TBili|TBil|TBDBIB|DBili|IBili|Bilirubin|LDH|Amylase|Lipase|WBC|Hgb|Hb|Hct|Plt|Platelets?|Neu(?:t(?:rophils?)?)?|Lym(?:ph(?:ocytes?)?)?|Mono?s?|Eo(?:s(?:inophils?)?)?|pH|PaCO2|pCO2|PaO2|pO2|SaO2|sO2|BE|Base\s+Excess|Lactate|Lac|Trop(?:onin)?(?:\s*-?\s*[IT])?|BNP|NT-?proBNP|CK-?MB|CPK|Procal(?:citonin)?|PCT|CRP|ESR|Ferritin|D-?dimer|INR|PT|Protime|aPTT|PTT|TSH|FT3|FT4|HbA1c|Chole(?:sterol)?|Trigly(?:cerides?)?|HDL|LDL|VLDL|Uric\s+Acid|BUA|Ammonia|NH3)(?![\p{L}\p{N}])(?:\s*[:=]\s*|\s+)-?\d/iu;
 
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (!trimmed) {
       inLabsSection = false;
+      pendingLabPrefix = '';
       inPendingSection = false;
       inServicePlans = false;
       inMedsSection = false;
@@ -922,16 +942,22 @@ export function extractClinicalMetricsFromBlock(blockText) {
       continue;
     }
 
-    if (/^\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}:?\s*$/i.test(trimmed)) {
+    if (/^\*{0,2}Pending(?:\s+(?:labs?|items|list))?(?:\*{0,2})(?:\s*:.*|\s*)$/i.test(trimmed)) {
       inLabsSection = false;
+      pendingLabPrefix = '';
       inPendingSection = true;
       inServicePlans = false;
       inMedsSection = false;
       ioContext = null;
       continue;
     }
-    if (/^(?:\*{0,2})(?:Service|[A-Za-z][A-Za-z\s/&+-]{1,30})\s+Plans?(?:\*{0,2})\s*:/i.test(trimmed)) {
+    if (
+      /^(?:\*{0,2})(?:(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|Plans?)(?:\*{0,2})\s*:?\s*$/i.test(
+        trimmed
+      )
+    ) {
       inLabsSection = false;
+      pendingLabPrefix = '';
       inPendingSection = false;
       inServicePlans = true;
       inMedsSection = false;
@@ -945,6 +971,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       /^(?:\*{0,2})Therapeutics(?:\*{0,2})\s*:/i.test(trimmed)
     ) {
       inLabsSection = false;
+      pendingLabPrefix = '';
       inPendingSection = false;
       inServicePlans = false;
       inMedsSection = true;
@@ -960,8 +987,11 @@ export function extractClinicalMetricsFromBlock(blockText) {
       }
     }
     if (inServicePlans) {
-      if (/^[-*]\s+/.test(trimmed) || /^\d+[.)]\s+/.test(trimmed)) continue;
-      inServicePlans = false;
+      if (isPendingStopLine(trimmed) || isSectionBoundary(trimmed)) {
+        inServicePlans = false;
+      } else {
+        continue;
+      }
     }
     if (inMedsSection) {
       if (isSectionBoundary(trimmed)) {
@@ -972,60 +1002,107 @@ export function extractClinicalMetricsFromBlock(blockText) {
     }
     if (/^[-*]\s*\[[ xX]\]/.test(trimmed)) {
       inLabsSection = false;
+      pendingLabPrefix = '';
       continue;
     }
 
-    // Labs header (inline and/or multi-line stacked)
-    const labHdrMatch = trimmed.match(
-      /^(?:[-*]\s*)?(?:\*{0,2})(?:Labs?|Lab(?:oratory)?\s+updates?|Lab\s+results?)(?:\*{0,2}):\s*(.*)$/i
-    );
+    // Labs header (inline and/or multi-line stacked, including "Relaying labs" / "**Relaying")
+    const labHdrMatch =
+      trimmed.match(
+        /^(?:[-*]\s*)?(?:\*{0,2})(?:Labs?|Lab(?:oratory)?\s+updates?|Lab\s+results?|Relaying\s+labs?)(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i
+      ) || trimmed.match(/^(?:[-*]\s*)?(?:\*{2}Relaying\*{0,2}|Relaying:)\s*(.*)$/i);
     if (labHdrMatch) {
       consumedLineIndices.add(i);
       inLabsSection = true;
+      pendingLabPrefix = '';
       ioContext = null;
-      const inlineLabs = labHdrMatch[1].trim();
+      const inlineLabs = (labHdrMatch[1] || '').trim();
       if (inlineLabs) {
         for (const piece of inlineLabs.split('|')) {
-          const clean = piece.trim();
-          if (clean) labItems.push(clean);
+          pushLabItem(piece);
         }
       }
       continue;
     }
 
-    // Panel subheaders without requiring Labs: (e.g. "CBC", "Chem:", "ABG pH 7.32 / ...")
+    // Panel subheaders (e.g. "CBC", "ABG", "ABG w/ lactate", "iSTAT")
     const labSubHdrMatch = trimmed.match(
-      /^(?:[-*]\s*)?\*{0,2}(CBC|Chem(?:istry)?|Electrolytes?|ABG|VBG|Coags?|Coagulation|LFTs?|Lipids?|Urinalysis|UA)\*{0,2}(?:\s*:\s*(.*)|\s+((?=.*\d).*)|\s*)$/i
+      /^(?:[-*]\s*)?\*{0,2}((?:CBC|Chem(?:istry)?|Electrolytes?|Elec\s+panel|BMP|CMP|ABG|VBG|iSTAT|Coags?|Coagulation|LFTs?|Lipids?|Urinalysis|UA)(?:\s+(?:w\/?\s*lactate|post[\s-]*HD|pre[\s-]*HD|repeat|\([^)]+\)))?)\*{0,2}(?:\s*:\s*(.*)|\s+((?=.*\d).*)|\s*)$/i
     );
     if (labSubHdrMatch) {
       consumedLineIndices.add(i);
       inLabsSection = true;
+      pendingLabPrefix = '';
       ioContext = null;
       const panel = labSubHdrMatch[1].trim();
       const restColon = (labSubHdrMatch[2] || '').trim();
       const restNum = (labSubHdrMatch[3] || '').trim();
       if (restColon) {
+        let first = true;
         for (const piece of restColon.split('|')) {
           const clean = piece.trim();
-          if (clean) labItems.push(clean);
+          if (!clean) continue;
+          labItems.push(first ? `${panel}: ${clean}` : clean);
+          first = false;
         }
       } else if (restNum) {
         labItems.push(`${panel} ${restNum}`);
+      } else {
+        pendingLabPrefix = panel;
+      }
+      continue;
+    }
+
+    // Imaging / Diagnostic / Culture subheaders (CXR, 12L ECG, Blood CS, FOBT)
+    const cxrMatch = trimmed.match(
+      /^(?:[-*]\s*)?\*{0,2}((?:Repeat\s+)?(?:CXR|Chest\s+X-?ray)(?:\s+(?:AP|PA|portable|post[\s-]*HD|pre[\s-]*HD|post[\s-]*intubation|\([^)]+\))){0,3})\*{0,2}(?:\s*[:–-]\s*(.*)|\s*)$/i
+    );
+    const ecgMatch = trimmed.match(
+      /^(?:[-*]\s*)?\*{0,2}((?:Repeat\s+)?(?:12\s*-?\s*L(?:ead)?\s*ECG|12lecg|ECG|EKG)(?:\s*\([^)]+\))?)\*{0,2}\s*[:–-]\s*(.+)$/i
+    );
+    const cultureMatch = trimmed.match(
+      /^(?:[-*]\s*)?\*{0,2}((?:Blood|Sputum|Urine)\s+C\/?S(?:\s+[^:\n-]{1,40})?|FOBT)\*{0,2}(?:\s*[:–-]\s*(.+)|\s+(Positive.*|Negative.*)|\s*)$/i
+    );
+    const diagMatch = cxrMatch || ecgMatch || cultureMatch;
+    if (diagMatch) {
+      consumedLineIndices.add(i);
+      inLabsSection = true;
+      pendingLabPrefix = '';
+      ioContext = null;
+      const label = diagMatch[1].trim();
+      const inlineDiag = (diagMatch[2] || diagMatch[3] || '').trim();
+      if (inlineDiag) {
+        labItems.push(`${label}: ${inlineDiag}`);
+      } else {
+        pendingLabPrefix = label;
       }
       continue;
     }
 
     if (inLabsSection) {
-      if (isSectionBoundary(trimmed)) {
+      if (isSectionBoundary(trimmed, { inLabs: true })) {
         inLabsSection = false;
+        pendingLabPrefix = '';
       } else {
         consumedLineIndices.add(i);
         const cleanLab = trimmed.replace(/^[-*]\s+/, '').trim();
-        if (cleanLab && !/^none$/i.test(cleanLab)) {
-          labItems.push(cleanLab);
-        }
+        pushLabItem(cleanLab);
         continue;
       }
+    }
+
+    // Standalone lab analyte lines outside explicit Labs: blocks (e.g. "K: 3.6 (3.2)", "Serum K: 3.4", "Na 140")
+    if (
+      STANDALONE_LAB_LINE_RE.test(trimmed) &&
+      !/^[-*\s]*pt\s+\d+\s*(?:yo|y\/o|yrs?|years?|room|bed|\/[mf]\b)/i.test(trimmed) &&
+      !/^[-*\s]*pt\s+\d+\s*$/i.test(trimmed) &&
+      !/^[-*\s]*CR\s+\d{2,3}\b/.test(trimmed)
+    ) {
+      consumedLineIndices.add(i);
+      inLabsSection = true;
+      ioContext = null;
+      pushLabItem(trimmed.replace(/^[-*]\s+/, '').trim());
+      continue;
     }
 
     // Inline Vitals
@@ -1041,9 +1118,9 @@ export function extractClinicalMetricsFromBlock(blockText) {
       continue;
     }
 
-    // Stacked Vitals lines: BP, HR, PR, RR, Temp, T, O2sat, SpO2, O2
+    // Stacked Vitals lines: BP, HR, PR, RR, Tmax, Temp, T, O2sat, SpO2, O2
     const vitalLineMatch = trimmed.match(
-      /^(?:[-*]\s*)?(BP|HR|PR|RR|Temp|T|O2sat|SpO2|O2)\b(?:\s*[:=]\s*|\s+|$)(.*)$/i
+      /^(?:[-*]\s*)?(BP|HR|PR|RR|Tmax|Temp|T|O2sat|SpO2|O2)\b(?:\s*[:=]\s*|\s+|$)(.*)$/i
     );
     if (vitalLineMatch) {
       const rawKey = vitalLineMatch[1];
@@ -1056,6 +1133,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
         if (hasValue) {
           let label = keyUpper;
           if (keyUpper === 'TEMP') label = 'T';
+          else if (keyUpper === 'TMAX') label = 'Tmax';
           else if (keyUpper === 'PR') label = 'HR';
           else if (keyUpper === 'O2SAT' || keyUpper === 'SPO2') label = 'O2';
           vitalParts.push(`${label} ${rawVal}`);
@@ -1078,8 +1156,10 @@ export function extractClinicalMetricsFromBlock(blockText) {
     // Stacked Vent mode or parameters/returns without "Vent:" prefix
     const cleanVentCandidate = trimmed.replace(/^[-*]\s+/, '').trim();
     if (
-      /^(?:PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(cleanVentCandidate) ||
-      /^(?:Ppeak|Pplat|VTE|VT|TV|MV|PEEP|FiO2|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(cleanVentCandidate)
+      /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
+        cleanVentCandidate
+      ) ||
+      /^(?:Ppeak|Pplat|VTE|VT|TV|MV|EMV|PEEP|FiO2|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(cleanVentCandidate)
     ) {
       consumedLineIndices.add(i);
       ioContext = null;
@@ -1087,9 +1167,9 @@ export function extractClinicalMetricsFromBlock(blockText) {
       continue;
     }
 
-    // Shift-window I&O header (e.g. "10-6am", "6am-2pm")
+    // Shift-window I&O header (e.g. "10-6am", "10-6a", "6am-2pm")
     const windowHdrMatch = trimmed.match(
-      /^(?:[-*]\s*)?(\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm)|\d{1,2}(?:am|pm)\s*-\s*\d{1,2}(?:am|pm)|8\s*hrs?)\s*:?$/i
+      /^(?:[-*]\s*)?(\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\s*:?$/i
     );
     if (windowHdrMatch) {
       consumedLineIndices.add(i);
@@ -1118,20 +1198,24 @@ export function extractClinicalMetricsFromBlock(blockText) {
       continue;
     }
 
-    // Stacked I&O lines: I-/I:/In:/Input:/Intake:, O-/O:/Out:/Output:, Fb/Fluid balance:/Net:/Balance:
+    // Stacked I&O lines: I-/I:/I <num>, O-/O:/O <num>, Fb/Fluid balance:/Net:/Balance:
     let stackedType = '';
     let stackedVal = '';
     let netLabel = 'FB:';
 
-    const inMatch = trimmed.match(/^(?:[-*]\s*)?(?:I|In|Input|Intake)\s*(?:[:=]|-(?=\s|$|\d))\s*(.*)$/i);
+    const inMatch = trimmed.match(
+      /^(?:[-*]\s*)?(?:I|In|Input|Intake)(?:\s*(?:[:=]|-(?=\s|$|\d))\s*(.*)|\s+((?:~|approx\.?\s*)?\d[\d,]*(?:\.\d+)?.*))$/i
+    );
     if (inMatch) {
       stackedType = 'in';
-      stackedVal = inMatch[1].trim();
+      stackedVal = (inMatch[1] ?? inMatch[2] ?? '').trim();
     } else {
-      const outMatch = trimmed.match(/^(?:[-*]\s*)?(?:O|Out|Output)\s*(?:[:=]|-(?=\s|$|\d))\s*(.*)$/i);
+      const outMatch = trimmed.match(
+        /^(?:[-*]\s*)?(?:O|Out|Output)(?:\s*(?:[:=]|-(?=\s|$|\d))\s*(.*)|\s+((?:~|approx\.?\s*)?\d[\d,]*(?:\.\d+)?.*))$/i
+      );
       if (outMatch) {
         stackedType = 'out';
-        stackedVal = outMatch[1].trim();
+        stackedVal = (outMatch[1] ?? outMatch[2] ?? '').trim();
       } else {
         const fbMatch = trimmed.match(
           /^(?:[-*]\s*)?(?:Fb|Fluid\s+bal(?:ance)?)(?:\s*[:=]\s*|-\s+|-$|\s+|$|(?=[+-]\d))(.*)$/i
@@ -1330,7 +1414,7 @@ export function parseChart(content, note = {}) {
   }
 
   // Extract Vitals / Vent / I&O / HGT / Drips / Labs from latest shift block, falling back newest-to-oldest in latestDateBlock
-  const shiftBlocksDesc = splitShiftSections(latestDateBlock).reverse();
+  const shiftBlocksDesc = splitAnyShiftBlocks(latestDateBlock).reverse();
   const searchBlocks = shiftBlocksDesc.length
     ? shiftBlocksDesc.map((s) => s.block)
     : [latestShiftBlock, latestDateBlock, text];

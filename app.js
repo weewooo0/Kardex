@@ -23,6 +23,11 @@ import {
   buildTrendedLabs,
   resolvePatientFromRelay,
   buildLabRelayMessage,
+  extractChartLabSummary,
+  filterLabSummary,
+  formatChartLabSummaryText,
+  formatChartLabSummaryMarkdown,
+  formatChartLabSummaryCsv,
 } from './labs.js';
 import {
   DRIP_PRESETS,
@@ -113,6 +118,7 @@ let editorViewMode = 'timeline';
 let timelineDateFilter = 'all';
 let timelineSearchQuery = '';
 let editingTimelineKey = null;
+let labsPanelFilter = 'all';
 let librarySearchQuery = '';
 let libraryFilter = 'all';
 let librarySortMode = 'recent';
@@ -1678,7 +1684,7 @@ async function handleQuickAddPending(noteId, taskText) {
   if (currentId === note.id) {
     $('noteText').value = note.content;
     lastSavedChartContent = note.content;
-    if (editorViewMode === 'timeline') renderChartTimeline();
+    refreshActiveEditorView();
   }
   await refresh();
   toast('Added pending item');
@@ -3003,7 +3009,7 @@ function renderScratchNotes() {
       if (currentId === targetChart.id) {
         $('noteText').value = targetChart.content;
         lastSavedChartContent = targetChart.content;
-        if (editorViewMode === 'timeline') renderChartTimeline();
+        refreshActiveEditorView();
       }
       toast(`Inserted into ${targetChart.room || targetChart.title}`);
     };
@@ -4841,20 +4847,237 @@ function syncProfileInputsToMarkdown() {
   updateProfileSummary();
 }
 
+function refreshActiveEditorView() {
+  if (editorViewMode === 'timeline') renderChartTimeline();
+  else if (editorViewMode === 'labs') renderChartLabsSummary();
+}
+
 function setEditorView(mode) {
   editorViewMode = mode;
   $('chartTimelinePane').hidden = mode !== 'timeline';
+  $('chartLabsPane').hidden = mode !== 'labs';
   $('chartRawPane').hidden = mode !== 'raw';
   $('editorTimelineTab').classList.toggle('active', mode === 'timeline');
   $('editorTimelineTab').setAttribute('aria-pressed', String(mode === 'timeline'));
+  $('editorLabsTab').classList.toggle('active', mode === 'labs');
+  $('editorLabsTab').setAttribute('aria-pressed', String(mode === 'labs'));
   $('editorRawTab').classList.toggle('active', mode === 'raw');
   $('editorRawTab').setAttribute('aria-pressed', String(mode === 'raw'));
 
-  if (mode === 'timeline') {
+  if (mode === 'timeline' || mode === 'labs') {
     const note = notes.find((n) => n.id === currentId) || {};
     populateProfileInputs(note, $('noteText').value, true);
-    renderChartTimeline();
+    refreshActiveEditorView();
   }
+}
+
+function buildLabExportSlug(patient = {}) {
+  const base = [patient.room && patient.room !== 'Unassigned' ? patient.room : '', patient.name || 'patient']
+    .filter(Boolean)
+    .join('-')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return base || 'patient';
+}
+
+function getCurrentChartLabSummary() {
+  const note = notes.find((n) => n.id === currentId) || {};
+  const content = $('noteText').value || '';
+  return extractChartLabSummary(content, note);
+}
+
+function renderChartLabsSummary() {
+  const chipsEl = $('labsPanelChips');
+  const contentEl = $('chartLabsContent');
+  if (!chipsEl || !contentEl) return;
+
+  const summary = getCurrentChartLabSummary();
+  const hasAny = Boolean(summary.hasLabs);
+  $('labsCopyBtn').disabled = !hasAny;
+  $('labsExportMdBtn').disabled = !hasAny;
+  $('labsExportCsvBtn').disabled = !hasAny;
+
+  const chipSpecs = [
+    { key: 'all', label: `All (${summary.counts.totalRows + summary.counts.diagnostics})` },
+  ];
+  if (summary.counts.abnormalRows > 0) {
+    chipSpecs.push({ key: 'abnormal', label: `Abnormal (${summary.counts.abnormalRows})` });
+  }
+  for (const panel of summary.panels) {
+    chipSpecs.push({ key: panel, label: `${panel} (${summary.counts.byPanel[panel] || 0})` });
+  }
+  if (summary.hasDiagnostics) {
+    chipSpecs.push({ key: 'diagnostics', label: `Diagnostics (${summary.counts.diagnostics})` });
+  }
+
+  if (!chipSpecs.some((c) => c.key === labsPanelFilter)) {
+    labsPanelFilter = 'all';
+  }
+
+  chipsEl.innerHTML = chipSpecs
+    .map((c) => {
+      const active = labsPanelFilter === c.key;
+      return `<button type="button" class="filter-chip ${active ? 'active' : ''}" data-panel="${esc(c.key)}" aria-pressed="${active}">${esc(c.label)}</button>`;
+    })
+    .join('');
+
+  chipsEl.querySelectorAll('.filter-chip').forEach((btn) => {
+    btn.onclick = () => {
+      labsPanelFilter = btn.dataset.panel || 'all';
+      renderChartLabsSummary();
+    };
+  });
+
+  if (!hasAny) {
+    contentEl.innerHTML = '<div class="timeline-empty">No lab results or diagnostics parsed in this chart yet. Log labs via Dictate, Dump / Labs, or a shift entry.</div>';
+    return;
+  }
+
+  const filtered = filterLabSummary(summary, labsPanelFilter);
+  if (!filtered.rows.length && !filtered.diagnostics.length) {
+    contentEl.innerHTML = '<div class="timeline-empty">No results match the selected filter.</div>';
+    return;
+  }
+
+  const patientTitle = summary.patient.room && summary.patient.room !== 'Unassigned'
+    ? `${summary.patient.room} · ${summary.patient.name}`
+    : summary.patient.name;
+
+  const metaHtml = `
+    <div class="labs-summary-meta">
+      <div class="labs-meta-title">${esc(patientTitle)}</div>
+      <div class="labs-meta-badges">
+        <span class="labs-meta-pill">${summary.counts.totalRows} analytes</span>
+        ${summary.counts.abnormalRows > 0 ? `<span class="labs-meta-pill is-abnormal">${summary.counts.abnormalRows} flagged</span>` : ''}
+        ${summary.counts.columns > 0 ? `<span class="labs-meta-pill">${summary.counts.columns} timepoints</span>` : ''}
+        ${summary.counts.diagnostics > 0 ? `<span class="labs-meta-pill">${summary.counts.diagnostics} diagnostics</span>` : ''}
+      </div>
+    </div>
+  `;
+
+  let latestSectionHtml = '';
+  if (filtered.panels.length) {
+    const cardsHtml = filtered.panels
+      .map((panel) => {
+        const itemsHtml = filtered.latestByPanel[panel]
+          .map((row) => {
+            const latest = row.latest;
+            const flagClass = latest.flag === 'H' ? 'flag-h' : latest.flag === 'L' ? 'flag-l' : '';
+            const flagHtml = latest.flag
+              ? `<span class="lab-flag-pill ${flagClass}">${esc(latest.flag)}</span>`
+              : '';
+            const deltaHtml = latest.deltaText
+              ? `<span class="labs-delta">${esc(latest.deltaText)}</span>`
+              : '';
+            const unitHtml = row.unit ? `<span class="labs-unit">${esc(row.unit)}</span>` : '';
+            const whenHtml = latest.label ? `<span class="labs-when">${esc(latest.label)}</span>` : '';
+            return `
+              <div class="labs-kv-row">
+                <div class="labs-kv-key">
+                  <span class="labs-key-name">${esc(row.key)}</span>
+                  ${unitHtml}
+                </div>
+                <div class="labs-kv-val">
+                  <span class="labs-val-num ${flagClass}">${esc(latest.value)}</span>
+                  ${flagHtml}
+                  ${deltaHtml}
+                  ${whenHtml}
+                </div>
+              </div>
+            `;
+          })
+          .join('');
+        return `
+          <section class="labs-panel-card">
+            <header class="labs-panel-head">
+              <span>${esc(panel)}</span>
+              <span class="labs-panel-count">${filtered.latestByPanel[panel].length}</span>
+            </header>
+            <div class="labs-kv-list">${itemsHtml}</div>
+          </section>
+        `;
+      })
+      .join('');
+    latestSectionHtml = `
+      <div class="labs-section">
+        <div class="labs-section-title">Latest Results by Panel</div>
+        <div class="labs-panel-grid">${cardsHtml}</div>
+      </div>
+    `;
+  }
+
+  let flowsheetHtml = '';
+  if (filtered.rows.length && filtered.columns.length) {
+    const headColsHtml = filtered.columns
+      .map((col) => `<th scope="col" title="${esc(col.label)}">${esc(col.shortLabel || col.label)}</th>`)
+      .join('');
+    const bodyRowsHtml = filtered.rows
+      .map((row) => {
+        const cellsHtml = filtered.columns
+          .map((col) => {
+            const cell = row.valuesByCol[col.key];
+            if (!cell) return '<td class="labs-td-empty">—</td>';
+            const flagClass = cell.flag === 'H' ? 'flag-h' : cell.flag === 'L' ? 'flag-l' : '';
+            const flagBadge = cell.flag ? ` <span class="lab-flag-pill ${flagClass}">${esc(cell.flag)}</span>` : '';
+            return `<td class="${flagClass}">${esc(cell.value)}${flagBadge}</td>`;
+          })
+          .join('');
+        return `
+          <tr>
+            <th scope="row" class="labs-sticky-col">
+              <span class="labs-key-name">${esc(row.key)}</span>
+              ${row.unit ? `<span class="labs-table-unit">${esc(row.unit)}</span>` : ''}
+            </th>
+            <td class="labs-ref-col">${esc(row.refRange || '—')}</td>
+            ${cellsHtml}
+          </tr>
+        `;
+      })
+      .join('');
+
+    flowsheetHtml = `
+      <div class="labs-section">
+        <div class="labs-section-title">Chronological Lab Flowsheet (Newest First)</div>
+        <div class="labs-table-wrap">
+          <table class="labs-trend-table">
+            <thead>
+              <tr>
+                <th scope="col" class="labs-sticky-col">Lab</th>
+                <th scope="col" class="labs-ref-col">Ref</th>
+                ${headColsHtml}
+              </tr>
+            </thead>
+            <tbody>${bodyRowsHtml}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  let diagnosticsHtml = '';
+  if (filtered.diagnostics.length) {
+    const diagItemsHtml = filtered.diagnostics
+      .map((diag) => `
+        <article class="labs-diag-card">
+          <header class="labs-diag-head">
+            <span class="labs-diag-title">${esc(diag.title)}</span>
+            <span class="labs-diag-date">${esc(diag.label)}</span>
+          </header>
+          <div class="labs-diag-body">${esc(diag.text)}</div>
+        </article>
+      `)
+      .join('');
+
+    diagnosticsHtml = `
+      <div class="labs-section">
+        <div class="labs-section-title">Imaging, ECG & Diagnostics</div>
+        <div class="labs-diag-list">${diagItemsHtml}</div>
+      </div>
+    `;
+  }
+
+  contentEl.innerHTML = `${metaHtml}${latestSectionHtml}${flowsheetHtml}${diagnosticsHtml}`;
 }
 
 function formatTimelineEventHtml(line) {
@@ -5410,6 +5633,7 @@ async function select(id, opts = {}) {
   timelineDateFilter = 'all';
   timelineSearchQuery = '';
   editingTimelineKey = null;
+  labsPanelFilter = 'all';
   if ($('timelineSearchInput')) $('timelineSearchInput').value = '';
   $('reply').hidden = true;
   $('preview').textContent = 'Press "Build redacted preview".';
@@ -5437,7 +5661,7 @@ async function undoChartEdit() {
   const n = notes.find((x) => x.id === currentId) || {};
   populateProfileInputs(n, prev, false);
   renderAdmittingHistoryCard(prev);
-  if (editorViewMode === 'timeline') renderChartTimeline();
+  refreshActiveEditorView();
   await saveCurrent('Reverted last chart edit', { skipUndoPush: true });
 }
 
@@ -6138,7 +6362,37 @@ if ($('editorDictateBtn')) {
 $('newBtn').onclick = () => openAdmitModal({ mode: 'new', triggerEl: $('newBtn') });
 $('saveBtn').onclick = () => saveCurrent();
 $('editorTimelineTab').onclick = () => setEditorView('timeline');
+$('editorLabsTab').onclick = () => setEditorView('labs');
 $('editorRawTab').onclick = () => setEditorView('raw');
+$('labsCopyBtn').onclick = () => {
+  const summary = getCurrentChartLabSummary();
+  const text = formatChartLabSummaryText(summary, { panelFilter: labsPanelFilter });
+  copyTextWithFallback(text, 'Lab summary copied', 'Lab Summary');
+};
+$('labsExportMdBtn').onclick = () => {
+  const summary = getCurrentChartLabSummary();
+  const text = formatChartLabSummaryMarkdown(summary, { panelFilter: labsPanelFilter });
+  const slug = buildLabExportSlug(summary.patient);
+  shareOrDownload({
+    filename: `${slug}-labs.md`,
+    text,
+    mimeType: 'text/markdown',
+    title: `${summary.patient.name} Labs`,
+    allowTextShare: false,
+  });
+};
+$('labsExportCsvBtn').onclick = () => {
+  const summary = getCurrentChartLabSummary();
+  const text = formatChartLabSummaryCsv(summary, { panelFilter: labsPanelFilter });
+  const slug = buildLabExportSlug(summary.patient);
+  shareOrDownload({
+    filename: `${slug}-labs.csv`,
+    text,
+    mimeType: 'text/csv',
+    title: `${summary.patient.name} Labs CSV`,
+    allowTextShare: false,
+  });
+};
 $('timelineSearchInput').oninput = (e) => {
   timelineSearchQuery = e.target.value;
   renderChartTimeline();
@@ -6636,7 +6890,7 @@ async function fileVoiceBlockToChart(rawMarkdownBody, statusVerb) {
     lastSavedChartContent = note.content;
     dirtyChart = false;
     updateSaveStatusPill('saved');
-    if (editorViewMode === 'timeline') renderChartTimeline();
+    refreshActiveEditorView();
   }
 
   const check = verifyAppendedChart(note.content);
@@ -7225,7 +7479,7 @@ $('inboxFileBtn').onclick = async () => {
     lastSavedChartContent = targetNote.content;
     dirtyChart = false;
     updateSaveStatusPill('saved');
-    if (editorViewMode === 'timeline') renderChartTimeline();
+    refreshActiveEditorView();
   }
 
   renderInboxQueue();
@@ -7269,7 +7523,7 @@ $('calcQuickWeightSaveBtn').onclick = async () => {
     $('noteText').value = note.content;
     lastSavedChartContent = note.content;
     populateProfileInputs(note, note.content, true);
-    if (editorViewMode === 'timeline') renderChartTimeline();
+    refreshActiveEditorView();
   }
   $('dripWeightInput').value = String(numWt);
   $('calcQuickWeightInput').value = '';
@@ -7308,7 +7562,7 @@ if ($('calcSaveProfileOverridesBtn')) {
       $('noteText').value = note.content;
       lastSavedChartContent = note.content;
       populateProfileInputs(note, note.content, true);
-      if (editorViewMode === 'timeline') renderChartTimeline();
+      refreshActiveEditorView();
     }
     if (weight) $('dripWeightInput').value = weight;
     $('calcOverrideAge').value = '';
@@ -7452,7 +7706,7 @@ if ($('calcInsertChartBtn')) {
     if (currentId === note.id) {
       $('noteText').value = note.content;
       lastSavedChartContent = note.content;
-      if (editorViewMode === 'timeline') renderChartTimeline();
+      refreshActiveEditorView();
     }
     toast(`Inserted into ${note.room || note.title} (${shift})`);
   };

@@ -465,6 +465,7 @@
       <div class="editor-view-bar">
         <div class="editor-tabs">
           <button type="button" id="editorTimelineTab" class="mode-btn active" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-timeline"></use></svg> Chart Timeline</button>
+          <button type="button" id="editorLabsTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Lab Results</button>
           <button type="button" id="editorRawTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
         </div>
         <span class="cf-meta">Changes save automatically to local IndexedDB</span>
@@ -481,6 +482,20 @@
           </div>
         </div>
         <div id="chartTimelineList" class="timeline-list"></div>
+      </div>
+
+      <div id="chartLabsPane" hidden>
+        <div class="labs-summary-toolbar">
+          <div class="filter-chips-wrap">
+            <div id="labsPanelChips" class="filter-chips" role="group" aria-label="Filter lab panels"></div>
+          </div>
+          <div class="labs-export-actions">
+            <button type="button" id="labsCopyBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
+            <button type="button" id="labsExportMdBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
+            <button type="button" id="labsExportCsvBtn" class="ghost small"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
+          </div>
+        </div>
+        <div id="chartLabsContent" class="labs-summary-content"></div>
       </div>
 
       <div id="chartRawPane" hidden>

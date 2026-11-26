@@ -2538,6 +2538,289 @@ html.kb-open .modal-overlay {
   flex-direction: column;
   gap: 12px;
 }
+
+#chartLabsPane {
+  min-width: 0;
+  max-width: 100%;
+}
+.labs-summary-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.labs-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.labs-export-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.labs-summary-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.labs-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.labs-meta-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--txt);
+}
+.labs-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.labs-meta-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--txt-2);
+}
+.labs-meta-pill.is-abnormal {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-txt);
+}
+.labs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.labs-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mut);
+}
+.labs-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+.labs-panel-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  min-width: 0;
+}
+.labs-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 11px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.labs-panel-count {
+  font-size: 11px;
+  color: var(--mut);
+  background: var(--surface-deep);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.labs-kv-list {
+  display: flex;
+  flex-direction: column;
+}
+.labs-kv-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 11px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px;
+}
+.labs-kv-row:last-child {
+  border-bottom: none;
+}
+.labs-kv-key {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.labs-key-name {
+  font-weight: 600;
+  color: var(--txt);
+}
+.labs-unit,
+.labs-table-unit {
+  font-size: 10.5px;
+  color: var(--mut);
+  font-weight: 400;
+}
+.labs-table-unit {
+  margin-left: 4px;
+}
+.labs-kv-val {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  text-align: right;
+}
+.labs-val-num {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--txt);
+}
+.labs-val-num.flag-h,
+.labs-trend-table td.flag-h {
+  color: var(--danger);
+}
+.labs-val-num.flag-l,
+.labs-trend-table td.flag-l {
+  color: var(--info);
+}
+.lab-flag-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.lab-flag-pill.flag-h {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-txt);
+}
+.lab-flag-pill.flag-l {
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  color: var(--info-txt);
+}
+.labs-delta {
+  font-size: 11px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+}
+.labs-when {
+  font-size: 10.5px;
+  color: var(--mut-2);
+}
+.labs-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  -webkit-overflow-scrolling: touch;
+}
+.labs-trend-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.labs-trend-table th,
+.labs-trend-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line-soft);
+  text-align: right;
+}
+.labs-trend-table th:last-child,
+.labs-trend-table td:last-child {
+  border-right: none;
+}
+.labs-trend-table tbody tr:last-child th,
+.labs-trend-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.labs-trend-table thead th {
+  background: var(--surface-2);
+  color: var(--txt-2);
+  font-weight: 600;
+  font-size: 11px;
+}
+.labs-trend-table .labs-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+  text-align: left;
+  border-right: 1px solid var(--line);
+}
+.labs-trend-table thead .labs-sticky-col {
+  background: var(--surface-2);
+  z-index: 3;
+}
+.labs-trend-table .labs-ref-col {
+  text-align: left;
+  color: var(--mut);
+  font-size: 11px;
+}
+.labs-td-empty {
+  color: var(--mut-2);
+}
+.labs-diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.labs-diag-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 12px;
+}
+.labs-diag-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.labs-diag-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.labs-diag-date {
+  font-size: 11px;
+  color: var(--mut);
+}
+.labs-diag-body {
+  font-size: 12.5px;
+  color: var(--txt-2);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 .timeline-cumfb-bar {
   background: var(--info-bg);
   border: 1px solid var(--info-border);
@@ -3780,6 +4063,25 @@ html.kb-open .modal-overlay {
   }
   .grid-5 > .field:nth-child(n+4) {
     grid-column: span 3;
+  }
+}
+
+@media (max-width: 640px) {
+  .labs-summary-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .labs-export-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .labs-export-actions button {
+    justify-content: center;
+    padding: 7px 6px;
+    font-size: 12px;
+  }
+  .labs-panel-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
