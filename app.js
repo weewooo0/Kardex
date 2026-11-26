@@ -52,7 +52,7 @@ import {
   buildStructuredShiftUpdate,
   syncFrontmatter,
   parseChartTimeline,
-  updateShiftBlockBody,
+  updateShiftBlock,
   deleteShiftBlock,
   parseChart,
   naturalBedCompare,
@@ -80,6 +80,8 @@ import {
   normalizeShiftSchedule,
   isInterimShift,
   formatInterimShiftLabel,
+  parseShiftTimeTo24h,
+  dateStringToIso,
   getShiftForDate,
   createEmptyAdmittingHistory,
   hasAdmittingHistoryContent,
@@ -774,13 +776,20 @@ async function flushPendingChartSave() {
   if (activeInlineTa && editingTimelineKey) {
     const saveEntryBtn = $('chartTimelineList')?.querySelector('.tl-save-entry-btn');
     if (saveEntryBtn) {
-      const res = updateShiftBlockBody(
-        $('noteText').value,
+      const inlineCard = saveEntryBtn.closest('.timeline-inline-edit');
+      const { nextDate, nextShift } = resolveTimelineEditMeta(
+        inlineCard,
         saveEntryBtn.dataset.date,
-        Number(saveEntryBtn.dataset.shiftIdx),
-        activeInlineTa.value,
-        Number(saveEntryBtn.dataset.dateIdx || 0)
+        saveEntryBtn.dataset.origShift
       );
+      const res = updateShiftBlock($('noteText').value, {
+        targetDate: saveEntryBtn.dataset.date,
+        dateOccurrenceIndex: Number(saveEntryBtn.dataset.dateIdx || 0),
+        shiftOccurrenceIndex: Number(saveEntryBtn.dataset.shiftIdx),
+        newBody: activeInlineTa.value,
+        newDate: nextDate,
+        newShift: nextShift,
+      });
       if (res.modified) {
         $('noteText').value = res.text;
         dirtyChart = true;
@@ -834,13 +843,20 @@ function persistRecoveryDraftSync() {
     } else if (currentId && activeInlineTa && editingTimelineKey) {
       const saveEntryBtn = $('chartTimelineList')?.querySelector('.tl-save-entry-btn');
       if (saveEntryBtn) {
-        const res = updateShiftBlockBody(
-          $('noteText').value,
+        const inlineCard = saveEntryBtn.closest('.timeline-inline-edit');
+        const { nextDate, nextShift } = resolveTimelineEditMeta(
+          inlineCard,
           saveEntryBtn.dataset.date,
-          Number(saveEntryBtn.dataset.shiftIdx),
-          activeInlineTa.value,
-          Number(saveEntryBtn.dataset.dateIdx || 0)
+          saveEntryBtn.dataset.origShift
         );
+        const res = updateShiftBlock($('noteText').value, {
+          targetDate: saveEntryBtn.dataset.date,
+          dateOccurrenceIndex: Number(saveEntryBtn.dataset.dateIdx || 0),
+          shiftOccurrenceIndex: Number(saveEntryBtn.dataset.shiftIdx),
+          newBody: activeInlineTa.value,
+          newDate: nextDate,
+          newShift: nextShift,
+        });
         if (res.modified) {
           chartDraft = { id: currentId, text: res.text, savedAt: Date.now() };
         }
@@ -1344,6 +1360,7 @@ function getFilteredSortedRoundsPatients(parsedPatients = null) {
 function renderRounds() {
   const container = $('roundsGrid');
   container.classList.toggle('compact-grid', roundsCompactMode);
+  if ($('roundsSection')) $('roundsSection').classList.toggle('compact-mode', roundsCompactMode);
   updateDutyClockUi();
   if ($('roundsSortSelect')) $('roundsSortSelect').value = roundsSortMode;
   if ($('roundsCompactBtn')) {
@@ -1678,6 +1695,13 @@ let shiftRawEdited = false;
 function defaultShiftForHour(now = new Date()) {
   const refDate = typeof now === 'number' ? new Date(2026, 0, 1, now, 0, 0) : now;
   return getShiftForDate(refDate, shiftSchedule).label;
+}
+
+function formatSplitBp(sbpRaw, dbpRaw) {
+  const sbp = String(sbpRaw || '').trim();
+  const dbp = String(dbpRaw || '').trim();
+  if (sbp && dbp) return `${sbp}/${dbp}`;
+  return sbp || (dbp ? `/${dbp}` : '');
 }
 
 function formatIoWithUnit(rawVal, unit = 'ml') {
@@ -4848,6 +4872,23 @@ function isTimelineBoilerplateLine(line) {
   );
 }
 
+function resolveTimelineEditMeta(card, origDate, origShift) {
+  if (!card) return { nextDate: origDate, nextShift: origShift };
+  const dateVal = card.querySelector('.tl-edit-date')?.value || '';
+  const nextDate = isoToMmDdYyyy(dateVal) || origDate;
+  const selVal = card.querySelector('.tl-edit-shift-select')?.value || '';
+  const timeVal = card.querySelector('.tl-edit-time')?.value || '';
+  let nextShift = origShift;
+  if (selVal === '__interim__') {
+    nextShift = formatInterimShiftLabel(new Date(), timeVal);
+  } else if (selVal === '__custom_time__') {
+    nextShift = formatTime24ToLabel(normalizeShiftTime(timeVal) || nowHhMm());
+  } else if (selVal) {
+    nextShift = selVal;
+  }
+  return { nextDate, nextShift };
+}
+
 function renderChartTimeline() {
   const timeline = parseChartTimeline($('noteText').value);
   const dateGroupsDesc = [...timeline].reverse();
@@ -4965,6 +5006,28 @@ function renderChartTimeline() {
           const isEditing = editingTimelineKey === entryKey;
 
           if (isEditing) {
+            const initialIsoDate = dateStringToIso(g.date);
+            const curShiftClean = String(s.shift || '').trim();
+            const isCurInterim = isInterimShift(curShiftClean);
+            const initialTime24 = parseShiftTimeTo24h(curShiftClean) || nowHhMm();
+            let matchedScheduleSlot = false;
+            const slotOpts = shiftSchedule
+              .map((slot) => {
+                const selected = !isCurInterim && slot.label.toLowerCase() === curShiftClean.toLowerCase();
+                if (selected) matchedScheduleSlot = true;
+                return `<option value="${esc(slot.label)}"${selected ? ' selected' : ''}>${esc(slot.label)}</option>`;
+              })
+              .join('');
+            const legacyOpt =
+              !isCurInterim && !matchedScheduleSlot && curShiftClean
+                ? `<option value="${esc(curShiftClean)}" selected>${esc(curShiftClean)}</option>`
+                : '';
+            const shiftOptionsHtml =
+              legacyOpt +
+              slotOpts +
+              `<option value="__interim__"${isCurInterim ? ' selected' : ''}>Interim (time)</option>` +
+              `<option value="__custom_time__">Other time…</option>`;
+
             return `
               <div class="timeline-shift-card">
                 <div class="timeline-shift-head">
@@ -4972,6 +5035,20 @@ function renderChartTimeline() {
                   <span class="cf-meta">Quick Edit · ${esc(g.date)}</span>
                 </div>
                 <div class="timeline-inline-edit">
+                  <div class="tl-meta-edit-row">
+                    <div class="field">
+                      <label>Date</label>
+                      <input type="date" class="compact-date-input tl-edit-date" value="${esc(initialIsoDate)}" aria-label="Shift entry date">
+                    </div>
+                    <div class="field">
+                      <label>Shift / Time</label>
+                      <select class="tl-edit-shift-select" aria-label="Shift or time slot">${shiftOptionsHtml}</select>
+                    </div>
+                    <div class="field tl-edit-time-wrap"${isCurInterim ? '' : ' hidden'}>
+                      <label>Time</label>
+                      <input type="time" class="compact-time-input tl-edit-time" value="${esc(initialTime24)}" aria-label="Shift clock time">
+                    </div>
+                  </div>
                   <div class="tl-quick-edit">
                     <div class="quick-vs-grid">
                       <div class="field">
@@ -5002,7 +5079,9 @@ function renderChartTimeline() {
                   <div class="row">
                     <button type="button" class="primary tl-save-entry-btn" data-date="${esc(
                       g.date
-                    )}" data-date-idx="${dateOcc}" data-shift-idx="${s.shiftIndex}" data-key="${esc(entryKey)}">${uiIcon('save')} Save Entry</button>
+                    )}" data-date-idx="${dateOcc}" data-shift-idx="${s.shiftIndex}" data-orig-shift="${esc(
+              s.shift
+            )}" data-key="${esc(entryKey)}">${uiIcon('save')} Save Entry</button>
                     <button type="button" class="btn tl-cancel-entry-btn">Cancel</button>
                     <button type="button" class="btn danger tl-delete-entry-btn" data-date="${esc(
                       g.date
@@ -5095,11 +5174,57 @@ function renderChartTimeline() {
     };
   });
 
+  listEl.querySelectorAll('.tl-edit-date, .tl-edit-shift-select, .tl-edit-time').forEach((el) => {
+    const syncMetaHeader = () => {
+      const shiftCard = el.closest('.timeline-shift-card');
+      const inlineCard = shiftCard?.querySelector('.timeline-inline-edit');
+      const saveBtn = inlineCard?.querySelector('.tl-save-entry-btn');
+      if (!shiftCard || !inlineCard || !saveBtn) return;
+
+      const selVal = inlineCard.querySelector('.tl-edit-shift-select')?.value || '';
+      const timeWrap = inlineCard.querySelector('.tl-edit-time-wrap');
+      const timeInp = inlineCard.querySelector('.tl-edit-time');
+      const needsTime = selVal === '__interim__' || selVal === '__custom_time__';
+      if (timeWrap) timeWrap.hidden = !needsTime;
+      if (needsTime && timeInp && !timeInp.value) timeInp.value = nowHhMm();
+
+      const { nextDate, nextShift } = resolveTimelineEditMeta(
+        inlineCard,
+        saveBtn.dataset.date,
+        saveBtn.dataset.origShift
+      );
+      const badge = shiftCard.querySelector('.timeline-shift-badge');
+      const meta = shiftCard.querySelector('.timeline-shift-head .cf-meta');
+      if (badge) badge.textContent = nextShift;
+      if (meta) meta.textContent = `Quick Edit · ${nextDate}`;
+      markChartDirty();
+    };
+    el.addEventListener('change', syncMetaHeader);
+    if (el.tagName !== 'SELECT') {
+      el.addEventListener('input', syncMetaHeader);
+    }
+  });
+
   listEl.querySelectorAll('.tl-cancel-entry-btn').forEach((btn) => {
     btn.onclick = () => {
       const ta = listEl.querySelector('.tl-edit-textarea');
+      const inlineCard = btn.closest('.timeline-inline-edit');
+      const saveBtn = inlineCard?.querySelector('.tl-save-entry-btn');
       const s = editingTimelineKey ? shiftLookup.get(editingTimelineKey) : null;
-      if (ta && s && ta.value.trim() !== String(s.body || '').trim()) {
+      const bodyChanged = Boolean(ta && s && ta.value.trim() !== String(s.body || '').trim());
+      let metaChanged = false;
+      if (inlineCard && saveBtn) {
+        const { nextDate, nextShift } = resolveTimelineEditMeta(
+          inlineCard,
+          saveBtn.dataset.date,
+          saveBtn.dataset.origShift
+        );
+        const origIso = dateStringToIso(saveBtn.dataset.date);
+        const nextIso = dateStringToIso(nextDate);
+        const dateDiff = origIso && nextIso ? origIso !== nextIso : nextDate !== saveBtn.dataset.date;
+        metaChanged = dateDiff || nextShift !== saveBtn.dataset.origShift;
+      }
+      if (bodyChanged || metaChanged) {
         if (!confirm('Discard unsaved edits to this shift block?')) return;
       }
       editingTimelineKey = null;
@@ -5173,20 +5298,34 @@ function applyTimelineQuickInputsToCard(card, ta) {
       if (!ta) return;
       const card = btn.closest('.timeline-inline-edit');
       applyTimelineQuickInputsToCard(card, ta);
-      const prevContent = $('noteText').value;
-      const res = updateShiftBlockBody(
-        prevContent,
+      const { nextDate, nextShift } = resolveTimelineEditMeta(
+        card,
         btn.dataset.date,
-        Number(btn.dataset.shiftIdx),
-        ta.value,
-        Number(btn.dataset.dateIdx || 0)
+        btn.dataset.origShift
       );
+      const prevContent = $('noteText').value;
+      const res = updateShiftBlock(prevContent, {
+        targetDate: btn.dataset.date,
+        dateOccurrenceIndex: Number(btn.dataset.dateIdx || 0),
+        shiftOccurrenceIndex: Number(btn.dataset.shiftIdx),
+        newBody: ta.value,
+        newDate: nextDate,
+        newShift: nextShift,
+      });
       if (res.modified) {
         pushUndoSnapshot(currentId, prevContent);
         $('noteText').value = res.text;
         lastSavedChartContent = res.text;
         editingTimelineKey = null;
-        await saveCurrent('Entry updated');
+        if (timelineDateFilter !== 'all' && res.date) {
+          const curFilterIso = dateStringToIso(timelineDateFilter) || timelineDateFilter;
+          const nextIso = dateStringToIso(res.date) || res.date;
+          if (curFilterIso !== nextIso) timelineDateFilter = res.date;
+        }
+        await saveCurrent(res.moved ? `Updated (${res.date} · ${res.shift})` : 'Entry updated');
+        renderChartTimeline();
+      } else {
+        editingTimelineKey = null;
         renderChartTimeline();
       }
     };

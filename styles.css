@@ -658,14 +658,18 @@ main {
 }
 .toolbar-search-row {
   display: flex;
-  flex: 1;
+  flex: 1 1 280px;
   gap: 8px;
-  min-width: 240px;
+  min-width: 280px;
   align-items: center;
 }
 .toolbar-search {
-  flex: 1;
-  min-width: 160px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.toolbar-search input {
+  width: 100%;
+  min-width: 0;
 }
 .toolbar-sort {
   width: 168px;
@@ -676,6 +680,24 @@ main {
   gap: 6px;
   align-items: center;
   flex-wrap: wrap;
+}
+#roundsSection.compact-mode .toolbar-actions .toolbar-btn-label {
+  display: none;
+}
+#roundsSection.compact-mode .toolbar-actions .toolbar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 38px;
+  min-height: 36px;
+  padding: 7px 10px;
+}
+#roundsSection.compact-mode .toolbar-actions .toolbar-icon-btn .ui-ico {
+  width: 17px;
+  height: 17px;
+  vertical-align: middle;
+  margin: 0;
 }
 
 /* ==================== SCUTSHEET GRID & CARDS ==================== */
@@ -2641,6 +2663,28 @@ html.kb-open .modal-overlay {
   letter-spacing: 0.4px;
   color: var(--mut);
 }
+.tl-meta-edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) auto;
+  gap: 8px;
+  align-items: end;
+  background: var(--card);
+  border: 1px solid var(--border-ctrl);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.tl-meta-edit-row .field {
+  min-width: 0;
+}
+.tl-meta-edit-row input,
+.tl-meta-edit-row select {
+  width: 100%;
+  min-width: 0;
+}
+.tl-edit-time-wrap[hidden] {
+  display: none;
+}
 .tl-quick-edit {
   background: var(--surface);
   border: 1px solid var(--border-ctrl);
@@ -3576,6 +3620,8 @@ html.kb-open .modal-overlay {
   .toolbar-sort select { width: 100%; min-width: 0; padding: 8px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .toolbar-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; overflow-x: visible; width: 100%; min-width: 0; max-width: 100%; }
   .toolbar-actions button { width: 100%; min-width: 0; padding: 8px 8px; font-size: 13px; white-space: nowrap; min-height: 44px; }
+  #roundsSection.compact-mode .toolbar-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  #roundsSection.compact-mode .toolbar-actions .toolbar-icon-btn { min-width: 0; min-height: 44px; padding: 8px 0; }
   #loadSyntheticBtn { grid-column: 1 / -1; }
   .scut-grid { grid-template-columns: 1fr; }
   .editor-hint, .editor-view-bar .cf-meta { display: none; }
@@ -3711,6 +3757,12 @@ html.kb-open .modal-overlay {
   .tl-quick-edit .quick-io-grid,
   .shift-io-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tl-meta-edit-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tl-meta-edit-row .tl-edit-time-wrap {
+    grid-column: 1 / -1;
   }
   .quick-io-grid > .field.align-end {
     grid-column: 1 / -1;

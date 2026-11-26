@@ -294,6 +294,27 @@ export function formatInterimShiftLabel(now = new Date(), customTime24 = '') {
   return `Interim (${formatTime24ToLabel(timeStr)})`;
 }
 
+export function parseShiftTimeTo24h(shiftLabel) {
+  const s = String(shiftLabel || '').trim();
+  if (!s) return '';
+  const m12 = s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  if (m12) {
+    let h = parseInt(m12[1], 10);
+    const min = m12[2] ? parseInt(m12[2], 10) : 0;
+    const ap = m12[3].toLowerCase();
+    if (h >= 1 && h <= 12 && min >= 0 && min <= 59) {
+      if (ap === 'pm' && h !== 12) h += 12;
+      if (ap === 'am' && h === 12) h = 0;
+      return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+    }
+  }
+  const m24 = s.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (m24) {
+    return `${String(parseInt(m24[1], 10)).padStart(2, '0')}:${m24[2]}`;
+  }
+  return '';
+}
+
 export function getShiftForDate(now = new Date(), schedule = DEFAULT_SHIFT_SCHEDULE) {
   const normSchedule = normalizeShiftSchedule(schedule);
   const nowMins = now.getHours() * 60 + now.getMinutes();
@@ -437,6 +458,12 @@ function datesMatch(a, b) {
     return pA.year === pB.year && pA.month === pB.month && pA.day === pB.day;
   }
   return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+export function dateStringToIso(str) {
+  const p = parseDateParts(str);
+  if (!p) return '';
+  return `${String(p.year).padStart(4, '0')}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
 export function formatRoomLabel(room) {
@@ -4006,6 +4033,183 @@ export function updateShiftBlockBody(content, targetDate, shiftOccurrenceIndex, 
   const suffix = range.sliceEnd < text.length ? '\n\n' : '\n';
   const updated = `${text.slice(0, range.bodyStart)}${cleanNew}${suffix}${text.slice(range.sliceEnd)}`;
   return { text: updated, modified: true };
+}
+
+function dateComparableValue(dateStr) {
+  const p = parseDateParts(dateStr);
+  return p ? p.year * 10000 + p.month * 100 + p.day : null;
+}
+
+function shiftSortMinutes(shiftLabel) {
+  const clean = String(shiftLabel || '').trim();
+  if (!clean || /^entry$/i.test(clean)) return -1;
+  const t24 = parseShiftTimeTo24h(clean);
+  if (t24) {
+    const [hh, mm] = t24.split(':').map(Number);
+    const total = hh * 60 + mm;
+    return total < 240 ? total + 1440 - 240 : total - 240;
+  }
+  if (/^morning\b/i.test(clean)) return 120;
+  if (/^afternoon\b/i.test(clean)) return 600;
+  if (/^(?:night|evening)\b/i.test(clean)) return 1080;
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function insertShiftChunkChronologically(sectionBody, newShiftLabel, newShiftChunk) {
+  const body = String(sectionBody || '');
+  const shiftHeadingRe = /^###\s*([^\n]+)$/gm;
+  const matches = [...body.matchAll(shiftHeadingRe)];
+
+  const preText = matches.length ? body.slice(0, matches[0].index).trim() : body.trim();
+  const blocks = [];
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : body.length;
+    blocks.push({
+      label: matches[i][1].trim(),
+      sortMins: shiftSortMinutes(matches[i][1].trim()),
+      blockText: body.slice(start, end).trim(),
+    });
+  }
+
+  if (newShiftLabel === 'Entry') {
+    const combinedPre = [preText, newShiftChunk].filter(Boolean).join('\n\n');
+    const parts = [];
+    if (combinedPre) parts.push(combinedPre);
+    for (const b of blocks) parts.push(b.blockText);
+    return parts.join('\n\n');
+  }
+
+  const newSortMins = shiftSortMinutes(newShiftLabel);
+  let insertIdx = blocks.length;
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].sortMins > newSortMins) {
+      insertIdx = i;
+      break;
+    }
+  }
+  blocks.splice(insertIdx, 0, {
+    label: newShiftLabel,
+    sortMins: newSortMins,
+    blockText: newShiftChunk,
+  });
+
+  const parts = [];
+  if (preText) parts.push(preText);
+  for (const b of blocks) parts.push(b.blockText);
+  return parts.join('\n\n');
+}
+
+export function updateShiftBlock(
+  content,
+  {
+    targetDate,
+    dateOccurrenceIndex = 0,
+    shiftOccurrenceIndex,
+    newBody,
+    newDate = '',
+    newShift = '',
+  } = {}
+) {
+  const text = String(content || '').replace(/\r\n/g, '\n');
+  const range = findShiftSliceRange(text, targetDate, shiftOccurrenceIndex, dateOccurrenceIndex);
+  if (!range) return { text, modified: false, date: targetDate, shift: '', moved: false };
+
+  const oldShift =
+    shiftOccurrenceIndex >= 0 && range.shiftMatches[shiftOccurrenceIndex]
+      ? range.shiftMatches[shiftOccurrenceIndex][1].trim()
+      : 'Entry';
+  const effectiveDate = String(newDate || '').trim() || targetDate;
+  const effectiveShift = String(newShift || '').trim() || oldShift;
+
+  const dateChanged =
+    targetDate === 'Undated'
+      ? Boolean(String(newDate || '').trim()) && String(newDate).trim() !== 'Undated'
+      : Boolean(String(newDate || '').trim()) && !datesMatch(targetDate, effectiveDate);
+  const shiftChanged = effectiveShift !== oldShift;
+
+  if (!dateChanged && !shiftChanged) {
+    const res = updateShiftBlockBody(text, targetDate, shiftOccurrenceIndex, newBody, dateOccurrenceIndex);
+    return { ...res, date: targetDate, shift: oldShift, moved: false };
+  }
+
+  const cleanNew = String(newBody || '').trim();
+  const entryBlock =
+    effectiveShift === 'Entry'
+      ? cleanNew
+      : cleanNew
+        ? `### ${effectiveShift}\n${cleanNew}`
+        : `### ${effectiveShift}`;
+
+  if (!dateChanged) {
+    const withoutOld = text.slice(range.sectionStart, range.fullStart) + text.slice(range.sliceEnd, range.sectionEnd);
+    const rebuiltSection = insertShiftChunkChronologically(withoutOld, effectiveShift, entryBlock);
+    const prefix = text.slice(0, range.sectionStart).replace(/\n+$/, '');
+    const suffix = text.slice(range.sectionEnd).replace(/^\n+/, '');
+    const headPart = prefix ? `${prefix}\n\n${rebuiltSection}` : rebuiltSection;
+    const updated = `${headPart}${suffix ? `\n\n${suffix}` : ''}`.replace(/\n*$/, '\n');
+    return { text: updated, modified: true, date: targetDate, shift: effectiveShift, moved: true };
+  }
+
+  const delRes = deleteShiftBlock(text, targetDate, shiftOccurrenceIndex, dateOccurrenceIndex);
+  if (!delRes.modified) {
+    return { text, modified: false, date: targetDate, shift: oldShift, moved: false };
+  }
+  const prunedText = delRes.text;
+
+  const dateHeadingRe = /^##\s+([^\n]+)$/gm;
+  const headings = [...prunedText.matchAll(dateHeadingRe)];
+
+  let targetMatchIdx = -1;
+  for (let i = headings.length - 1; i >= 0; i--) {
+    const hText = headings[i][1].trim();
+    if (/^admitting\s+history$/i.test(hText)) continue;
+    if (datesMatch(hText, effectiveDate)) {
+      targetMatchIdx = i;
+      break;
+    }
+  }
+
+  if (targetMatchIdx !== -1) {
+    const h = headings[targetMatchIdx];
+    const secStart = h.index + h[0].length;
+    const secEnd = targetMatchIdx + 1 < headings.length ? headings[targetMatchIdx + 1].index : prunedText.length;
+    const rebuiltSection = insertShiftChunkChronologically(prunedText.slice(secStart, secEnd), effectiveShift, entryBlock);
+    const before = prunedText.slice(0, secStart).replace(/\n+$/, '');
+    const after = prunedText.slice(secEnd).replace(/^\n+/, '');
+    const updated = `${before}\n\n${rebuiltSection}${after ? `\n\n${after}` : ''}`.replace(/\n*$/, '\n');
+    return { text: updated, modified: true, date: effectiveDate, shift: effectiveShift, moved: true };
+  }
+
+  const newDateSection = `## ${effectiveDate}\n\n${entryBlock}`;
+  const newComp = dateComparableValue(effectiveDate);
+  let insertAt = -1;
+  if (newComp !== null) {
+    for (const h of headings) {
+      const hText = h[1].trim();
+      if (/^admitting\s+history$/i.test(hText)) continue;
+      const comp = dateComparableValue(hText);
+      if (comp !== null && comp > newComp) {
+        insertAt = h.index;
+        break;
+      }
+    }
+  }
+
+  let updated;
+  if (insertAt !== -1) {
+    const before = prunedText.slice(0, insertAt).replace(/\n+$/, '');
+    const after = prunedText.slice(insertAt).replace(/^\n+/, '');
+    updated = (before ? `${before}\n\n${newDateSection}\n\n${after}` : `${newDateSection}\n\n${after}`).replace(
+      /\n*$/,
+      '\n'
+    );
+  } else {
+    const before = prunedText.replace(/\n+$/, '');
+    updated = (before ? `${before}\n\n${newDateSection}` : newDateSection).replace(/\n*$/, '\n');
+  }
+
+  return { text: updated, modified: true, date: effectiveDate, shift: effectiveShift, moved: true };
 }
 
 export function deleteShiftBlock(content, targetDate, shiftOccurrenceIndex, dateOccurrenceIndex = 0) {

@@ -1,4 +1,4 @@
-const CACHE = 'kardex-v51';
+const CACHE = 'kardex-v55';
 const WHISPER_RUNTIME_CACHE = 'companion-md-whisper-runtime';
 const SHELL = [
   './',
@@ -99,7 +99,7 @@ self.addEventListener('fetch', (e) => {
     caches.match(e.request).then(
       (hit) =>
         hit ||
-        fetch(e.request).then((res) => {
+        fetch(e.request, { cache: 'no-cache' }).then((res) => {
           if (res && res.ok) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(e.request, copy));
