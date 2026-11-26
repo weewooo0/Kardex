@@ -1916,94 +1916,214 @@ const PE_SYSTEM_PREFIX_RE =
   /^(?:General(?:\s+Survey)?|Gen|GS|Skin|Integument(?:ary)?|HEENT|Eyes?|ENT|Neck|Chest(?:\/Lungs)?|C\/L|Lungs?|Resp(?:iratory)?|Pulm(?:onary)?|Heart|CVS|Cardio(?:vascular)?|Cardiac|Abdomen|ABD|GI|GU|Genitourinary|Extremities|EXT|MSK|Musculoskeletal|Neuro(?:logic)?|CNS|DRE)\s*:/i;
 
 const PE_GENERAL_SURVEY_RE =
-  /^(?:Awake\b|Alert\b|Conscious\b|Drowsy\b|Lethargic\b|Stuporous\b|Obtunded\b|Comatose\b|Sedated\b|Intubated\b|GCS\b|RASS\b|In\s+(?:mild|moderate|severe)\s+(?:cardio)?respiratory\s+distress\b|Not\s+in\s+(?:cardio)?respiratory\s+distress\b|NIRD\b)/i;
+  /^(?:Awake\b|Alert\b|Arousable\b|Asleep\b|Unresponsive\b|Conscious\b|Drowsy\b|Lethargic\b|Stuporous\b|Obtunded\b|Comatose\b|Sedated\b|Intubated\b|GCS\b|RASS\b|In\s+(?:mild|moderate|severe)\s+(?:cardio)?respiratory\s+distress\b|Not\s+in\s+(?:cardio)?respiratory\s+distress\b|NIRD\b)/i;
+
+const PE_STRONG_GENERAL_SURVEY_RE =
+  /^(?:.*\b(?:NIRD|not\s+in\s+(?:cardio)?respiratory\s+distress|in\s+(?:mild|moderate|severe)\s+(?:cardio)?respiratory\s+distress)\b|Sedated,\s*intubated\b|Intubated\b|GCS\s*\d|RASS\s*[+-]?\d)/i;
+
+const PE_FINDING_LINE_RE =
+  /(?:\b(?:isocoric|anisocoric|pupils?|perrla?|ebrl|sclerae?|conjunctivae?|anicteric|icteric|pink(?:ish)?\s+(?:palpebral\s+)?conjunctiv|pale\s+(?:palpebral\s+)?conjunctiv|corneal\s+reflex|visual\s+threat|jvd|jvp|neck\s+veins?|trachea\s+midline|lymphadenopathy|clad|ece|cbs|clear\s+breath\s+sounds?|breath\s+sounds?|bibasal\s+(?:rales|crackles)|rales|crackles|rhonchi|wheez(?:es?|ing)|stridor|equal\s+chest\s+expansion|chest\s+expansion|retractions?|dhs|distinct\s+heart\s+sounds?|heart\s+sounds?|adynamic\s+precordium|regular\s+(?:rate\s+and\s+)?rhythm|irregular(?:ly)?\s+irregular|murmurs?|precordium|pmi|heaves?|thrills?|nabs|normoactive\s+bowel\s+sounds?|bowel\s+sounds?|flabby|globular|scaphoid|soft,?\s*(?:non-?tender|nt)|(?:soft|flabby)\s+abdomen|non-?tender\s+abdomen|abdomen\s+(?:soft|flabby|non-?tender|distended)|guarding|rebound|hepatomegaly|splenomegaly|ascites|crt\s*[<>≤≥]\s*\d|capillary\s+refill|spp|fpp|(?:strong|fair|weak|full)\s+(?:peripheral\s+|distal\s+)?pulses?|(?:bi)?pedal\s+edema|no\s+(?:bi)?(?:pedal\s+)?edema|(?:cool|warm)\s+(?:peripher(?:ies|al)|extremities)|cyanotic\s+digits|acrocyanosis|clubbing|avf\s+(?:[lr]|left|right|bruit|thrill)|plantar\s+reflex|babinski|cranial\s+nerves?|dtrs?|nuchal\s+rigidity|kernig|brudzinski|motor\s+strength|gcs\s*\d)\b|\([+-]\)\s*(?:bi)?(?:pedal\s+)?edema\b|\bap\s*,\s*dhs\b)/i;
+
+const PE_SUBJECTIVE_LINE_RE =
+  /^(?:(?:Subjective|S>|S:)\b|(?:[-*]\s*)?(?:no\s+subjective\s+complaints?|no\s+complaints?|no\s+acute\s+events?|no\s+untoward\s+events?|no\s+(?:new\s+)?(?:complaints?|symptoms?)|no\s+episodes?\s+of|no\s+fever|afebrile|no\s+chills|no\s+hypotension|no\s+chest\s+pain|no\s+dyspnea|no\s+shortness\s+of\s+breath|no\s+nausea|no\s+vomiting|no\s+bleeding|no\s+seizures?|hypoglycemic\s+episodes?|good\s+appetite|slept\s+well|tolerating\s+diet|seen\s+(?:patient|pt)\b|s\/p\s+hd\b|post\s+hd\b|downtitrating|uptitrating|titrated\s+up|answers?\s+(?:to\s+)?yes\s*(?:or|\/)\s*no|head\s+gesture|family\s+opted)\b)/i;
 
 const PE_NON_SECTION_START_RE =
-  /^(?:\*{0,2})(?:Subjective|Assessment|Impression|Working\s+Impression|Problem\s+list|Labs?|Laboratory(?:\s+updates?)?|Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)(?:\*{0,2})\s*:/i;
+  /^(?:\*{0,2})(?:Subjective|S>|S:|Assessment|Impression|Working\s+Impression|Problem\s+list|Labs?|Laboratory(?:\s+updates?)?|Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|HGTs?|CBGs?|Diet|Feeding|Nutrition|CXR(?:\s+[^:]+)?|Chest\s+X-?ray(?:\s+[^:]+)?|12-?L(?:ead)?\s*ECG|ECG|EKG|2D\s*Echo(?:\s+[^:]+)?|CT(?:\s+[^:]+)?|MRI(?:\s+[^:]+)?|UTZ(?:\s+[^:]+)?|Ultrasound(?:\s+[^:]+)?)(?:\*{0,2})\s*:/i;
 
 const PE_BARE_NON_SECTION_RE =
-  /^(?:\*{0,2})(?:Medications?|Meds?|Pending|Plans?|Drips?|On\s+hold)(?:\*{0,2})\s*$/i;
+  /^(?:\*{0,2})(?:Medications?|Meds?|Pending|Plans?|Drips?|On\s+hold|HGTs?|CBGs?|Diet|Feeding|Labs?|ABG|CBC)(?:\*{0,2})\s*$/i;
 
 const PE_SIGNATURE_RE = /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i;
 
-function isRecognizablePeStartLine(trimmed) {
+function hasExplicitPeStartFormat(trimmed) {
   return PE_SYSTEM_PREFIX_RE.test(trimmed) || PE_GENERAL_SURVEY_RE.test(trimmed);
+}
+
+function isObjectiveAnchorLine(trimmed) {
+  return (
+    /^(?:\*{0,2})Objective(?:\*{0,2})\s*:/i.test(trimmed) ||
+    /^O>\s*/i.test(trimmed) ||
+    /^O:\s*/i.test(trimmed) ||
+    /^(?:[-*]\s*)?(?:Vitals?|VS)\s*:/i.test(trimmed) ||
+    /^(?:BP|HR|PR|RR|Tmax|Temp|O2(?:\s*sat)?|SpO2)\b\s*[:=\d]/i.test(trimmed) ||
+    /^(?:Shift\s+I&O|I&O|Drips?|Infusions?|HGTs?|CBGs?)\s*[:=]?/i.test(trimmed) ||
+    /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\s*:?$/i.test(
+      trimmed
+    ) ||
+    /^(?:I|O)\s+\d/i.test(trimmed) ||
+    /^[IO]\s*-\s*\d/i.test(trimmed) ||
+    /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
+      trimmed
+    ) ||
+    /^(?:Ppeak|Pplat|VTE|EMV|FT)\s+\d/i.test(trimmed)
+  );
 }
 
 function isPeStopLine(trimmed) {
   return (
     /^#{2,3}\s+/.test(trimmed) ||
     /^---+$/.test(trimmed) ||
-    /^(?:\*{0,2})(?:Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Assessment|Impression|Working\s+Impression|Problem\s+list|Subjective|Objective|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
+    /^(?:\*{0,2})(?:Drips?|Infusions?|Meds?|Medications?|Current\s+Meds?|On\s+hold|Hold|Held|Pending|Service\s+Plans?|Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Assessment|Impression|Working\s+Impression|Problem\s+list|Subjective|Objective|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|HGTs?|CBGs?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
       trimmed
     ) ||
     PE_BARE_NON_SECTION_RE.test(trimmed) ||
     PE_SIGNATURE_RE.test(trimmed) ||
-    /^(?:BP|HR|RR|Tmax|Temp|O2(?:\s*sat)?)\b\s*[:\d]/i.test(trimmed) ||
-    /^(?:Shift\s+I&O|I&O|FWF|HGT)\b/i.test(trimmed) ||
+    /^(?:BP|HR|PR|RR|Tmax|Temp|O2(?:\s*sat)?|SpO2)\b\s*[:=\d]/i.test(trimmed) ||
+    /^(?:Shift\s+I&O|I&O|FWF|HGTs?|CBGs?)\b/i.test(trimmed) ||
+    /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\b/i.test(
+      trimmed
+    ) ||
     /^(?:I|O)\s+\d/i.test(trimmed) ||
-    /^[IO]-\s*/i.test(trimmed)
+    /^[IO]\s*-\s*/i.test(trimmed) ||
+    /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
+      trimmed
+    ) ||
+    /^(?:Ppeak|Pplat|VTE|EMV|FT)\s+\d/i.test(trimmed)
   );
 }
 
 function extractPeLinesFromBlock(blockText) {
   const lines = String(blockText || '').split('\n');
-  const out = [];
-  let inPe = false;
+  const explicitCandidates = [];
+  const implicitCandidates = [];
   let inNonPeSection = false;
-  let sawExplicitHeader = false;
+  let seenObjectiveAnchor = false;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    if (!inPe) {
-      if (!trimmed) {
-        inNonPeSection = false;
-        continue;
-      }
-
-      const peHdr = trimmed.match(/^(?:\*{0,2})(?:PE|Physical\s+Exam(?:ination)?)(?:\*{0,2}):\s*(.*)$/i);
-      if (peHdr) {
-        inPe = true;
-        inNonPeSection = false;
-        sawExplicitHeader = true;
-        const inline = (peHdr[1] || '').trim();
-        if (inline) out.push(inline);
-        continue;
-      }
-
-      if (
-        PE_NON_SECTION_START_RE.test(trimmed) ||
-        PE_BARE_NON_SECTION_RE.test(trimmed) ||
-        PE_SIGNATURE_RE.test(trimmed)
-      ) {
-        inNonPeSection = true;
-        continue;
-      }
-
-      if (!inNonPeSection && isRecognizablePeStartLine(trimmed)) {
-        inPe = true;
-        out.push(trimmed);
-      }
-      continue;
-    }
-
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
     if (!trimmed) {
-      if (out.length > 0) break;
+      inNonPeSection = false;
       continue;
     }
-    if (isPeStopLine(trimmed)) {
-      if (out.length > 0) break;
-      inPe = false;
+
+    const peHdr = trimmed.match(/^(?:\*{0,2})(?:PE|Physical\s+Exam(?:ination)?)(?:\*{0,2}):\s*(.*)$/i);
+    if (peHdr) {
+      inNonPeSection = false;
+      seenObjectiveAnchor = true;
+      const candLines = [];
+      const inline = (peHdr[1] || '').trim();
+      if (inline) candLines.push(inline);
+
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const nextTrimmed = lines[j].trim();
+        if (!nextTrimmed) {
+          if (candLines.length > 0) break;
+          continue;
+        }
+        if (isPeStopLine(nextTrimmed)) break;
+        candLines.push(nextTrimmed);
+      }
+      i = j - 1;
+      if (candLines.length > 0) {
+        explicitCandidates.push({ lines: candLines });
+      }
       continue;
     }
-    out.push(trimmed);
+
+    if (/^(?:\*{0,2})(?:Feeding|Diet|Nutrition)(?:\*{0,2}):\s*\S/i.test(trimmed)) {
+      continue;
+    }
+
+    const isObjAnchor = isObjectiveAnchorLine(trimmed);
+    const isExplicitNonPe =
+      PE_NON_SECTION_START_RE.test(trimmed) ||
+      PE_BARE_NON_SECTION_RE.test(trimmed) ||
+      PE_SIGNATURE_RE.test(trimmed) ||
+      PE_SUBJECTIVE_LINE_RE.test(trimmed);
+
+    if (isObjAnchor) {
+      seenObjectiveAnchor = true;
+      if (!isExplicitNonPe) inNonPeSection = false;
+    }
+
+    if (isExplicitNonPe) {
+      inNonPeSection = true;
+      continue;
+    }
+
+    if (isObjAnchor) continue;
+
+    if (PE_SYSTEM_PREFIX_RE.test(trimmed)) {
+      inNonPeSection = false;
+    }
+
+    if (inNonPeSection) continue;
+
+    const startsCandidate =
+      PE_SYSTEM_PREFIX_RE.test(trimmed) ||
+      PE_FINDING_LINE_RE.test(trimmed) ||
+      PE_GENERAL_SURVEY_RE.test(trimmed);
+
+    if (!startsCandidate) continue;
+
+    const afterObjective = seenObjectiveAnchor;
+    const candLines = [trimmed];
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const nextTrimmed = lines[j].trim();
+      if (!nextTrimmed) break;
+      if (isPeStopLine(nextTrimmed)) break;
+      candLines.push(nextTrimmed);
+    }
+    i = j - 1;
+
+    let systemLineCount = 0;
+    let findingLineCount = 0;
+    let subjectiveLineCount = 0;
+    let hasStrongGeneralSurvey = false;
+
+    for (const cl of candLines) {
+      const isSys = PE_SYSTEM_PREFIX_RE.test(cl);
+      const isFind = isSys || PE_FINDING_LINE_RE.test(cl);
+      const isSubj = !isFind && PE_SUBJECTIVE_LINE_RE.test(cl);
+      if (isSys) systemLineCount += 1;
+      if (isFind) findingLineCount += 1;
+      if (isSubj) subjectiveLineCount += 1;
+      if (PE_STRONG_GENERAL_SURVEY_RE.test(cl)) hasStrongGeneralSurvey = true;
+    }
+
+    if (findingLineCount === 0 && subjectiveLineCount > 0) continue;
+    if (findingLineCount === 0 && !afterObjective) continue;
+    if (findingLineCount === 0 && !hasStrongGeneralSurvey) continue;
+    if (!afterObjective && systemLineCount === 0 && subjectiveLineCount >= findingLineCount) continue;
+
+    const valid =
+      findingLineCount >= 2 ||
+      systemLineCount >= 1 ||
+      (afterObjective && findingLineCount >= 1) ||
+      (afterObjective && hasStrongGeneralSurvey && subjectiveLineCount === 0);
+
+    if (!valid) continue;
+
+    const score =
+      (afterObjective ? 100 : 0) +
+      systemLineCount * 15 +
+      findingLineCount * 10 -
+      subjectiveLineCount * 20;
+
+    implicitCandidates.push({ lines: candLines, score });
   }
 
-  if (out.length > 0 && sawExplicitHeader && !isRecognizablePeStartLine(out[0])) {
-    return out.length === 1 ? `PE: ${out[0]}` : `PE:\n${out.join('\n')}`;
+  if (explicitCandidates.length > 0) {
+    const chosen = explicitCandidates[0].lines;
+    if (!hasExplicitPeStartFormat(chosen[0])) {
+      return chosen.length === 1 ? `PE: ${chosen[0]}` : `PE:\n${chosen.join('\n')}`;
+    }
+    return chosen.join('\n');
   }
-  return out.join('\n');
+
+  if (implicitCandidates.length > 0) {
+    let best = implicitCandidates[0];
+    for (let k = 1; k < implicitCandidates.length; k++) {
+      if (implicitCandidates[k].score >= best.score) {
+        best = implicitCandidates[k];
+      }
+    }
+    return best.lines.join('\n');
+  }
+
+  return '';
 }
 
 export function extractLatestPeFromChart(content) {
@@ -2826,7 +2946,7 @@ STRICT DICTATION & CHARTING RULES:
 6. INTERVAL EVENTS: One observation per line. "No acute events but noted X" → drop "No acute events", keep only X.
 7. SINGLE ORDER RULE: If dictation is only a single standalone order/event with no shift data, start heading with ### Interim (${interimTimeLabel || 'time'}).
 8. NEVER CARRY FORWARD MEASURED VALUES: NEVER invent or carry forward I&O rows, HGT values, vent returns, or temperatures from prior blocks. Only carry standing sections (Physical Exam, Meds, On hold, Feeding, open **Pending items not resolved in this shift, subspecialty plans) when omitted from dictation.
-9. PHYSICAL EXAM CARRY-OVER (REQUIRED): If physical exam findings are NOT mentioned in the dictation AND "Previous PE" is provided in STANDING CONTEXT below, you MUST copy "Previous PE" verbatim into the <PE lines> section of a regular shift block (do NOT omit PE and do NOT replace it with generic normal PE). If the dictation mentions new or changed PE findings, chart the dictated PE (updating only changed findings). Omit standing PE only for single-order ### Interim blocks or if the dictation explicitly says to defer/omit PE.
+9. PHYSICAL EXAM CARRY-OVER (REQUIRED): If physical exam findings are NOT mentioned in the dictation AND "Previous PE" is provided in STANDING CONTEXT below, you MUST copy "Previous PE" verbatim into the <PE lines> section of a regular shift block (do NOT omit PE and do NOT replace it with generic normal PE). If the dictation mentions new or changed PE findings, chart the dictated PE (updating only changed findings). Omit standing PE only for single-order ### Interim blocks or if the dictation explicitly says to defer/omit PE. Never place subjective/interval statements (such as "No subjective complaints", "No acute events", or "Afebrile") in <PE lines>; keep those in the subjective/events section above Vitals.
 10. ORDERING & SECTION RULES:
    - Omit empty sections completely (never output empty headers like empty **Pending:), EXCEPT carried-over standing sections (including Previous PE when provided and not dictated).
    - **Pending: goes AFTER Meds: and BEFORE all plan sections.
