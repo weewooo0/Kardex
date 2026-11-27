@@ -8519,6 +8519,13 @@ function setTimelineSearchOpen(open, { clear = false, focus = false } = {}) {
 
 function renderChartTimeline() {
   const noteContent = $('noteText').value;
+  const tlChartHdr = parseChartHeader(noteContent);
+  const tlPatientMeta = {
+    name: tlChartHdr.name,
+    room: tlChartHdr.room,
+    age: tlChartHdr.age,
+    sex: tlChartHdr.sex,
+  };
   const cumFb = syncEditorSidebarFluidBalance(noteContent);
   const timeline = parseChartTimeline(noteContent);
   const dateGroupsDesc = [...timeline].reverse();
@@ -8726,7 +8733,7 @@ function renderChartTimeline() {
             if (!timelineEditDraft || timelineEditDraft.key !== entryKey) {
               timelineEditDraft = {
                 key: entryKey,
-                fields: parseShiftBlockForEdit(s.body),
+                fields: parseShiftBlockForEdit(s.body, tlPatientMeta),
                 guidedDirty: false,
                 rawDirty: false,
                 origBody: String(s.body || ''),
@@ -8896,7 +8903,7 @@ function renderChartTimeline() {
       timelineEditDraft = s
         ? {
             key,
-            fields: parseShiftBlockForEdit(s.body),
+            fields: parseShiftBlockForEdit(s.body, tlPatientMeta),
             guidedDirty: false,
             rawDirty: false,
             origBody: String(s.body || ''),
@@ -9102,7 +9109,7 @@ function renderChartTimeline() {
       } else if (nextMode === 'guided' && timelineEditDraft?.rawDirty) {
         const ta = card?.querySelector('.tl-edit-textarea');
         if (ta) {
-          timelineEditDraft.fields = parseShiftBlockForEdit(ta.value);
+          timelineEditDraft.fields = parseShiftBlockForEdit(ta.value, tlPatientMeta);
           timelineEditDraft.rawDirty = false;
           timelineEditDraft.guidedDirty = true;
           populateTlGuidedDomFromFields(card, timelineEditDraft.fields);

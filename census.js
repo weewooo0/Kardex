@@ -3838,7 +3838,155 @@ function isShiftEditBoundary(trimmed) {
   ) || /^(?:\*{0,2})(?:Antibiotics?|Abx|Medications?|Meds?|Drips?|Pending|Plans?|Labs?)(?:\*{0,2})\s*$/i.test(trimmed);
 }
 
-export function parseShiftBlockForEdit(blockBody) {
+const SHIFT_HEADER_CLINICAL_STARTERS_RE =
+  /^(?:No|Not|With|Without|On|For|To|In|At|Of|From|By|Per|As|And|Or|Continue|Start|Hold|Stop|Discontinue|Resume|Increase|Decrease|Titrate|Monitor|Repeat|Check|Send|Follow|Obtain|Maintain|Avoid|Keep|Stable|Unstable|Alert|Awake|Awakening|Oriented|Afebrile|Febrile|Chest|Lungs|Heart|Cardiac|Abdomen|Extremities|Neuro|Neurologic|HEENT|Skin|Genitourinary|Renal|Pulmonary|Septic|Sepsis|Severe|Acute|Chronic|Normal|Clear|Soft|Warm|Cool|Dry|Moist|Equal|Reactive|Family|Nephro|Cardio|Pulmo|ID|Neurology|Surgery|Dietary|PT|OT|SLP|Patient\s+is|Pt\s+is)\b/i;
+
+function normalizeHeaderCmp(val) {
+  return String(val || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function buildPatientNameVariants(name) {
+  const clean = normalizeHeaderCmp(name);
+  const out = new Set();
+  if (!clean || clean === 'unknown patient') return out;
+  out.add(clean);
+  if (clean.includes(',')) {
+    const [lastRaw, restRaw] = clean.split(',').map((s) => s.trim());
+    if (lastRaw && restRaw) {
+      const restTokens = restRaw.split(/\s+/).filter(Boolean);
+      out.add(`${restRaw} ${lastRaw}`.trim());
+      if (restTokens.length) {
+        out.add(`${restTokens[0]} ${lastRaw}`.trim());
+        out.add(`${lastRaw}, ${restTokens[0]}`.trim());
+      }
+    }
+  } else {
+    const parts = clean.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      const last = parts[parts.length - 1];
+      const firstParts = parts.slice(0, -1).join(' ');
+      out.add(`${last}, ${firstParts}`.trim());
+      out.add(`${last}, ${parts[0]}`.trim());
+    }
+  }
+  return out;
+}
+
+function matchesPatientHeaderMeta(trimmed, meta, nameVariants) {
+  if (!meta) return false;
+  const low = normalizeHeaderCmp(trimmed);
+  if (!low) return false;
+
+  for (const variant of nameVariants) {
+    if (low === variant) return true;
+    if (
+      low.startsWith(`${variant} `) &&
+      /^\d{1,3}\s*(?:\/\s*[mf]|y\/?o\s*[mf]|yo\s*[mf]|[mf])\b/i.test(low.slice(variant.length).trim())
+    ) {
+      return true;
+    }
+  }
+
+  const roomLow = normalizeHeaderCmp(meta.room);
+  if (roomLow && roomLow !== 'unassigned') {
+    const stripRm = (v) => v.replace(/^(?:room|rm)\s+/i, '').trim();
+    if (low === roomLow || stripRm(low) === stripRm(roomLow)) return true;
+  }
+
+  const ageDigits = String(meta.age || '').replace(/[^\d]/g, '');
+  const sexChar = String(meta.sex || '').trim().toLowerCase().slice(0, 1);
+  if (ageDigits && (sexChar === 'm' || sexChar === 'f')) {
+    const ageSexRe = new RegExp(
+      `^${ageDigits}\\s*(?:/\\s*|y/?o\\s*|yo\\s*)?${sexChar}(?:\\s*[·•|].*)?$`,
+      'i'
+    );
+    if (ageSexRe.test(low)) return true;
+  } else if (ageDigits && new RegExp(`^${ageDigits}\\s*(?:y/?o|yo)?\\s*(?:/\\s*[mf]|[mf])?$`, 'i').test(low)) {
+    return true;
+  }
+  return false;
+}
+
+function isShiftGreetingLine(trimmed, hasPrefix) {
+  if (
+    /^(?:Greeting\s*:|Good\s+(?:day|morning|afternoon|evening)\b|Hello\b|Hi\b|Dear\b|To\s*:|Attn\s*:|Update\s+on\s+(?:your\s+)?patient\b|(?:Patient|Shift|Interim)\s+update\b)/i.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+  return Boolean(hasPrefix && /^(?:Dr\.?|Dra\.?)\s+[A-Za-z]/i.test(trimmed) && trimmed.length <= 65 && !trimmed.includes(':'));
+}
+
+function isExplicitPatientHeaderLine(trimmed) {
+  return /^(?:\*{0,2})(?:Patient(?:\s+Name)?|Name|Age(?:\s*\/\s*Sex)?|Sex|Room|Bed|Ward|Unit|Location)(?:\*{0,2})\s*:\s*\S+/i.test(
+    trimmed
+  );
+}
+
+function isStandaloneAgeSexLine(trimmed) {
+  return /^\d{1,3}\s*(?:\/\s*[MF]|[MF]|y\/?o\s*[MF]|yo\s*[MF])(?:\s*[·•|,]\s*(?:\d+(?:\.\d+)?\s*(?:kg|lbs?)|HD\s*#?\d+.*|ICU\s*#?\d+.*))?$/i.test(
+    trimmed
+  );
+}
+
+function isStandaloneRoomOrUnitLine(trimmed, allowShortCode) {
+  if (!trimmed || trimmed.includes(':') || trimmed.length > 50) return false;
+  if (/^(?:Room|Rm|Bed|Ward|Unit|Station|Suite|Annex|Floor|Wing|Pavilion|Bldg|Tower)\s+[A-Za-z0-9#-]{1,20}$/i.test(trimmed)) {
+    return true;
+  }
+  if (
+    /^(?:ICU|NCCU|MICU|SICU|CCU|NICU|PICU|ER|ED|OB|IM|MED|SURG|TELE|SDU|ISO|OR|PACU|DR|RR|TICU|CVICU|CTICU|NeuroICU|HDU|Step-?down)[-\s]?\d{1,4}[A-Za-z]?$/i.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+  return Boolean(allowShortCode && trimmed.length <= 16 && /^(?:\d{2,4}[A-Za-z]?|HR|ER|ISO)$/i.test(trimmed));
+}
+
+function isLikelyShiftHeaderNameLine(trimmed, hasPrefix, lines, claimed, idx, meta, nameVariants) {
+  if (!trimmed || trimmed.length > 65 || trimmed.includes(':')) return false;
+  if (/^(?:[-*•]|\d+[.)])\s+/.test(trimmed)) return false;
+  if (PE_SUBJECTIVE_LINE_RE.test(trimmed)) return false;
+  if (SHIFT_HEADER_CLINICAL_STARTERS_RE.test(trimmed)) return false;
+
+  const suffixM = trimmed.match(/(?:(?:\s*[-,|·•]|\s+)\s*(\d{1,3}\s*(?:\/\s*[MF]|[MF]|y\/?o\s*[MF]|yo\s*[MF])))$/i);
+  const nameCore = suffixM ? trimmed.slice(0, suffixM.index).trim() : trimmed;
+  if (!nameCore) return false;
+
+  const isCommaName =
+    /^[A-Z][A-Za-z'’.-]*(?:\s+[A-Za-z'’.-]+){0,3},\s*[A-Z][A-Za-z'’.-]*(?:\s+[A-Za-z'’.-]+){0,3}(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?$/.test(
+      nameCore
+    );
+  const isSpaceName =
+    /^[A-Z][A-Za-z'’.-]+(?:\s+(?:[A-Z]\.?|[A-Za-z'’.-]+)){1,4}(?:\s+(?:Jr\.?|Sr\.?|II|III|IV))?$/.test(
+      nameCore
+    );
+  if (!isCommaName && !isSpaceName) return false;
+  if (hasPrefix || suffixM || isCommaName || matchesPatientHeaderMeta(trimmed, meta, nameVariants)) return true;
+
+  // Without a leading greeting or comma/age-sex, require confirmation in the next 1-2 non-empty lines.
+  let seen = 0;
+  for (let k = idx + 1; k < lines.length && seen < 2; k++) {
+    const nextTrim = String(lines[k] || '').trim();
+    if (!nextTrim) continue;
+    seen++;
+    if (
+      claimed.has(k) ||
+      isShiftEditBoundary(nextTrim) ||
+      isStandaloneAgeSexLine(nextTrim) ||
+      isStandaloneRoomOrUnitLine(nextTrim, true) ||
+      isExplicitPatientHeaderLine(nextTrim) ||
+      matchesPatientHeaderMeta(nextTrim, meta, nameVariants)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function parseShiftBlockForEdit(blockBody, patientMeta = null) {
   const text = String(blockBody || '').replace(/\r\n/g, '\n').trim();
   const empty = {
     subjective: '',
@@ -3966,30 +4114,43 @@ export function parseShiftBlockForEdit(blockBody) {
     : '';
 
   // Detect leading greeting/patient-header boilerplate & trailing sign-off footer
+  const nameVariants = buildPatientNameVariants(patientMeta?.name);
   const prefixLines = [];
+  let sawHeaderIdentity = false;
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
+    const hasPrefix = prefixLines.some(Boolean);
     if (!trimmed) {
-      if (prefixLines.length > 0) continue;
+      if (hasPrefix) {
+        if (prefixLines[prefixLines.length - 1] !== '') prefixLines.push('');
+        continue;
+      }
       break;
     }
-    if (/^(?:Greeting:|Good\s+(?:day|morning|afternoon|evening)|Update\s+on\s+your\s+patient)/i.test(trimmed)) {
+    if (!claimed.has(i) && isShiftGreetingLine(trimmed, hasPrefix)) {
       prefixLines.push(trimmed);
       claimed.add(i);
       continue;
     }
+    if (claimed.has(i) || isShiftEditBoundary(trimmed)) {
+      break;
+    }
     if (
-      prefixLines.length > 0 &&
-      !isShiftEditBoundary(trimmed) &&
-      !claimed.has(i) &&
-      trimmed.length <= 60 &&
-      (/^Room\s+/i.test(trimmed) || /^\d{1,3}\s*\/\s*[MF]$/i.test(trimmed) || /^[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+$/.test(trimmed))
+      matchesPatientHeaderMeta(trimmed, patientMeta, nameVariants) ||
+      isExplicitPatientHeaderLine(trimmed) ||
+      isStandaloneAgeSexLine(trimmed) ||
+      isStandaloneRoomOrUnitLine(trimmed, hasPrefix || sawHeaderIdentity) ||
+      isLikelyShiftHeaderNameLine(trimmed, hasPrefix, lines, claimed, i, patientMeta, nameVariants)
     ) {
       prefixLines.push(trimmed);
       claimed.add(i);
+      sawHeaderIdentity = true;
       continue;
     }
     break;
+  }
+  while (prefixLines.length && !prefixLines[prefixLines.length - 1]) {
+    prefixLines.pop();
   }
 
   const suffixLines = [];
