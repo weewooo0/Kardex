@@ -431,17 +431,32 @@
   <div id="editorSection" class="view-panel" hidden>
     <div class="editor-topbar sticky-editor-bar">
       <div class="editor-topbar-left">
-        <button type="button" id="backToRoundsBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg> Rounds</button>
-        <div class="editor-patient-nav" id="editorPatientNav" aria-label="Switch patient chart">
-          <button type="button" id="prevPatientBtn" class="ghost-action" title="Previous patient by bed" aria-label="Previous patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-left"></use></svg></button>
-          <select id="editorPatientSelect" aria-label="Select patient chart"></select>
-          <button type="button" id="nextPatientBtn" class="ghost-action" title="Next patient by bed" aria-label="Next patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-right"></use></svg></button>
+        <button type="button" id="backToRoundsBtn" class="editor-icon-btn" title="Back to Rounds" aria-label="Back to Rounds"><svg class="ui-ico" aria-hidden="true"><use href="#ico-arrow-left"></use></svg></button>
+        <div id="editorPatientSwitcher" class="editor-patient-switcher">
+          <button type="button" id="editorPatientTrigger" class="editor-patient-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="editorPatientDropdown">
+            <span id="noteTitle" class="editor-note-title">Untitled note</span>
+            <svg class="ui-ico editor-switcher-chev" aria-hidden="true"><use href="#ico-chevron-down"></use></svg>
+          </button>
+          <div id="editorPatientDropdown" class="popover-menu editor-patient-dropdown" role="listbox" aria-label="Switch active patient" hidden></div>
         </div>
       </div>
       <div class="editor-topbar-right">
-        <span id="saveStatusPill" class="status-meta safe" role="status" aria-live="polite"><svg class="ui-ico" aria-hidden="true"><use href="#ico-check"></use></svg> Saved</span>
-        <button type="button" id="undoChartBtn" class="ghost-action" title="Undo recent chart edit" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Undo</button>
-        <button type="button" id="saveBtn" class="editor-save-btn">Save</button>
+        <span id="saveStatusPill" class="status-meta editor-save-micro" role="status" aria-live="polite" hidden></span>
+        <button type="button" id="undoChartBtn" class="editor-icon-btn" title="Undo recent chart edit" aria-label="Undo recent chart edit" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg></button>
+        <div class="header-more-wrap">
+          <button type="button" id="editorMoreBtn" class="editor-icon-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="editorMorePopover" title="More chart actions" aria-label="More chart actions"><svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg></button>
+          <div id="editorMorePopover" class="popover-menu editor-more-popover" role="menu" hidden>
+            <button type="button" id="chartLabsBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg><span>Parse Labs</span></button>
+            <button type="button" id="chartCalcBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg><span>Calc / Audit</span></button>
+            <button type="button" id="copyUpdateBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-share"></use></svg><span>Copy Update</span></button>
+            <div class="popover-menu-sep" role="separator"></div>
+            <button type="button" id="saveBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg><span>Save Chart</span></button>
+            <button type="button" id="exportBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg><span>Export .md (Raw)</span></button>
+            <button type="button" id="exportDeidBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg><span>Export de-identified</span></button>
+            <div class="popover-menu-sep" role="separator"></div>
+            <button type="button" id="deleteBtn" class="popover-menu-item danger-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg><span>Delete Chart</span></button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -456,260 +471,118 @@
       </div>
     </section>
 
-    <section id="workspace" class="panel">
-      <div class="panel-head editor-panel-head">
-        <div class="editor-title-block">
-          <h2 id="noteTitle" class="editor-note-title">Untitled note</h2>
-          <span class="editor-hint">Local IndexedDB chart · Auto-saves after edits · Rebuilds title on room/name edit</span>
-        </div>
-        <div class="editor-actions-bar">
+    <section id="workspace" class="panel editor-workspace">
+      <div class="editor-shell">
+        <aside class="editor-sidebar" aria-label="Patient overview and actions">
+          <button type="button" id="editorPatientMetaBtn" class="editor-meta-line" aria-haspopup="dialog" aria-controls="patientInfoModal">
+            <span id="profileSummaryText" class="editor-meta-text">Patient details</span>
+            <span class="editor-meta-cta">Info <svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-right"></use></svg></span>
+          </button>
+
           <div class="editor-primary-bar">
             <button type="button" id="appendShiftBtn" class="primary editor-cta-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update</button>
             <button type="button" id="editorDictateBtn" class="btn-secondary dictate-btn editor-sec-btn" title="Dictate or transcribe voice note into this chart"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Dictate</button>
           </div>
-          <div class="editor-utility-strip">
-            <button type="button" id="chartLabsBtn" class="ghost-action" title="Parse and trend pasted labs for this patient"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Parse Labs</button>
-            <button type="button" id="chartCalcBtn" class="ghost-action" title="Renal calculators, drip rates &amp; safety audit"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg> Calc / Audit</button>
-            <button type="button" id="copyUpdateBtn" class="ghost-action" title="Copy latest update as clean plain text (contains Raw PHI)"><svg class="ui-ico" aria-hidden="true"><use href="#ico-share"></use></svg> Copy Update</button>
-            <details id="editorMoreMenu" class="more-menu">
-              <summary class="ghost-action" aria-label="More chart actions"><svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg> More</summary>
-              <div class="more-menu-popover">
-                <button type="button" id="exportBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md (Raw)</button>
-                <button type="button" id="exportDeidBtn" class="menu-item-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Export de-identified</button>
-                <button type="button" id="deleteBtn" class="menu-item-btn danger-item"><svg class="ui-ico" aria-hidden="true"><use href="#ico-trash"></use></svg> Delete Chart</button>
+
+          <div id="editorSidebarCumFb" class="editor-sidebar-cumfb" hidden></div>
+        </aside>
+
+        <div class="editor-main-col">
+          <div class="editor-view-bar">
+            <div class="editor-tabs">
+              <button type="button" id="editorTimelineTab" class="mode-btn active" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-timeline"></use></svg> Chart Timeline</button>
+              <button type="button" id="editorLabsTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Lab Results</button>
+              <button type="button" id="editorRawTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
+            </div>
+          </div>
+
+          <div id="chartTimelinePane">
+            <div class="timeline-toolbar">
+              <div class="timeline-date-row">
+                <div class="filter-chips-wrap timeline-date-chips-wrap">
+                  <div id="timelineDateChips" class="filter-chips"></div>
+                </div>
+                <button type="button" id="timelineSearchToggleBtn" class="timeline-search-toggle-btn" aria-expanded="false" aria-controls="timelineSearchWrap" title="Search timeline" aria-label="Search timeline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-search"></use></svg></button>
               </div>
-            </details>
-          </div>
-        </div>
-      </div>
-
-      <details id="profileDetails" class="profile-dropdown">
-        <summary class="profile-summary">
-          <span id="profileSummaryText"><svg class="ui-ico" aria-hidden="true"><use href="#ico-user"></use></svg> Patient Details</span>
-          <span class="profile-summary-badge">Edit ▾</span>
-        </summary>
-        <div class="profile-dropdown-body">
-          <div class="grid">
-            <div class="field"><label for="nameInput">Patient name (redacted before send)</label><input id="nameInput" autocapitalize="words" placeholder="e.g. Juan B. Dela Cruz"></div>
-            <div class="field"><label for="aliasesInput">Aliases / nicknames (comma separated)</label><input id="aliasesInput" autocapitalize="words" placeholder="e.g. Juanito Cruz, JBC"></div>
-            <div class="field"><label for="roomInput">Room (kept in the outgoing note)</label><input id="roomInput" autocapitalize="characters" placeholder="e.g. Room 412"></div>
-          </div>
-
-          <div class="grid-5">
-            <div class="field"><label for="ageInput">Age</label><input id="ageInput" inputmode="numeric" enterkeyhint="next" placeholder="e.g. 58"></div>
-            <div class="field">
-              <label for="sexInput">Sex</label>
-              <select id="sexInput">
-                <option value="">—</option>
-                <option value="M">M</option>
-                <option value="F">F</option>
-              </select>
-            </div>
-            <div class="field"><label for="weightInput">Weight (kg)</label><input id="weightInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.1" min="1" max="400" placeholder="e.g. 68"></div>
-            <div class="field"><label for="heightCmInput">Height (cm)</label><input id="heightCmInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.5" min="80" max="250" placeholder="e.g. 170"></div>
-            <div class="field"><label for="serviceInput">Service / Dept</label><input id="serviceInput" autocapitalize="words" placeholder="e.g. Internal Medicine"></div>
-            <div class="field"><label for="apInput">Attending (AP)</label><input id="apInput" autocapitalize="words" placeholder="e.g. Dr. A. Santos"></div>
-          </div>
-
-          <div class="grid-profile-extra">
-            <div class="field"><label for="assessmentInput">Working Assessment / Diagnosis</label><input id="assessmentInput" placeholder="e.g. Community-Acquired Pneumonia; T2DM"></div>
-            <div class="field"><label for="admittedInput">Date Admitted</label><input id="admittedInput" inputmode="numeric" enterkeyhint="next" placeholder="MM-DD-YYYY"></div>
-            <div class="field"><label for="icuAdmittedInput">ICU Admitted</label><input id="icuAdmittedInput" inputmode="numeric" enterkeyhint="done" placeholder="MM-DD-YYYY"></div>
-          </div>
-
-          <div class="profile-clinical-grid">
-            <div class="field">
-              <label for="codeStatusSelect">Code Status</label>
-              <select id="codeStatusSelect">
-                <option value="Full Code">Full Code</option>
-                <option value="DNR">DNR</option>
-                <option value="DNI">DNI</option>
-                <option value="DNR / DNI">DNR / DNI</option>
-                <option value="Comfort Care">Comfort Care</option>
-                <option value="DNACPR">DNACPR</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="severitySelect">Severity / Stability</label>
-              <select id="severitySelect">
-                <option value="Stable">Stable</option>
-                <option value="Watcher">Watcher</option>
-                <option value="Unstable">Unstable</option>
-              </select>
-            </div>
-            <div class="field profile-field-span2">
-              <label for="allergiesInput">Allergies (checked against meds)</label>
-              <input id="allergiesInput" placeholder="e.g. NKDA, Penicillin (anaphylaxis), Sulfa (rash)">
-            </div>
-          </div>
-
-          <div class="profile-clinical-extras">
-            <div class="field">
-              <span class="lbl">Isolation Precautions</span>
-              <div id="isolationChecks" class="profile-flags">
-                <label class="tpl-id-chip"><input type="checkbox" value="Contact"><span>Contact</span></label>
-                <label class="tpl-id-chip"><input type="checkbox" value="Droplet"><span>Droplet</span></label>
-                <label class="tpl-id-chip"><input type="checkbox" value="Airborne"><span>Airborne</span></label>
-                <label class="tpl-id-chip"><input type="checkbox" value="Neutropenic"><span>Neutropenic</span></label>
+              <div id="timelineSearchWrap" class="toolbar-search timeline-search-wrap" hidden>
+                <div class="rounds-search-box">
+                  <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
+                  <label for="timelineSearchInput" class="sr-only">Search timeline</label>
+                  <input id="timelineSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search events, labs, meds, vitals..." spellcheck="false">
+                  <button type="button" id="timelineSearchCloseBtn" class="timeline-search-clear-btn" title="Close search" aria-label="Close timeline search"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+                </div>
+              </div>
+              <div id="timelineShiftChipsWrap" class="timeline-shift-chips-wrap" hidden>
+                <div id="timelineShiftChips" class="timeline-shift-chips" role="group" aria-label="Filter shifts for selected date"></div>
               </div>
             </div>
-            <div class="field">
-              <label for="contingenciesInput">If / Then Contingencies (carried across shifts &amp; I-PASS)</label>
-              <textarea id="contingenciesInput" rows="2" placeholder="If MAP < 65 -> titrate Norepi; If SpO2 < 90 -> ABG &amp; CXR"></textarea>
-            </div>
+            <div id="chartTimelineList" class="timeline-list"></div>
           </div>
 
-          <div class="profile-tracked-grid">
-            <div class="tracked-block">
-              <div class="tracked-block-hdr">Lines / Drains / Airways (LDA)</div>
-              <div id="profileLinesList" class="tracked-list"></div>
-              <div class="tracked-add-row">
-                <input id="addLineNameInput" type="text" placeholder="Line (e.g. R-IJ CVC, Foley, PIV)">
-                <input id="addLineDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
-                <button type="button" id="addLineBtn" class="btn-secondary sm-btn">Add Line</button>
+          <div id="chartLabsPane" hidden>
+            <div class="labs-summary-toolbar">
+              <div class="filter-chips-wrap">
+                <div id="labsPanelChips" class="filter-chips" role="group" aria-label="Filter lab panels"></div>
+              </div>
+              <div class="labs-export-actions">
+                <div id="labsUnitToggle" class="labs-unit-toggle" role="group" aria-label="Lab units">
+                  <button type="button" class="mode-btn active" data-unit-sys="conventional" aria-pressed="true">Conv</button>
+                  <button type="button" class="mode-btn" data-unit-sys="si" aria-pressed="false">SI</button>
+                </div>
+                <button type="button" id="labsCopyBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
+                <button type="button" id="labsExportMdBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
+                <button type="button" id="labsExportCsvBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
               </div>
             </div>
-            <div class="tracked-block">
-              <div class="tracked-block-head">
-                <div class="tracked-block-hdr">Antibiotic Day Tracker</div>
-                <button type="button" id="profileManageAbxBtn" class="ghost-action sm-btn">Open Tracker →</button>
+            <div id="chartLabsContent" class="labs-summary-content"></div>
+          </div>
+
+          <div id="chartRawPane" hidden>
+            <div class="raw-md-bar">
+              <div class="raw-md-bar-left">
+                <label for="noteText" class="lbl" id="rawMdLabel">Raw Markdown file — stays on this phone</label>
+                <span id="rawMdFsTitle" class="raw-md-fs-title" hidden></span>
               </div>
-              <div id="profileAbxList" class="tracked-list"></div>
-              <div class="tracked-add-row tracked-abx-add-row">
-                <input id="addAbxDrugInput" type="text" placeholder="Antibiotic (e.g. Meropenem 1g)">
-                <select id="addAbxFreqSelect" aria-label="Antibiotic frequency">
-                  <option value="q8h">q8h</option>
-                  <option value="q12h">q12h</option>
-                  <option value="q24h">q24h / OD</option>
-                  <option value="q6h">q6h</option>
-                  <option value="q4h">q4h</option>
-                  <option value="q48h">q48h</option>
-                </select>
-                <input id="addAbxDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
-                <input id="addAbxTimeInput" type="time" aria-label="First dose time">
-                <input id="addAbxDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="Days">
-                <button type="button" id="addAbxBtn" class="btn-secondary sm-btn">Add Abx</button>
-                <button type="button" id="cancelProfileAbxEditBtn" class="ghost-action sm-btn" hidden>Cancel</button>
+              <div class="raw-md-bar-actions">
+                <button type="button" id="rawMdFsSaveBtn" class="primary sm-btn" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save</button>
+                <button type="button" id="rawMdExpandBtn" class="ghost-action sm-btn" aria-pressed="false" title="Toggle fullscreen markdown editor"><svg class="ui-ico" aria-hidden="true"><use href="#ico-maximize"></use></svg><span>Fullscreen</span></button>
               </div>
             </div>
+            <textarea id="noteText" spellcheck="false" placeholder="---&#10;name: Juan B. Dela Cruz&#10;room: 412&#10;---&#10;&#10;# Progress note"></textarea>
           </div>
 
-          <div class="profile-categories-bar">
-            <div class="profile-flags">
-              <label class="tpl-id-chip"><input type="checkbox" id="censusToggle" checked><span>Active Census</span></label>
-              <span id="profileCustomCategories" class="profile-custom-cats"></span>
-              <button type="button" id="addProfileCategoryBtn" class="tpl-id-chip add-cat-pill" title="Add custom patient category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Category</button>
+          <details id="companionDetails" class="companion-details">
+            <summary class="companion-summary">
+              <div class="row tight">
+                <span class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Kardex AI (De-identified Prompt Builder)</span>
+                <span id="guardPill" class="status-meta" role="status" aria-live="polite">CHECKING</span>
+              </div>
+              <span class="profile-summary-badge">Toggle ▾</span>
+            </summary>
+            <div class="companion">
+              <label for="question" class="lbl">Your question / Clinical Prompt</label>
+              <textarea id="question" rows="3" placeholder="Summarise the plan and flag anything urgent"></textarea>
+
+              <div class="companion-conn-bar">
+                <span id="companionConnHint" class="cf-meta">AI connection not configured</span>
+                <button type="button" id="openSettingsFromEditorBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-settings"></use></svg> Settings</button>
+              </div>
+
+              <div class="row">
+                <button type="button" id="previewBtn" class="primary">Build redacted preview</button>
+                <button type="button" id="copyBtn" class="btn-secondary" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy safe prompt</button>
+                <button type="button" id="sendBtn" class="btn-secondary" disabled>Send to Kardex AI</button>
+              </div>
+
+              <label for="preview" class="lbl">Outgoing text — nothing here is sent until you confirm</label>
+              <pre id="preview" class="preview">Press “Build redacted preview”.</pre>
+              <div id="report" class="report" role="status" aria-live="polite"></div>
+              <pre id="reply" class="reply" hidden></pre>
+              <p class="fine">Room numbers are indirect identifiers. Keep them only inside your hospital, or use a ward-level code when sharing externally.</p>
             </div>
-            <form id="profileAddCatForm" class="inline-cat-form" hidden>
-              <label for="profileAddCatInput" class="sr-only">New patient category name</label>
-              <input id="profileAddCatInput" type="text" maxlength="28" autocapitalize="words" enterkeyhint="done" placeholder="New category (e.g. ICU, Pay)...">
-              <button type="submit" class="primary sm-btn">Add</button>
-              <button type="button" id="profileAddCatCancelBtn" class="ghost-action" aria-label="Cancel adding category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
-            </form>
-          </div>
+          </details>
         </div>
-      </details>
-
-      <details id="admittingHistoryDetails" class="profile-dropdown">
-        <summary class="profile-summary">
-          <span id="admittingHistorySummaryText" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Admitting History</span>
-          <span class="profile-summary-badge">View ▾</span>
-        </summary>
-        <div class="profile-dropdown-body">
-          <div id="admittingHistoryBody" class="admitting-history-body"></div>
-          <div class="row tight mt-8">
-            <button type="button" id="editAdmittingHistoryBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Edit / Dictate Admitting History</button>
-          </div>
-        </div>
-      </details>
-
-      <div class="editor-view-bar">
-        <div class="editor-tabs">
-          <button type="button" id="editorTimelineTab" class="mode-btn active" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-timeline"></use></svg> Chart Timeline</button>
-          <button type="button" id="editorLabsTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Lab Results</button>
-          <button type="button" id="editorRawTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
-        </div>
-        <span class="cf-meta">Changes save automatically to local IndexedDB</span>
       </div>
-
-      <div id="chartTimelinePane">
-        <div class="timeline-toolbar">
-          <div class="filter-chips-wrap">
-            <div id="timelineDateChips" class="filter-chips"></div>
-          </div>
-          <div class="toolbar-search">
-            <div class="rounds-search-box">
-              <svg class="ui-ico search-ico" aria-hidden="true"><use href="#ico-search"></use></svg>
-              <label for="timelineSearchInput" class="sr-only">Search timeline</label>
-              <input id="timelineSearchInput" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" placeholder="Search events, labs, meds, vitals..." spellcheck="false">
-            </div>
-          </div>
-        </div>
-        <div id="chartTimelineList" class="timeline-list"></div>
-      </div>
-
-      <div id="chartLabsPane" hidden>
-        <div class="labs-summary-toolbar">
-          <div class="filter-chips-wrap">
-            <div id="labsPanelChips" class="filter-chips" role="group" aria-label="Filter lab panels"></div>
-          </div>
-          <div class="labs-export-actions">
-            <div id="labsUnitToggle" class="labs-unit-toggle" role="group" aria-label="Lab units">
-              <button type="button" class="mode-btn active" data-unit-sys="conventional" aria-pressed="true">Conv</button>
-              <button type="button" class="mode-btn" data-unit-sys="si" aria-pressed="false">SI</button>
-            </div>
-            <button type="button" id="labsCopyBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
-            <button type="button" id="labsExportMdBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
-            <button type="button" id="labsExportCsvBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
-          </div>
-        </div>
-        <div id="chartLabsContent" class="labs-summary-content"></div>
-      </div>
-
-      <div id="chartRawPane" hidden>
-        <div class="raw-md-bar">
-          <div class="raw-md-bar-left">
-            <label for="noteText" class="lbl" id="rawMdLabel">Raw Markdown file — stays on this phone</label>
-            <span id="rawMdFsTitle" class="raw-md-fs-title" hidden></span>
-          </div>
-          <div class="raw-md-bar-actions">
-            <button type="button" id="rawMdFsSaveBtn" class="primary sm-btn" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save</button>
-            <button type="button" id="rawMdExpandBtn" class="ghost-action sm-btn" aria-pressed="false" title="Toggle fullscreen markdown editor"><svg class="ui-ico" aria-hidden="true"><use href="#ico-maximize"></use></svg><span>Fullscreen</span></button>
-          </div>
-        </div>
-        <textarea id="noteText" spellcheck="false" placeholder="---&#10;name: Juan B. Dela Cruz&#10;room: 412&#10;---&#10;&#10;# Progress note"></textarea>
-      </div>
-
-      <details id="companionDetails" class="companion-details">
-        <summary class="companion-summary">
-          <div class="row tight">
-            <span class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg> Kardex AI (De-identified Prompt Builder)</span>
-            <span id="guardPill" class="status-meta" role="status" aria-live="polite">CHECKING</span>
-          </div>
-          <span class="profile-summary-badge">Toggle ▾</span>
-        </summary>
-        <div class="companion">
-          <label for="question" class="lbl">Your question / Clinical Prompt</label>
-          <textarea id="question" rows="3" placeholder="Summarise the plan and flag anything urgent"></textarea>
-
-          <div class="companion-conn-bar">
-            <span id="companionConnHint" class="cf-meta">AI connection not configured</span>
-            <button type="button" id="openSettingsFromEditorBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-settings"></use></svg> Settings</button>
-          </div>
-
-          <div class="row">
-            <button type="button" id="previewBtn" class="primary">Build redacted preview</button>
-            <button type="button" id="copyBtn" class="btn-secondary" disabled><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy safe prompt</button>
-            <button type="button" id="sendBtn" class="btn-secondary" disabled>Send to Kardex AI</button>
-          </div>
-
-          <label for="preview" class="lbl">Outgoing text — nothing here is sent until you confirm</label>
-          <pre id="preview" class="preview">Press “Build redacted preview”.</pre>
-          <div id="report" class="report" role="status" aria-live="polite"></div>
-          <pre id="reply" class="reply" hidden></pre>
-          <p class="fine">Room numbers are indirect identifiers. Keep them only inside your hospital, or use a ward-level code when sharing externally.</p>
-        </div>
-      </details>
     </section>
   </div>
 
@@ -2076,6 +1949,158 @@
         <button type="button" id="pitchOpenChartBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Open Chart</button>
       </div>
       <button type="button" id="pitchGenerateBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Generate Pitch</button>
+    </div>
+  </div>
+</div>
+
+<!-- Patient Info Modal (Demographics & Admitting History) -->
+<div id="patientInfoModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="patientInfoModalHeading" hidden>
+  <div class="modal-box patient-info-modal">
+    <div class="modal-head">
+      <div>
+        <h3 id="patientInfoModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-user"></use></svg> Patient Info</h3>
+        <div id="patientInfoModalSub" class="modal-sub">Demographics, lines, antibiotics &amp; admitting history</div>
+      </div>
+      <button type="button" id="patientInfoModalClose" class="close-btn" title="Close" aria-label="Close patient info modal"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+    </div>
+
+    <div class="modal-body">
+      <div class="patient-info-tabs" role="tablist" aria-label="Patient information sections">
+        <button type="button" id="patientInfoTabDemo" class="mode-btn active" role="tab" aria-selected="true" aria-controls="patientInfoDemoPane">Demographics</button>
+        <button type="button" id="patientInfoTabAdmit" class="mode-btn" role="tab" aria-selected="false" aria-controls="patientInfoAdmitPane">Admitting History</button>
+      </div>
+
+      <div id="patientInfoDemoPane" role="tabpanel" aria-labelledby="patientInfoTabDemo">
+        <div class="grid">
+          <div class="field"><label for="nameInput">Patient name (redacted before send)</label><input id="nameInput" autocapitalize="words" placeholder="e.g. Juan B. Dela Cruz"></div>
+          <div class="field"><label for="aliasesInput">Aliases / nicknames (comma separated)</label><input id="aliasesInput" autocapitalize="words" placeholder="e.g. Juanito Cruz, JBC"></div>
+          <div class="field"><label for="roomInput">Room (kept in the outgoing note)</label><input id="roomInput" autocapitalize="characters" placeholder="e.g. Room 412"></div>
+        </div>
+
+        <div class="grid-5">
+          <div class="field"><label for="ageInput">Age</label><input id="ageInput" inputmode="numeric" enterkeyhint="next" placeholder="e.g. 58"></div>
+          <div class="field">
+            <label for="sexInput">Sex</label>
+            <select id="sexInput">
+              <option value="">—</option>
+              <option value="M">M</option>
+              <option value="F">F</option>
+            </select>
+          </div>
+          <div class="field"><label for="weightInput">Weight (kg)</label><input id="weightInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.1" min="1" max="400" placeholder="e.g. 68"></div>
+          <div class="field"><label for="heightCmInput">Height (cm)</label><input id="heightCmInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.5" min="80" max="250" placeholder="e.g. 170"></div>
+          <div class="field"><label for="serviceInput">Service / Dept</label><input id="serviceInput" autocapitalize="words" placeholder="e.g. Internal Medicine"></div>
+          <div class="field"><label for="apInput">Attending (AP)</label><input id="apInput" autocapitalize="words" placeholder="e.g. Dr. A. Santos"></div>
+        </div>
+
+        <div class="grid-profile-extra">
+          <div class="field"><label for="assessmentInput">Working Assessment / Diagnosis</label><input id="assessmentInput" placeholder="e.g. Community-Acquired Pneumonia; T2DM"></div>
+          <div class="field"><label for="admittedInput">Date Admitted</label><input id="admittedInput" inputmode="numeric" enterkeyhint="next" placeholder="MM-DD-YYYY"></div>
+          <div class="field"><label for="icuAdmittedInput">ICU Admitted</label><input id="icuAdmittedInput" inputmode="numeric" enterkeyhint="done" placeholder="MM-DD-YYYY"></div>
+        </div>
+
+        <div class="profile-clinical-grid">
+          <div class="field">
+            <label for="codeStatusSelect">Code Status</label>
+            <select id="codeStatusSelect">
+              <option value="Full Code">Full Code</option>
+              <option value="DNR">DNR</option>
+              <option value="DNI">DNI</option>
+              <option value="DNR / DNI">DNR / DNI</option>
+              <option value="Comfort Care">Comfort Care</option>
+              <option value="DNACPR">DNACPR</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="severitySelect">Severity / Stability</label>
+            <select id="severitySelect">
+              <option value="Stable">Stable</option>
+              <option value="Watcher">Watcher</option>
+              <option value="Unstable">Unstable</option>
+            </select>
+          </div>
+          <div class="field profile-field-span2">
+            <label for="allergiesInput">Allergies (checked against meds)</label>
+            <input id="allergiesInput" placeholder="e.g. NKDA, Penicillin (anaphylaxis), Sulfa (rash)">
+          </div>
+        </div>
+
+        <div class="profile-clinical-extras">
+          <div class="field">
+            <span class="lbl">Isolation Precautions</span>
+            <div id="isolationChecks" class="profile-flags">
+              <label class="tpl-id-chip"><input type="checkbox" value="Contact"><span>Contact</span></label>
+              <label class="tpl-id-chip"><input type="checkbox" value="Droplet"><span>Droplet</span></label>
+              <label class="tpl-id-chip"><input type="checkbox" value="Airborne"><span>Airborne</span></label>
+              <label class="tpl-id-chip"><input type="checkbox" value="Neutropenic"><span>Neutropenic</span></label>
+            </div>
+          </div>
+          <div class="field">
+            <label for="contingenciesInput">If / Then Contingencies (carried across shifts &amp; I-PASS)</label>
+            <textarea id="contingenciesInput" rows="2" placeholder="If MAP &lt; 65 -&gt; titrate Norepi; If SpO2 &lt; 90 -&gt; ABG &amp; CXR"></textarea>
+          </div>
+        </div>
+
+        <div class="profile-tracked-grid">
+          <div class="tracked-block">
+            <div class="tracked-block-hdr">Lines / Drains / Airways (LDA)</div>
+            <div id="profileLinesList" class="tracked-list"></div>
+            <div class="tracked-add-row">
+              <input id="addLineNameInput" type="text" placeholder="Line (e.g. R-IJ CVC, Foley, PIV)">
+              <input id="addLineDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
+              <button type="button" id="addLineBtn" class="btn-secondary sm-btn">Add Line</button>
+            </div>
+          </div>
+          <div class="tracked-block">
+            <div class="tracked-block-head">
+              <div class="tracked-block-hdr">Antibiotic Day Tracker</div>
+              <button type="button" id="profileManageAbxBtn" class="ghost-action sm-btn">Open Tracker →</button>
+            </div>
+            <div id="profileAbxList" class="tracked-list"></div>
+            <div class="tracked-add-row tracked-abx-add-row">
+              <input id="addAbxDrugInput" type="text" placeholder="Antibiotic (e.g. Meropenem 1g)">
+              <select id="addAbxFreqSelect" aria-label="Antibiotic frequency">
+                <option value="q8h">q8h</option>
+                <option value="q12h">q12h</option>
+                <option value="q24h">q24h / OD</option>
+                <option value="q6h">q6h</option>
+                <option value="q4h">q4h</option>
+                <option value="q48h">q48h</option>
+              </select>
+              <input id="addAbxDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
+              <input id="addAbxTimeInput" type="time" aria-label="First dose time">
+              <input id="addAbxDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="Days">
+              <button type="button" id="addAbxBtn" class="btn-secondary sm-btn">Add Abx</button>
+              <button type="button" id="cancelProfileAbxEditBtn" class="ghost-action sm-btn" hidden>Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-categories-bar">
+          <div class="profile-flags">
+            <label class="tpl-id-chip"><input type="checkbox" id="censusToggle" checked><span>Active Census</span></label>
+            <span id="profileCustomCategories" class="profile-custom-cats"></span>
+            <button type="button" id="addProfileCategoryBtn" class="tpl-id-chip add-cat-pill" title="Add custom patient category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Category</button>
+          </div>
+          <form id="profileAddCatForm" class="inline-cat-form" hidden>
+            <label for="profileAddCatInput" class="sr-only">New patient category name</label>
+            <input id="profileAddCatInput" type="text" maxlength="28" autocapitalize="words" enterkeyhint="done" placeholder="New category (e.g. ICU, Pay)...">
+            <button type="submit" class="primary sm-btn">Add</button>
+            <button type="button" id="profileAddCatCancelBtn" class="ghost-action" aria-label="Cancel adding category"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+          </form>
+        </div>
+      </div>
+
+      <div id="patientInfoAdmitPane" role="tabpanel" aria-labelledby="patientInfoTabAdmit" hidden>
+        <div id="admittingHistoryBody" class="admitting-history-body"></div>
+        <div class="row tight mt-8">
+          <button type="button" id="editAdmittingHistoryBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg> Edit / Dictate Admitting History</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <button type="button" id="patientInfoDoneBtn" class="primary">Done</button>
     </div>
   </div>
 </div>

@@ -290,7 +290,10 @@ function matchesToken(haystack, token) {
   return re.test(haystack);
 }
 
-export function resolvePatientFromRelay(rawText, notes = []) {
+const NON_ROOM_CLINICAL_ABBREV_RE =
+  /^(?:hr|rr|bp|pr|vs|o2|pe|iv|po|od|im|sc|sq|fb|io|cr|na|cl|mg|ca|hb|abg|cbc|cxr|ecg|ekg|bmp|cmp|hgt|cbg|pt|dx|rx|tx|hx|pmh|hpi)$/i;
+
+export function resolvePatientFromRelay(rawText, notes = [], options = {}) {
   const cleanText = stripChatPrefixes(rawText);
   if (!cleanText.trim() || !Array.isArray(notes) || !notes.length) {
     return {
@@ -301,6 +304,9 @@ export function resolvePatientFromRelay(rawText, notes = []) {
     };
   }
 
+  const getHeaderFn = typeof options.getHeader === 'function' ? options.getHeader : parseChartHeader;
+  const activeOnly = Boolean(options.activeOnly);
+
   // Strip attending physician mentions (e.g. "Dr. A. Santos") so AP surname never falsely matches a patient
   const nameText = cleanText.replace(
     /\b(?:dr|dra)\.?[ \t]+(?:[A-Z]\.?[ \t]+){0,2}[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'-]+(?:[ \t]+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'-]+)?/g,
@@ -310,7 +316,8 @@ export function resolvePatientFromRelay(rawText, notes = []) {
   const candidates = [];
 
   for (const note of notes) {
-    const parsed = parseChartHeader(note.content, note);
+    const parsed = getHeaderFn(note.content, note);
+    if (activeOnly && !parsed.isCensus) continue;
     const room = String(parsed.room || '').trim();
     let roomMatched = false;
 
@@ -335,10 +342,14 @@ export function resolvePatientFromRelay(rawText, notes = []) {
             roomMatched = true;
           }
         }
-      } else {
-        // Special units like ICU-2, CCU 4, ER-1
+      } else if (!NON_ROOM_CLINICAL_ABBREV_RE.test(room)) {
+        // Special units like ICU-2, CCU 4, NCCU10 (allow optional separators across boundaries)
+        const flexibleRoom = escapeRe(room)
+          .replace(/[\s_-]+/g, '[\\s_-]*')
+          .replace(/([A-Za-z])(\d)/g, '$1[\\s_-]*$2')
+          .replace(/(\d)([A-Za-z])/g, '$1[\\s_-]*$2');
         const specialRe = new RegExp(
-          `(?<![\\p{L}\\p{N}])${escapeRe(room).replace(/[\s_-]+/g, '[\\s_-]*')}(?![\\p{L}\\p{N}])`,
+          `(?<![\\p{L}\\p{N}])${flexibleRoom}(?![\\p{L}\\p{N}])`,
           'iu'
         );
         if (specialRe.test(cleanText)) {

@@ -68,11 +68,14 @@ import {
   compileTemplateConfig,
   renderCustomShiftTemplate,
   buildStructuredShiftUpdate,
+  parseShiftBlockForEdit,
+  serializeEditedShiftBlock,
   metaOf,
   parseRoomAndNameFromTitle,
   parseChartHeader,
   syncFrontmatter,
   parseChartTimeline,
+  sortTimelineShiftsChronologically,
   updateShiftBlock,
   deleteShiftBlock,
   parseChart,
@@ -163,8 +166,11 @@ let roundsSortMode = 'bed';
 let searchQuery = '';
 let editorViewMode = 'timeline';
 let timelineDateFilter = 'all';
+let timelineShiftFilter = 'all';
 let timelineSearchQuery = '';
 let editingTimelineKey = null;
+let timelineEditMode = 'guided';
+let timelineEditDraft = null;
 let labsPanelFilter = 'all';
 let librarySearchQuery = '';
 let libraryFilter = 'all';
@@ -247,6 +253,71 @@ let librarySearchTimer = null;
 
 const chartHeaderCache = new Map();
 const parsedChartCache = new Map();
+let notesIndexCache = null;
+let roundsSummaryCache = null;
+let inboxDryRunTimer = null;
+
+function invalidateNotesIndex() {
+  notesIndexCache = null;
+  roundsSummaryCache = null;
+}
+
+function getNotesIndex() {
+  if (notesIndexCache) return notesIndexCache;
+  const byId = new Map();
+  const allEntries = [];
+  const activeAll = [];
+  const activeCensus = [];
+  const charity = [];
+  const discharged = [];
+  const categoryCounts = new Map();
+  let linkedCount = 0;
+
+  for (const n of notes) {
+    if (!n) continue;
+    if (n.id) byId.set(n.id, n);
+    if (n.sourceFileName) linkedCount++;
+    const h = getChartHeader(n);
+    const entry = { note: n, header: h };
+    allEntries.push(entry);
+    for (const c of h.categories || []) {
+      const key = c.toLowerCase();
+      categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
+    }
+    if (h.isCensus) {
+      activeAll.push(entry);
+      if (h.isCharity) charity.push(entry);
+      else activeCensus.push(entry);
+    } else if (h.isCharity) {
+      charity.push(entry);
+    } else {
+      discharged.push(entry);
+    }
+  }
+
+  const byRoom = (a, b) => naturalBedCompare(a.header.room, b.header.room);
+  activeAll.sort(byRoom);
+  activeCensus.sort(byRoom);
+  charity.sort(byRoom);
+
+  notesIndexCache = {
+    byId,
+    allEntries,
+    activeAll: activeAll.map((x) => x.note),
+    activeCensus: activeCensus.map((x) => x.note),
+    activeCensusEntries: activeCensus,
+    charityEntries: charity,
+    dischargedEntries: discharged,
+    linkedCount,
+    categoryCounts,
+  };
+  return notesIndexCache;
+}
+
+function getNoteById(id) {
+  if (!id) return null;
+  return getNotesIndex().byId.get(id) || null;
+}
 
 function makeChartCacheSig(note) {
   return `${note?.updated || 0}|${(note?.content || '').length}|${note?.title || ''}|${note?.sourceFileName || ''}|${note?.name || ''}|${note?.room || ''}`;
@@ -863,7 +934,7 @@ function updateVaultUi() {
   const reconnectBtn = $('vaultReconnectBtn');
 
   const supported = isDirectoryPickerSupported();
-  const linkedCount = notes.filter((n) => Boolean(n?.sourceFileName)).length;
+  const linkedCount = getNotesIndex().linkedCount;
   if (countEl) countEl.textContent = String(linkedCount);
   if (summaryEl) summaryEl.textContent = vaultLastSummary || '—';
   if (activeOnlyToggle) {
@@ -1246,6 +1317,7 @@ async function unlinkVaultFolder() {
     }
   }
   if (toUnlink.length) await rawPutManyNotes(toUnlink);
+  invalidateNotesIndex();
   updateVaultUi();
   toast(`Unlinked "${folderName}"`);
 }
@@ -1399,20 +1471,33 @@ async function shareOrDownload({
 }
 
 /* ---------- dirty state, undo stack, autosave & modal controller ---------- */
-function updateSaveStatusPill(state = 'saved') {
+let saveStatusHideTimer = null;
+
+function updateSaveStatusPill(state = 'saved', opts = {}) {
   const pill = $('saveStatusPill');
   const saveBtn = $('saveBtn');
   if (saveBtn) saveBtn.classList.toggle('is-dirty', state !== 'saved');
   if (!pill) return;
+  clearTimeout(saveStatusHideTimer);
+  saveStatusHideTimer = null;
   if (state === 'saving') {
     pill.innerHTML = `${uiIcon('refresh')} Saving…`;
-    pill.className = 'status-meta';
+    pill.className = 'status-meta editor-save-micro';
+    pill.hidden = false;
   } else if (state === 'unsaved') {
     pill.textContent = 'Unsaved';
-    pill.className = 'status-meta warn';
+    pill.className = 'status-meta warn editor-save-micro';
+    pill.hidden = false;
+  } else if (opts.silentHide) {
+    pill.hidden = true;
   } else {
     pill.innerHTML = `${uiIcon('check')} Saved`;
-    pill.className = 'status-meta safe';
+    pill.className = 'status-meta safe editor-save-micro';
+    pill.hidden = false;
+    saveStatusHideTimer = setTimeout(() => {
+      const p = $('saveStatusPill');
+      if (p && !dirtyChart) p.hidden = true;
+    }, 1800);
   }
 }
 
@@ -1883,6 +1968,14 @@ function closeAllMenus() {
   const roundsMoreBtn = $('roundsMoreBtn');
   if (roundsMenu) roundsMenu.hidden = true;
   if (roundsMoreBtn) roundsMoreBtn.setAttribute('aria-expanded', 'false');
+  const editorMoreMenu = $('editorMorePopover');
+  const editorMoreBtn = $('editorMoreBtn');
+  if (editorMoreMenu) editorMoreMenu.hidden = true;
+  if (editorMoreBtn) editorMoreBtn.setAttribute('aria-expanded', 'false');
+  const ptDropdown = $('editorPatientDropdown');
+  const ptTrigger = $('editorPatientTrigger');
+  if (ptDropdown) ptDropdown.hidden = true;
+  if (ptTrigger) ptTrigger.setAttribute('aria-expanded', 'false');
   document.querySelectorAll('.row-more-menu:not([hidden])').forEach((m) => {
     m.hidden = true;
   });
@@ -1949,6 +2042,10 @@ async function setMode(mode) {
       }
     });
   } else if (mode === 'editor') {
+    if (!currentId && notes.length) {
+      const fallback = getActiveEditorNotes()[0] || notes[0];
+      if (fallback) await select(fallback.id, { skipFlush: true });
+    }
     updateEditorEmptyAndNav();
     updateCompanionConnHint();
   } else if (mode === 'library') {
@@ -1972,19 +2069,17 @@ function setActiveRoundsFilter(nextFilter) {
 }
 
 function getRoundsCensusSummary() {
-  const activeNotes = [];
-  const categoryCounts = new Map();
-  for (const n of notes) {
-    const h = getChartHeader(n);
-    if (h.isCensus && !h.isCharity) {
-      activeNotes.push(n);
-    }
-    for (const c of h.categories || []) {
-      const key = c.toLowerCase();
-      categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
-    }
+  const idx = getNotesIndex();
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  if (
+    roundsSummaryCache &&
+    roundsSummaryCache.idx === idx &&
+    roundsSummaryCache.dayKey === dayKey
+  ) {
+    return roundsSummaryCache.summary;
   }
-  const activeParsed = activeNotes.map((n) => getParsedChart(n));
+
+  const activeParsed = idx.activeCensus.map((n) => getParsedChart(n));
   const activeById = new Map(activeParsed.map((p) => [p.id, p]));
   let needsUpdateCount = 0;
   let openTasksCardsCount = 0;
@@ -1994,15 +2089,17 @@ function getRoundsCensusSummary() {
     else needsUpdateCount++;
     if ((p.pending || []).some((t) => !t.checked)) openTasksCardsCount++;
   }
-  return {
+  const summary = {
     totalCount: notes.length,
     activeParsed,
     activeById,
     needsUpdateCount,
     openTasksCardsCount,
     updatedTodayCount,
-    categoryCounts,
+    categoryCounts: idx.categoryCounts,
   };
+  roundsSummaryCache = { idx, dayKey, summary };
+  return summary;
 }
 
 function renderRoundsFilterChips(summaryOrParsed = null) {
@@ -2757,8 +2854,8 @@ async function handleTogglePending(noteId, taskText, isChecked) {
     note.content = result.text;
     note.updated = Date.now();
     await put(note);
+    syncSingleNoteInMemory(note);
     toast(isChecked ? 'Task marked complete' : 'Task reopened');
-    await refresh();
   }
 }
 
@@ -2773,7 +2870,7 @@ async function handleQuickAddPending(noteId, taskText) {
     lastSavedChartContent = note.content;
     refreshActiveEditorView();
   }
-  await refresh();
+  syncSingleNoteInMemory(note);
   toast('Added pending item');
 }
 
@@ -2825,7 +2922,10 @@ function syncShiftMergeCheckbox() {
 }
 
 function getShiftingParsedNote() {
-  const note = notes.find((n) => n.id === shiftingNoteId) || {};
+  const note = getNoteById(shiftingNoteId) || {};
+  if (note.id && shiftingSourceContent === note.content) {
+    return getParsedChart(note);
+  }
   return parseChart(shiftingSourceContent, note);
 }
 
@@ -3356,7 +3456,7 @@ async function commitShiftBlock(openInEditor = false) {
   });
   note.updated = Date.now();
   await put(note);
-  await refresh();
+  syncSingleNoteInMemory(note);
 
   const savedId = shiftingNoteId;
   const savedShift = effectiveShift;
@@ -4539,17 +4639,10 @@ function updateInboxBadge() {
 }
 
 function buildGroupedPatientOptionsHtml(blankLabel = '', selectedId = '') {
-  const enriched = notes.map((n) => ({ note: n, header: getChartHeader(n) }));
-
-  const active = enriched
-    .filter((s) => s.header.isCensus && !s.header.isCharity)
-    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room));
-  const charity = enriched
-    .filter((s) => s.header.isCharity)
-    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room));
-  const allDischarged = enriched
-    .filter((s) => !s.header.isCensus && !s.header.isCharity)
-    .sort((a, b) => (b.note.updated || 0) - (a.note.updated || 0));
+  const idx = getNotesIndex();
+  const active = idx.activeCensusEntries;
+  const charity = idx.charityEntries;
+  const allDischarged = idx.dischargedEntries;
 
   const DISCHARGED_CAP = 50;
   let discharged = allDischarged.slice(0, DISCHARGED_CAP);
@@ -4686,6 +4779,8 @@ function setBannerWithCandidates(banner, cls, msg, candidates = []) {
 }
 
 function updateInboxDryRun() {
+  clearTimeout(inboxDryRunTimer);
+  inboxDryRunTimer = null;
   const activeItem = inboxSelectedQueueId
     ? inboxItems.find((x) => x.id === inboxSelectedQueueId)
     : null;
@@ -4704,20 +4799,24 @@ function updateInboxDryRun() {
   let targetNote = null;
 
   if (inboxPinnedNoteId) {
-    targetNote = notes.find((n) => n.id === inboxPinnedNoteId) || null;
+    targetNote = getNoteById(inboxPinnedNoteId);
     if (targetNote) {
       selectEl.value = targetNote.id;
-      const p = parseChart(targetNote.content, targetNote);
+      const p = getParsedChart(targetNote);
       setBannerWithCandidates(banner, 'matched', `✓ Target chart locked (${p.room} · ${p.name})`);
     }
   } else if (inboxUserSelectedTarget && selectEl.value) {
-    targetNote = notes.find((n) => n.id === selectEl.value) || null;
+    targetNote = getNoteById(selectEl.value);
     if (targetNote) {
-      const p = parseChart(targetNote.content, targetNote);
+      const p = getParsedChart(targetNote);
       setBannerWithCandidates(banner, 'matched', `✓ Target patient confirmed (${p.room} · ${p.name})`);
     }
   } else if (rawText.trim()) {
-    const res = resolvePatientFromRelay(rawText, notes);
+    const activePool = getActiveEditorNotes();
+    const res = resolvePatientFromRelay(rawText, activePool, {
+      getHeader: (_, note) => getChartHeader(note),
+      activeOnly: true,
+    });
     if (res.status === 'matched' && res.match) {
       targetNote = res.match;
       selectEl.value = targetNote.id;
@@ -4739,7 +4838,7 @@ function updateInboxDryRun() {
   }
 
   if (targetNote) {
-    const p = parseChart(targetNote.content, targetNote);
+    const p = getParsedChart(targetNote);
     if (!p.isCensus) {
       censusFlag.textContent = 'DISCHARGED (census: false)';
       censusFlag.className = 'status-meta block';
@@ -4845,15 +4944,23 @@ function closeInboxModal(force = false) {
   if (!force && hasDraftPaste) {
     if (!confirm('Discard pasted text not yet captured to Inbox?')) return false;
   }
+  clearTimeout(inboxDryRunTimer);
+  inboxDryRunTimer = null;
   closeModalEl($('inboxModal'));
   inboxPinnedNoteId = null;
   return true;
 }
 
 function captureToInbox(rawText) {
+  clearTimeout(inboxDryRunTimer);
+  inboxDryRunTimer = null;
   const clean = String(rawText || '').trim();
   if (!clean) return toast('Paste a lab dump or chat relay first');
-  const res = resolvePatientFromRelay(clean, notes);
+  const activePool = getActiveEditorNotes();
+  const res = resolvePatientFromRelay(clean, activePool, {
+    getHeader: (_, note) => getChartHeader(note),
+    activeOnly: true,
+  });
   const item = {
     id: uid(),
     rawText: clean,
@@ -6292,25 +6399,85 @@ function getSortedNotesByBed() {
   return [...notes].sort((a, b) => naturalBedCompare(getChartHeader(a).room, getChartHeader(b).room));
 }
 
+function getActiveEditorNotes() {
+  return getNotesIndex().activeAll;
+}
+
 function getEditorNavNotes() {
   const roundsNotes = getFilteredSortedRoundsEntries().map((e) => e.note);
   if (roundsNotes.length && (!currentId || roundsNotes.some((n) => n.id === currentId))) {
     return roundsNotes;
   }
-  return getSortedNotesByBed();
+  const activeNotes = getActiveEditorNotes();
+  return activeNotes.length ? activeNotes : getSortedNotesByBed();
+}
+
+function renderEditorPatientDropdown() {
+  const dropdownEl = $('editorPatientDropdown');
+  if (!dropdownEl) return;
+  const activeNotes = getActiveEditorNotes();
+  if (!activeNotes.length) {
+    dropdownEl.innerHTML = `<div class="editor-pt-empty">No active census patients</div>`;
+    return;
+  }
+  dropdownEl.innerHTML = activeNotes
+    .map((n) => {
+      const h = getChartHeader(n);
+      const parsed = getParsedChart(n);
+      const isCur = n.id === currentId;
+      const roomLbl =
+        h.room && h.room.toLowerCase() !== 'unassigned' ? formatRoomLabel(h.room) : 'Unassigned';
+      const displayName = h.name || n.name || n.title || 'Unknown Patient';
+      const sev = String(parsed.severity || '').toLowerCase();
+      let dotCls = 'is-ok';
+      let dotTitle = 'Updated today';
+      if (sev === 'unstable') {
+        dotCls = 'is-crit';
+        dotTitle = 'Unstable';
+      } else if (sev === 'watcher') {
+        dotCls = 'is-warn';
+        dotTitle = 'Watcher';
+      } else if (!parsed.isUpdatedToday) {
+        dotCls = 'is-warn';
+        dotTitle = 'Needs Update';
+      }
+      return `<button type="button" class="editor-pt-opt${isCur ? ' is-active' : ''}" role="option" aria-selected="${isCur}" data-note-id="${esc(
+        n.id
+      )}"><span class="ledger-bed">${esc(roomLbl)}</span><span class="editor-pt-opt-name">${esc(
+        displayName
+      )}</span><span class="editor-pt-status-dot ${dotCls}" title="${esc(dotTitle)}" aria-label="${esc(dotTitle)}"></span></button>`;
+    })
+    .join('');
+
+  dropdownEl.querySelectorAll('.editor-pt-opt').forEach((btn) => {
+    btn.onclick = async () => {
+      const nextId = btn.dataset.noteId;
+      closeAllMenus();
+      if (nextId && nextId !== currentId) {
+        await select(nextId);
+      }
+    };
+  });
 }
 
 function populateEditorPatientSelect() {
+  renderEditorPatientDropdown();
   const sel = $('editorPatientSelect');
   if (!sel) return;
-  const navNotes = getEditorNavNotes();
-  sel.innerHTML = notes.length
-    ? buildGroupedPatientOptionsHtml('', currentId)
-    : '<option value="">No charts</option>';
-  if (currentId && notes.some((n) => n.id === currentId)) {
+  const activeNotes = getActiveEditorNotes();
+  sel.innerHTML = activeNotes.length
+    ? activeNotes
+        .map((n) => {
+          const h = getChartHeader(n);
+          return `<option value="${esc(n.id)}">${esc(h.room || 'Unassigned')} · ${esc(h.name)}</option>`;
+        })
+        .join('')
+    : '<option value="">No active charts</option>';
+  if (currentId && activeNotes.some((n) => n.id === currentId)) {
     sel.value = currentId;
   }
 
+  const navNotes = getEditorNavNotes();
   const idx = navNotes.findIndex((n) => n.id === currentId);
   if ($('prevPatientBtn')) $('prevPatientBtn').disabled = idx <= 0;
   if ($('nextPatientBtn')) $('nextPatientBtn').disabled = idx === -1 || idx >= navNotes.length - 1;
@@ -6322,6 +6489,10 @@ function updateEditorEmptyAndNav() {
   const hasSelection = Boolean(currentId && notes.some((n) => n.id === currentId));
   if (emptyEl) emptyEl.hidden = hasSelection;
   if (workspaceEl) workspaceEl.hidden = !hasSelection;
+  if (!hasSelection) {
+    const titleEl = $('noteTitle');
+    if (titleEl) titleEl.innerHTML = `<span class="editor-title-name">Select patient</span>`;
+  }
   populateEditorPatientSelect();
 }
 
@@ -6367,7 +6538,7 @@ function renderLibraryFilterChips() {
 function renderList() {
   renderLibraryFilterChips();
   const q = librarySearchQuery.trim().toLowerCase();
-  const enriched = notes.map((n) => ({ note: n, header: getChartHeader(n) }));
+  const enriched = getNotesIndex().allEntries;
 
   let visible = enriched.filter(({ header }) => {
     if (libraryFilter === 'active') return header.isCensus && !header.isCharity;
@@ -6492,7 +6663,7 @@ function renderList() {
         populateProfileInputs(note, note.content, true);
         lastSavedChartContent = note.content;
       }
-      await refresh();
+      syncSingleNoteInMemory(note);
       toast(!h.isCensus ? 'Patient readmitted to active census' : 'Patient marked Discharged (retained locally)');
     };
   });
@@ -6500,6 +6671,7 @@ function renderList() {
 
 async function refresh() {
   notes = await all();
+  invalidateNotesIndex();
   pruneChartCaches(notes);
   syncCategoriesFromNotes(notes);
   updateBackupReminderUi();
@@ -6510,6 +6682,52 @@ async function refresh() {
     updateEditorEmptyAndNav();
   } else if (currentMode === 'rounds') {
     renderRounds();
+  }
+}
+
+function syncSingleNoteInMemory(updatedNote, { skipUi = false } = {}) {
+  if (!updatedNote?.id) return;
+  const idx = notes.findIndex((n) => n.id === updatedNote.id);
+  if (idx > 0) {
+    notes.splice(idx, 1);
+    notes.unshift(updatedNote);
+  } else if (idx === 0) {
+    notes[0] = updatedNote;
+  } else {
+    notes.unshift(updatedNote);
+  }
+  invalidateNotesIndex();
+  syncCategoriesFromNotes([updatedNote]);
+  updateBackupReminderUi();
+  updateVaultUi();
+  if (!skipUi) {
+    if (currentMode === 'library') {
+      renderList();
+    } else if (currentMode === 'editor') {
+      updateEditorEmptyAndNav();
+    } else if (currentMode === 'rounds') {
+      renderRounds();
+    }
+  }
+}
+
+function removeNoteInMemory(noteId, { skipUi = false } = {}) {
+  if (!noteId) return;
+  const idx = notes.findIndex((n) => n.id === noteId);
+  if (idx !== -1) notes.splice(idx, 1);
+  chartHeaderCache.delete(noteId);
+  parsedChartCache.delete(noteId);
+  invalidateNotesIndex();
+  updateBackupReminderUi();
+  updateVaultUi();
+  if (!skipUi) {
+    if (currentMode === 'library') {
+      renderList();
+    } else if (currentMode === 'editor') {
+      updateEditorEmptyAndNav();
+    } else if (currentMode === 'rounds') {
+      renderRounds();
+    }
   }
 }
 
@@ -6643,7 +6861,6 @@ async function removeCustomCategory(catName) {
 
 function updateProfileSummary() {
   const el = $('profileSummaryText');
-  if (!el) return;
   const room = $('roomInput').value.trim();
   const age = $('ageInput').value.trim();
   const sex = $('sexInput').value.trim();
@@ -6652,17 +6869,60 @@ function updateProfileSummary() {
   const ap = $('apInput').value.trim();
   const name = $('nameInput').value.trim();
 
-  const roomLbl = room ? formatRoomLabel(room) : '';
-  const ageSex = [age ? `${age}yo` : '', sex].filter(Boolean).join(' ');
-  const weightLbl = weight ? `${weight.replace(/\s*kg$/i, '')} kg` : '';
-  const parts = [roomLbl, ageSex, weightLbl, service, ap ? `AP: ${ap}` : ''].filter(Boolean);
-  if (parts.length) {
-    el.innerHTML = `${uiIcon('user')} ${esc(parts.join(' · '))}`;
-  } else if (name) {
-    el.innerHTML = `${uiIcon('user')} ${esc(name)}`;
-  } else {
-    el.innerHTML = `${uiIcon('user')} Patient Details (tap to set up)`;
+  const roomLbl = room && room.toLowerCase() !== 'unassigned' ? formatRoomLabel(room) : '';
+  const ageSex = age && sex ? `${age}${sex}` : age ? `${age}yo` : sex || '';
+  const weightLbl = weight ? `${weight.replace(/\s*kg$/i, '')}kg` : '';
+  const apLbl = ap ? `AP: ${ap}` : '';
+  const parts = [ageSex, weightLbl, apLbl || service].filter(Boolean);
+
+  if (el) {
+    if (parts.length) {
+      el.textContent = parts.join(' · ');
+    } else if (name) {
+      el.textContent = name;
+    } else {
+      el.textContent = 'Patient demographics & history';
+    }
   }
+
+  const modalSub = $('patientInfoModalSub');
+  if (modalSub) {
+    const subParts = [roomLbl, name || 'Patient Chart'].filter(Boolean);
+    modalSub.textContent = subParts.join(' · ') || 'Demographics, lines, antibiotics & admitting history';
+  }
+}
+
+let activePatientInfoTab = 'demo';
+
+function setPatientInfoTab(tab = 'demo') {
+  activePatientInfoTab = tab === 'admit' ? 'admit' : 'demo';
+  const isDemo = activePatientInfoTab === 'demo';
+  const demoPane = $('patientInfoDemoPane');
+  const admitPane = $('patientInfoAdmitPane');
+  const demoTab = $('patientInfoTabDemo');
+  const admitTab = $('patientInfoTabAdmit');
+  if (demoPane) demoPane.hidden = !isDemo;
+  if (admitPane) admitPane.hidden = isDemo;
+  if (demoTab) {
+    demoTab.classList.toggle('active', isDemo);
+    demoTab.setAttribute('aria-selected', String(isDemo));
+  }
+  if (admitTab) {
+    admitTab.classList.toggle('active', !isDemo);
+    admitTab.setAttribute('aria-selected', String(!isDemo));
+  }
+}
+
+function openPatientInfoModal(tab = 'demo', triggerEl = null, focusEl = null) {
+  if (!currentId) return toast('Select or create a patient chart first');
+  updateProfileSummary();
+  setPatientInfoTab(tab);
+  openModalEl($('patientInfoModal'), triggerEl || $('editorPatientMetaBtn'), focusEl);
+}
+
+function closePatientInfoModal() {
+  closeModalEl($('patientInfoModal'));
+  updateProfileSummary();
 }
 
 function renderAdmittingHistoryCard(content) {
@@ -7291,8 +7551,214 @@ function resolveTimelineEditMeta(card, origDate, origShift) {
   return { nextDate, nextShift };
 }
 
+function renderTlPendingEditRowsHtml(pendingList = []) {
+  return (Array.isArray(pendingList) ? pendingList : [])
+    .map(
+      (p, idx) => `
+        <div class="tl-pending-edit-row" data-pending-idx="${idx}">
+          <input type="checkbox" class="tl-pending-edit-chk" aria-label="Mark task complete"${p.checked ? ' checked' : ''}>
+          <input type="text" class="tl-pending-text-input" enterkeyhint="done" autocapitalize="sentences" value="${esc(p.text)}" placeholder="Pending task...">
+          <button type="button" class="ghost-action sm-btn tl-pending-del-btn" title="Remove pending item" aria-label="Remove pending item">${uiIcon('x')}</button>
+        </div>`
+    )
+    .join('');
+}
+
+function computeTlGuidedFbText(fields = {}) {
+  const unit = fields.ioUnit || 'ml';
+  const inVal = formatIoWithUnit(fields.ioIn, unit);
+  const outVal = formatIoWithUnit(fields.ioOut, unit);
+  return inVal && outVal ? computeShiftFluidBalance(inVal, outVal) || 'check units' : '';
+}
+
+function renderTlGuidedFormHtml(entryKey, f, origShift = '') {
+  const isInterim = isInterimShift(origShift);
+  const fbText = computeTlGuidedFbText(f);
+  const unit = f.ioUnit === 'L' ? 'L' : 'ml';
+  const planMeta = PLAN_MODES[currentPlanMode] || PLAN_MODES.service;
+  const planTitle = f.planHeading
+    ? f.planHeading.replace(/:\s*$/, '')
+    : planMeta.label;
+  const hasMoreDetails = Boolean(
+    String(f.assessment || '').trim() ||
+    String(f.vent || '').trim() ||
+    String(f.feeding || '').trim() ||
+    String(f.contingencies || '').trim() ||
+    String(f.otherNotes || '').trim()
+  );
+
+  return `
+    <div class="tl-guided-form" data-key="${esc(entryKey)}"${timelineEditMode === 'guided' ? '' : ' hidden'}>
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <span class="tl-edit-sec-title">Vital Signs &amp; I&amp;O</span>
+        </div>
+        <div class="quick-vs-grid">
+          <div class="field">
+            <label>BP (SBP/DBP)</label>
+            <div class="bp-split-inputs">
+              <input class="tl-g-sbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(f.sbp)}" placeholder="120" aria-label="Systolic BP">
+              <span class="bp-slash" aria-hidden="true">/</span>
+              <input class="tl-g-dbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(f.dbp)}" placeholder="80" aria-label="Diastolic BP">
+            </div>
+          </div>
+          <div class="field"><label>HR</label><input class="tl-g-hr" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(f.hr)}" placeholder="78"></div>
+          <div class="field"><label>RR</label><input class="tl-g-rr" inputmode="numeric" enterkeyhint="next" autocomplete="off" value="${esc(f.rr)}" placeholder="18"></div>
+          <div class="field"><label>Temp</label><input class="tl-g-temp" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(f.temp)}" placeholder="36.8C"></div>
+          <div class="field"><label>O2sat</label><input class="tl-g-o2" enterkeyhint="next" autocomplete="off" value="${esc(f.o2)}" placeholder="98% RA"></div>
+        </div>
+        <div class="tl-io-edit-grid">
+          <div class="field"><label>Shift In</label><input class="tl-g-in" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(f.ioIn)}" placeholder="800"></div>
+          <div class="field"><label>Shift Out</label><input class="tl-g-out" inputmode="decimal" enterkeyhint="next" autocomplete="off" value="${esc(f.ioOut)}" placeholder="650"></div>
+          <div class="field"><label>Unit</label><select class="tl-g-io-unit" aria-label="Timeline I&amp;O unit"><option value="ml"${unit === 'ml' ? ' selected' : ''}>mL</option><option value="L"${unit === 'L' ? ' selected' : ''}>L</option></select></div>
+          <div class="field"><label>24h Net</label><input class="tl-g-io24" enterkeyhint="next" autocomplete="off" value="${esc(f.io24)}" placeholder="+400ml"></div>
+        </div>
+        <div class="tl-g-fb-row"${fbText ? '' : ' hidden'}>
+          <span class="cf-meta">Shift FB:</span> <b class="tl-g-fb-preview">${esc(fbText)}</b>
+        </div>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <label class="tl-edit-sec-title">${isInterim ? 'Subjective / Interval Event' : 'Subjective'}</label>
+        </div>
+        <textarea class="tl-g-field" data-tl-field="subjective" rows="2" placeholder="Patient complaints, overnight events, symptoms...">${esc(f.subjective)}</textarea>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <label class="tl-edit-sec-title">Physical Exam</label>
+          <div class="tl-edit-sec-actions">
+            <button type="button" class="ghost-action sm-btn tl-pe-preset-btn" data-pe-preset="normal">Normal PE</button>
+            <button type="button" class="ghost-action sm-btn tl-pe-preset-btn" data-pe-preset="clear">Clear</button>
+          </div>
+        </div>
+        <textarea class="tl-g-field" data-tl-field="pe" rows="3" placeholder="Focused physical exam findings...">${esc(f.pe)}</textarea>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <label class="tl-edit-sec-title">Labs / Diagnostics</label>
+        </div>
+        <textarea class="tl-g-field" data-tl-field="labs" rows="2" placeholder="e.g. Na 136 | K 4.1 | Cr 1.1 (1.0) | CXR: clear">${esc(f.labs)}</textarea>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <span class="tl-edit-sec-title">Drips &amp; Medications</span>
+        </div>
+        <div class="tl-edit-subgrid">
+          <div class="field">
+            <label>Active Drips (one per line)</label>
+            <textarea class="tl-g-field" data-tl-field="drips" rows="2" placeholder="One drip per line (e.g. Plain NSS at 80cc/hr)">${esc(f.drips)}</textarea>
+          </div>
+          <div class="field">
+            <label>Medications (one per line)</label>
+            <textarea class="tl-g-field" data-tl-field="meds" rows="3" placeholder="Active medications, one per line...">${esc(f.meds)}</textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <label class="tl-edit-sec-title">${esc(planTitle)} (one per line)</label>
+        </div>
+        <textarea class="tl-g-field" data-tl-field="servicePlans" rows="3" placeholder="Treatment plans, one per line...">${esc(f.servicePlans)}</textarea>
+      </div>
+
+      <div class="tl-edit-section">
+        <div class="tl-edit-section-head">
+          <span class="tl-edit-sec-title">Pending Tasks</span>
+        </div>
+        <div class="tl-pending-edit-list">${renderTlPendingEditRowsHtml(f.pending)}</div>
+        <div class="tl-pending-add-row">
+          <input type="text" class="tl-pending-new-input" enterkeyhint="done" autocapitalize="sentences" placeholder="Add pending task...">
+          <button type="button" class="btn-secondary sm-btn tl-pending-add-btn">Add</button>
+        </div>
+      </div>
+
+      <details class="tl-edit-more"${hasMoreDetails ? ' open' : ''}>
+        <summary>More Clinical Details (Assessment, Vent, Feeding, Contingencies)</summary>
+        <div class="tl-edit-more-body">
+          <div class="field">
+            <label>Assessment / Working Impression</label>
+            <textarea class="tl-g-field" data-tl-field="assessment" rows="2" placeholder="Working diagnosis / problem list...">${esc(f.assessment)}</textarea>
+          </div>
+          <div class="tl-edit-subgrid-2">
+            <div class="field">
+              <label>Ventilator Settings</label>
+              <input type="text" class="tl-g-field" data-tl-field="vent" value="${esc(f.vent)}" placeholder="e.g. AC/VC Vt 420 | PEEP 8">
+            </div>
+            <div class="field">
+              <label>If / Then Contingencies</label>
+              <input type="text" class="tl-g-field" data-tl-field="contingencies" value="${esc(f.contingencies)}" placeholder="If MAP &lt; 65 -> titrate pressor">
+            </div>
+          </div>
+          <div class="field">
+            <label>Diet / Feeding</label>
+            <textarea class="tl-g-field" data-tl-field="feeding" rows="2" placeholder="e.g. DAT, Soft diet, NPO">${esc(f.feeding)}</textarea>
+          </div>
+          <div class="field">
+            <label>Additional Clinical Notes</label>
+            <textarea class="tl-g-field" data-tl-field="otherNotes" rows="2" placeholder="Other bedside notes or uncategorized lines...">${esc(f.otherNotes)}</textarea>
+          </div>
+        </div>
+      </details>
+    </div>`;
+}
+
+function buildCumFbCardHtml(cumFb) {
+  if (!cumFb) return '';
+  return `<div class="timeline-cumfb-bar">
+        <div class="timeline-cumfb-main ico-inline">${uiIcon('droplet')} <b>${cumFb.daysCount}-Day Cumulative Fluid Balance:</b> <span class="timeline-cumfb-total">${esc(
+          cumFb.totalText
+        )}</span></div>
+        <div class="timeline-cumfb-days">${cumFb.dailyBreakdown
+          .map(
+            (d) =>
+              `<span class="timeline-cumfb-chip">${esc(d.shortDate)}: <b>${esc(d.text)}</b>${
+                d.source === 'shifts' ? ' <small>(shift sum)</small>' : ''
+              }</span>`
+          )
+          .join('')}</div>
+      </div>`;
+}
+
+function syncEditorSidebarFluidBalance(content) {
+  const cumFb = computeCumulativeFluidBalance(content || '', 3);
+  const host = $('editorSidebarCumFb');
+  if (host) {
+    host.innerHTML = cumFb ? buildCumFbCardHtml(cumFb) : '';
+    host.hidden = !cumFb;
+  }
+  return cumFb;
+}
+
+function setTimelineSearchOpen(open, { clear = false, focus = false } = {}) {
+  const wrap = $('timelineSearchWrap');
+  const btn = $('timelineSearchToggleBtn');
+  const inp = $('timelineSearchInput');
+  const isOpen = Boolean(open);
+  if (wrap) wrap.hidden = !isOpen;
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(isOpen));
+    btn.classList.toggle('is-active', isOpen || Boolean(timelineSearchQuery.trim()));
+  }
+  if (clear) {
+    const hadQuery = Boolean(timelineSearchQuery);
+    timelineSearchQuery = '';
+    if (inp) inp.value = '';
+    if (hadQuery) renderChartTimeline();
+  }
+  if (isOpen && focus && inp) {
+    requestAnimationFrame(() => inp.focus());
+  }
+}
+
 function renderChartTimeline() {
-  const timeline = parseChartTimeline($('noteText').value);
+  const noteContent = $('noteText').value;
+  const cumFb = syncEditorSidebarFluidBalance(noteContent);
+  const timeline = parseChartTimeline(noteContent);
   const dateGroupsDesc = [...timeline].reverse();
 
   if (
@@ -7300,9 +7766,12 @@ function renderChartTimeline() {
     !dateGroupsDesc.some((g) => g.date === timelineDateFilter)
   ) {
     timelineDateFilter = 'all';
+    timelineShiftFilter = 'all';
   }
 
   const chipsEl = $('timelineDateChips');
+  const shiftWrapEl = $('timelineShiftChipsWrap');
+  const shiftChipsEl = $('timelineShiftChips');
   const allChip = `<button type="button" class="chip ${timelineDateFilter === 'all' ? 'active' : ''}" data-date="all" aria-pressed="${timelineDateFilter === 'all'}">All Dates (${dateGroupsDesc.length})</button>`;
   const seenDates = new Set();
   const dateChips = dateGroupsDesc
@@ -7323,12 +7792,16 @@ function renderChartTimeline() {
   chipsEl.querySelectorAll('.chip').forEach((chip) => {
     chip.onclick = () => {
       timelineDateFilter = chip.dataset.date;
+      timelineShiftFilter = 'all';
       renderChartTimeline();
     };
   });
 
   const listEl = $('chartTimelineList');
   if (!dateGroupsDesc.length) {
+    timelineShiftFilter = 'all';
+    if (shiftWrapEl) shiftWrapEl.hidden = true;
+    if (shiftChipsEl) shiftChipsEl.innerHTML = '';
     listEl.innerHTML = `
       <div class="timeline-empty">
         <p style="margin: 0 0 10px;">No shift updates recorded for this patient yet.</p>
@@ -7346,31 +7819,104 @@ function renderChartTimeline() {
   }
 
   const q = timelineSearchQuery.trim().toLowerCase();
+  const shiftMatchesQuery = (dateStr, s) => {
+    if (!q) return true;
+    const haystack = [
+      dateStr,
+      s.shift,
+      s.vitals,
+      s.vent,
+      s.io,
+      s.drips,
+      s.labs,
+      ...s.events,
+      ...s.pending.map((p) => p.text),
+      ...s.servicePlans,
+    ]
+      .join('\n')
+      .toLowerCase();
+    return haystack.includes(q);
+  };
+
   const visibleGroups = [];
 
-  for (const g of dateGroupsDesc) {
-    if (timelineDateFilter !== 'all' && g.date !== timelineDateFilter) continue;
-    const shiftsDesc = [...g.shifts].reverse();
-    const matchedShifts = shiftsDesc.filter((s) => {
-      if (!q) return true;
-      const haystack = [
-        g.date,
-        s.shift,
-        s.vitals,
-        s.vent,
-        s.io,
-        s.drips,
-        s.labs,
-        ...s.events,
-        ...s.pending.map((p) => p.text),
-        ...s.servicePlans,
-      ]
-        .join('\n')
-        .toLowerCase();
-      return haystack.includes(q);
-    });
+  if (timelineDateFilter === 'all') {
+    timelineShiftFilter = 'all';
+    if (shiftWrapEl) shiftWrapEl.hidden = true;
+    if (shiftChipsEl) shiftChipsEl.innerHTML = '';
+
+    for (const g of dateGroupsDesc) {
+      const shiftsDesc = [...g.shifts].reverse();
+      const matchedShifts = shiftsDesc.filter((s) => shiftMatchesQuery(g.date, s));
+      if (matchedShifts.length) {
+        visibleGroups.push({
+          date: g.date,
+          dateOccurrenceIndex: g.dateOccurrenceIndex || 0,
+          shifts: matchedShifts,
+        });
+      }
+    }
+  } else {
+    const matchingGroups = timeline.filter((g) => g.date === timelineDateFilter);
+    const rawDayShifts = [];
+    for (const g of matchingGroups) {
+      const dateOcc = g.dateOccurrenceIndex || 0;
+      for (const s of g.shifts) {
+        rawDayShifts.push({
+          ...s,
+          _dateOccurrenceIndex: dateOcc,
+          _shiftKey: `${g.date}::${dateOcc}::${s.shiftIndex}`,
+        });
+      }
+    }
+    const orderedDayShifts = sortTimelineShiftsChronologically(rawDayShifts);
+
+    if (
+      timelineShiftFilter !== 'all' &&
+      !orderedDayShifts.some((s) => s._shiftKey === timelineShiftFilter)
+    ) {
+      timelineShiftFilter = 'all';
+    }
+
+    if (shiftWrapEl && shiftChipsEl) {
+      shiftWrapEl.hidden = orderedDayShifts.length === 0;
+      const allShiftsBtn = `<button type="button" class="timeline-shift-chip ${
+        timelineShiftFilter === 'all' ? 'active' : ''
+      }" data-shift-key="all" aria-pressed="${timelineShiftFilter === 'all'}">All Shifts (${
+        orderedDayShifts.length
+      })</button>`;
+      const perShiftBtns = orderedDayShifts
+        .map((s) => {
+          const isActive = timelineShiftFilter === s._shiftKey;
+          const interim = isInterimShift(s.shift);
+          return `<button type="button" class="timeline-shift-chip${isActive ? ' active' : ''}${
+            interim ? ' is-interim' : ''
+          }" data-shift-key="${esc(s._shiftKey)}" aria-pressed="${isActive}">${
+            interim ? '<span class="shift-interim-dot" aria-hidden="true"></span>' : ''
+          }${esc(s.shift)}</button>`;
+        })
+        .join('');
+      shiftChipsEl.innerHTML = allShiftsBtn + perShiftBtns;
+
+      shiftChipsEl.querySelectorAll('.timeline-shift-chip').forEach((btn) => {
+        btn.onclick = () => {
+          timelineShiftFilter = btn.dataset.shiftKey;
+          renderChartTimeline();
+        };
+      });
+    }
+
+    const matchedShifts = orderedDayShifts.filter(
+      (s) =>
+        (timelineShiftFilter === 'all' || s._shiftKey === timelineShiftFilter) &&
+        shiftMatchesQuery(timelineDateFilter, s)
+    );
     if (matchedShifts.length) {
-      visibleGroups.push({ date: g.date, dateOccurrenceIndex: g.dateOccurrenceIndex || 0, shifts: matchedShifts });
+      visibleGroups.push({
+        date: timelineDateFilter,
+        dateOccurrenceIndex: matchingGroups[0]?.dateOccurrenceIndex || 0,
+        shifts: matchedShifts,
+      });
     }
   }
 
@@ -7379,35 +7925,29 @@ function renderChartTimeline() {
     return;
   }
 
-  const cumFb = computeCumulativeFluidBalance($('noteText').value, 3);
-  const cumFbBannerHtml = cumFb
-    ? `<div class="timeline-cumfb-bar">
-        <div class="timeline-cumfb-main ico-inline">${uiIcon('droplet')} <b>${cumFb.daysCount}-Day Cumulative Fluid Balance:</b> <span class="timeline-cumfb-total">${esc(
-          cumFb.totalText
-        )}</span></div>
-        <div class="timeline-cumfb-days">${cumFb.dailyBreakdown
-          .map(
-            (d) =>
-              `<span class="timeline-cumfb-chip">${esc(d.shortDate)}: <b>${esc(d.text)}</b>${
-                d.source === 'shifts' ? ' <small>(shift sum)</small>' : ''
-              }</span>`
-          )
-          .join('')}</div>
-      </div>`
-    : '';
+  const cumFbBannerHtml = buildCumFbCardHtml(cumFb);
 
   const shiftLookup = new Map();
 
   listEl.innerHTML = cumFbBannerHtml + visibleGroups
     .map((g) => {
-      const dateOcc = g.dateOccurrenceIndex || 0;
       const cardsHtml = g.shifts
         .map((s) => {
+          const dateOcc = s._dateOccurrenceIndex ?? (g.dateOccurrenceIndex || 0);
           const entryKey = `${g.date}::${dateOcc}::${s.shiftIndex}`;
           shiftLookup.set(entryKey, s);
           const isEditing = editingTimelineKey === entryKey;
 
           if (isEditing) {
+            if (!timelineEditDraft || timelineEditDraft.key !== entryKey) {
+              timelineEditDraft = {
+                key: entryKey,
+                fields: parseShiftBlockForEdit(s.body),
+                guidedDirty: false,
+                rawDirty: false,
+                origBody: String(s.body || ''),
+              };
+            }
             const initialIsoDate = dateStringToIso(g.date);
             const curShiftClean = String(s.shift || '').trim();
             const isCurInterim = isInterimShift(curShiftClean);
@@ -7433,8 +7973,14 @@ function renderChartTimeline() {
             return `
               <div class="timeline-shift-card">
                 <div class="timeline-shift-head">
-                  <span class="timeline-shift-badge">${esc(s.shift)}</span>
-                  <span class="cf-meta">Quick Edit · ${esc(g.date)}</span>
+                  <div class="row tight">
+                    <span class="timeline-shift-badge">${esc(s.shift)}</span>
+                    <span class="cf-meta">Edit · ${esc(g.date)}</span>
+                  </div>
+                  <div class="tl-edit-mode-tabs" role="tablist" aria-label="Shift editor mode">
+                    <button type="button" class="tl-mode-btn${timelineEditMode === 'guided' ? ' active' : ''}" data-tl-mode="guided" role="tab" aria-selected="${timelineEditMode === 'guided'}" aria-pressed="${timelineEditMode === 'guided'}">Guided</button>
+                    <button type="button" class="tl-mode-btn${timelineEditMode === 'raw' ? ' active' : ''}" data-tl-mode="raw" role="tab" aria-selected="${timelineEditMode === 'raw'}" aria-pressed="${timelineEditMode === 'raw'}">Markdown</button>
+                  </div>
                 </div>
                 <div class="timeline-inline-edit">
                   <div class="tl-meta-edit-row">
@@ -7451,33 +7997,13 @@ function renderChartTimeline() {
                       <input type="time" class="compact-time-input tl-edit-time" value="${esc(initialTime24)}" aria-label="Shift clock time">
                     </div>
                   </div>
-                  <div class="tl-quick-edit">
-                    <div class="quick-vs-grid">
-                      <div class="field">
-                        <label>BP</label>
-                        <div class="bp-split-inputs">
-                          <input class="tl-q-sbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="120" aria-label="Systolic BP">
-                          <span class="bp-slash" aria-hidden="true">/</span>
-                          <input class="tl-q-dbp" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="80" aria-label="Diastolic BP">
-                        </div>
-                      </div>
-                      <div class="field"><label>HR</label><input class="tl-q-hr" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="78"></div>
-                      <div class="field"><label>RR</label><input class="tl-q-rr" inputmode="numeric" enterkeyhint="next" autocomplete="off" placeholder="18"></div>
-                      <div class="field"><label>Temp</label><input class="tl-q-temp" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="36.8C"></div>
-                      <div class="field"><label>O2sat</label><input class="tl-q-o2" enterkeyhint="next" autocomplete="off" placeholder="98% RA"></div>
-                    </div>
-                    <div class="quick-io-grid">
-                      <div class="field"><label>In</label><input class="tl-q-in" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="e.g. 800"></div>
-                      <div class="field"><label>Out</label><input class="tl-q-out" inputmode="decimal" enterkeyhint="next" autocomplete="off" placeholder="e.g. 650"></div>
-                      <div class="field"><label>Unit</label><select class="tl-q-io-unit" aria-label="Timeline I&amp;O unit"><option value="ml" selected>mL</option><option value="L">L</option></select></div>
-                      <div class="field"><label>+ Pending Task</label><input class="tl-q-task" enterkeyhint="done" autocapitalize="sentences" placeholder="Add checklist item"></div>
-                      <div class="field align-end"><button type="button" class="btn-secondary sm-btn tl-apply-quick-btn" data-key="${esc(entryKey)}">${uiIcon('bolt')} Insert Fields</button></div>
-                    </div>
+                  ${renderTlGuidedFormHtml(entryKey, timelineEditDraft.fields, curShiftClean)}
+                  <div class="tl-raw-pane"${timelineEditMode === 'raw' ? '' : ' hidden'}>
+                    <label class="lbl">Block Markdown</label>
+                    <textarea class="tl-edit-textarea" data-key="${esc(entryKey)}" spellcheck="false">${esc(
+                      s.body
+                    )}</textarea>
                   </div>
-                  <label class="lbl">Block Markdown</label>
-                  <textarea class="tl-edit-textarea" data-key="${esc(entryKey)}" spellcheck="false">${esc(
-              s.body
-            )}</textarea>
                   <div class="row">
                     <button type="button" class="primary tl-save-entry-btn" data-date="${esc(
                       g.date
@@ -7571,8 +8097,230 @@ function renderChartTimeline() {
 
   listEl.querySelectorAll('.tl-edit-btn').forEach((btn) => {
     btn.onclick = () => {
-      editingTimelineKey = btn.dataset.key;
+      const key = btn.dataset.key;
+      const s = shiftLookup.get(key);
+      editingTimelineKey = key;
+      timelineEditMode = 'guided';
+      timelineEditDraft = s
+        ? {
+            key,
+            fields: parseShiftBlockForEdit(s.body),
+            guidedDirty: false,
+            rawDirty: false,
+            origBody: String(s.body || ''),
+          }
+        : null;
       renderChartTimeline();
+    };
+  });
+
+  const syncTlGuidedFbDisplay = (card) => {
+    if (!card || !timelineEditDraft) return;
+    const fb = computeTlGuidedFbText(timelineEditDraft.fields);
+    const rowEl = card.querySelector('.tl-g-fb-row');
+    const prevEl = card.querySelector('.tl-g-fb-preview');
+    if (prevEl) prevEl.textContent = fb;
+    if (rowEl) rowEl.hidden = !fb;
+  };
+
+  const syncTimelineGuidedToMarkdown = (card) => {
+    if (!card || !timelineEditDraft) return;
+    const ta = card.querySelector('.tl-edit-textarea');
+    const saveBtn = card.querySelector('.tl-save-entry-btn');
+    const meta = saveBtn
+      ? resolveTimelineEditMeta(card, saveBtn.dataset.date, saveBtn.dataset.origShift)
+      : { nextShift: '' };
+    syncTlGuidedFbDisplay(card);
+    if (ta) {
+      ta.value = serializeEditedShiftBlock(timelineEditDraft.fields, {
+        isInterim: isInterimShift(meta.nextShift),
+        planMode: currentPlanMode,
+      });
+    }
+    timelineEditDraft.guidedDirty = true;
+    timelineEditDraft.rawDirty = false;
+    markChartDirty();
+  };
+
+  const bindTlPendingRows = (card) => {
+    const listHost = card?.querySelector('.tl-pending-edit-list');
+    if (!listHost || !timelineEditDraft) return;
+    listHost.querySelectorAll('.tl-pending-edit-row').forEach((row) => {
+      const idx = Number(row.dataset.pendingIdx);
+      const chk = row.querySelector('.tl-pending-edit-chk');
+      const txtInp = row.querySelector('.tl-pending-text-input');
+      const delBtn = row.querySelector('.tl-pending-del-btn');
+      if (chk) {
+        chk.onchange = () => {
+          if (timelineEditDraft.fields.pending[idx]) {
+            timelineEditDraft.fields.pending[idx].checked = chk.checked;
+            syncTimelineGuidedToMarkdown(card);
+          }
+        };
+      }
+      if (txtInp) {
+        txtInp.oninput = () => {
+          if (timelineEditDraft.fields.pending[idx]) {
+            timelineEditDraft.fields.pending[idx].text = txtInp.value;
+            syncTimelineGuidedToMarkdown(card);
+          }
+        };
+      }
+      if (delBtn) {
+        delBtn.onclick = () => {
+          timelineEditDraft.fields.pending.splice(idx, 1);
+          listHost.innerHTML = renderTlPendingEditRowsHtml(timelineEditDraft.fields.pending);
+          bindTlPendingRows(card);
+          syncTimelineGuidedToMarkdown(card);
+        };
+      }
+    });
+  };
+
+  const populateTlGuidedDomFromFields = (card, f) => {
+    if (!card || !f) return;
+    const setVal = (sel, val) => {
+      const el = card.querySelector(sel);
+      if (el) el.value = val ?? '';
+    };
+    setVal('.tl-g-sbp', f.sbp);
+    setVal('.tl-g-dbp', f.dbp);
+    setVal('.tl-g-hr', f.hr);
+    setVal('.tl-g-rr', f.rr);
+    setVal('.tl-g-temp', f.temp);
+    setVal('.tl-g-o2', f.o2);
+    setVal('.tl-g-in', f.ioIn);
+    setVal('.tl-g-out', f.ioOut);
+    setVal('.tl-g-io-unit', f.ioUnit === 'L' ? 'L' : 'ml');
+    setVal('.tl-g-io24', f.io24);
+    card.querySelectorAll('[data-tl-field]').forEach((el) => {
+      el.value = f[el.dataset.tlField] ?? '';
+    });
+    const listHost = card.querySelector('.tl-pending-edit-list');
+    if (listHost) {
+      listHost.innerHTML = renderTlPendingEditRowsHtml(f.pending);
+      bindTlPendingRows(card);
+    }
+    const moreEl = card.querySelector('.tl-edit-more');
+    if (moreEl && (f.assessment || f.vent || f.feeding || f.contingencies || f.otherNotes)) {
+      moreEl.open = true;
+    }
+    syncTlGuidedFbDisplay(card);
+  };
+
+  const flushTlNewPendingInput = (card) => {
+    const newInp = card?.querySelector('.tl-pending-new-input');
+    const txt = newInp?.value.trim();
+    if (!txt || !timelineEditDraft) return false;
+    timelineEditDraft.fields.pending.push({ text: txt, checked: false });
+    newInp.value = '';
+    const listHost = card.querySelector('.tl-pending-edit-list');
+    if (listHost) {
+      listHost.innerHTML = renderTlPendingEditRowsHtml(timelineEditDraft.fields.pending);
+      bindTlPendingRows(card);
+    }
+    syncTimelineGuidedToMarkdown(card);
+    return true;
+  };
+
+  listEl.querySelectorAll('.timeline-inline-edit').forEach((card) => {
+    bindTlPendingRows(card);
+
+    const vsMap = [
+      ['.tl-g-sbp', 'sbp'],
+      ['.tl-g-dbp', 'dbp'],
+      ['.tl-g-hr', 'hr'],
+      ['.tl-g-rr', 'rr'],
+      ['.tl-g-temp', 'temp'],
+      ['.tl-g-o2', 'o2'],
+      ['.tl-g-in', 'ioIn'],
+      ['.tl-g-out', 'ioOut'],
+      ['.tl-g-io-unit', 'ioUnit'],
+      ['.tl-g-io24', 'io24'],
+    ];
+    for (const [sel, key] of vsMap) {
+      const inp = card.querySelector(sel);
+      if (!inp) continue;
+      inp.addEventListener(inp.tagName === 'SELECT' ? 'change' : 'input', () => {
+        if (!timelineEditDraft) return;
+        timelineEditDraft.fields[key] = inp.value;
+        syncTimelineGuidedToMarkdown(card);
+      });
+    }
+
+    card.querySelectorAll('[data-tl-field]').forEach((el) => {
+      el.addEventListener('input', () => {
+        if (!timelineEditDraft) return;
+        timelineEditDraft.fields[el.dataset.tlField] = el.value;
+        syncTimelineGuidedToMarkdown(card);
+      });
+    });
+
+    card.querySelectorAll('.tl-pe-preset-btn').forEach((btn) => {
+      btn.onclick = () => {
+        if (!timelineEditDraft) return;
+        const nextPe = btn.dataset.pePreset === 'normal' ? DEFAULT_NORMAL_PE_TEXT : '';
+        timelineEditDraft.fields.pe = nextPe;
+        const peEl = card.querySelector('[data-tl-field="pe"]');
+        if (peEl) peEl.value = nextPe;
+        syncTimelineGuidedToMarkdown(card);
+      };
+    });
+
+    const addPendBtn = card.querySelector('.tl-pending-add-btn');
+    const newPendInp = card.querySelector('.tl-pending-new-input');
+    if (addPendBtn) {
+      addPendBtn.onclick = () => {
+        if (flushTlNewPendingInput(card)) newPendInp?.focus();
+      };
+    }
+    if (newPendInp) {
+      newPendInp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          flushTlNewPendingInput(card);
+        }
+      });
+    }
+
+    const rawTa = card.querySelector('.tl-edit-textarea');
+    if (rawTa) {
+      rawTa.addEventListener('input', () => {
+        if (timelineEditDraft) {
+          timelineEditDraft.rawDirty = true;
+          timelineEditDraft.guidedDirty = false;
+        }
+        markChartDirty();
+      });
+    }
+  });
+
+  listEl.querySelectorAll('.tl-mode-btn').forEach((btn) => {
+    btn.onclick = () => {
+      const shiftCard = btn.closest('.timeline-shift-card');
+      const card = shiftCard?.querySelector('.timeline-inline-edit');
+      const nextMode = btn.dataset.tlMode === 'raw' ? 'raw' : 'guided';
+      if (nextMode === timelineEditMode) return;
+      if (nextMode === 'guided' && timelineEditDraft?.rawDirty) {
+        const ta = card?.querySelector('.tl-edit-textarea');
+        if (ta) {
+          timelineEditDraft.fields = parseShiftBlockForEdit(ta.value);
+          timelineEditDraft.rawDirty = false;
+          timelineEditDraft.guidedDirty = true;
+          populateTlGuidedDomFromFields(card, timelineEditDraft.fields);
+        }
+      }
+      timelineEditMode = nextMode;
+      shiftCard?.querySelectorAll('.tl-mode-btn').forEach((b) => {
+        const act = b.dataset.tlMode === nextMode;
+        b.classList.toggle('active', act);
+        b.setAttribute('aria-pressed', String(act));
+        b.setAttribute('aria-selected', String(act));
+      });
+      const guidedEl = card?.querySelector('.tl-guided-form');
+      const rawEl = card?.querySelector('.tl-raw-pane');
+      if (guidedEl) guidedEl.hidden = nextMode !== 'guided';
+      if (rawEl) rawEl.hidden = nextMode !== 'raw';
     };
   });
 
@@ -7598,8 +8346,12 @@ function renderChartTimeline() {
       const badge = shiftCard.querySelector('.timeline-shift-badge');
       const meta = shiftCard.querySelector('.timeline-shift-head .cf-meta');
       if (badge) badge.textContent = nextShift;
-      if (meta) meta.textContent = `Quick Edit · ${nextDate}`;
-      markChartDirty();
+      if (meta) meta.textContent = `Edit · ${nextDate}`;
+      if (timelineEditDraft?.guidedDirty) {
+        syncTimelineGuidedToMarkdown(inlineCard);
+      } else {
+        markChartDirty();
+      }
     };
     el.addEventListener('change', syncMetaHeader);
     if (el.tagName !== 'SELECT') {
@@ -7613,7 +8365,13 @@ function renderChartTimeline() {
       const inlineCard = btn.closest('.timeline-inline-edit');
       const saveBtn = inlineCard?.querySelector('.tl-save-entry-btn');
       const s = editingTimelineKey ? shiftLookup.get(editingTimelineKey) : null;
-      const bodyChanged = Boolean(ta && s && ta.value.trim() !== String(s.body || '').trim());
+      const pendingTyped = Boolean(inlineCard?.querySelector('.tl-pending-new-input')?.value.trim());
+      const bodyChanged = Boolean(
+        pendingTyped ||
+        timelineEditDraft?.guidedDirty ||
+        timelineEditDraft?.rawDirty ||
+        (ta && s && ta.value.trim() !== String(s.body || '').trim())
+      );
       let metaChanged = false;
       if (inlineCard && saveBtn) {
         const { nextDate, nextShift } = resolveTimelineEditMeta(
@@ -7630,66 +8388,9 @@ function renderChartTimeline() {
         if (!confirm('Discard unsaved edits to this shift block?')) return;
       }
       editingTimelineKey = null;
+      timelineEditDraft = null;
+      timelineEditMode = 'guided';
       renderChartTimeline();
-    };
-  });
-
-function applyTimelineQuickInputsToCard(card, ta) {
-  if (!card || !ta) return false;
-  const bp = formatSplitBp(card.querySelector('.tl-q-sbp')?.value, card.querySelector('.tl-q-dbp')?.value);
-  const hr = card.querySelector('.tl-q-hr')?.value.trim();
-  const rr = card.querySelector('.tl-q-rr')?.value.trim();
-  const temp = card.querySelector('.tl-q-temp')?.value.trim();
-  const o2 = card.querySelector('.tl-q-o2')?.value.trim();
-  const ioUnit = card.querySelector('.tl-q-io-unit')?.value || 'ml';
-  const ioIn = formatIoWithUnit(card.querySelector('.tl-q-in')?.value, ioUnit);
-  const ioOut = formatIoWithUnit(card.querySelector('.tl-q-out')?.value, ioUnit);
-  const newTask = card.querySelector('.tl-q-task')?.value.trim();
-
-  if (!bp && !hr && !rr && !temp && !o2 && !ioIn && !ioOut && !newTask) {
-    return false;
-  }
-
-  let txt = ta.value;
-  if (bp || hr || rr || temp || o2) {
-    const vsLine = `Vitals: BP ${bp} | HR ${hr} | RR ${rr} | T ${temp} | O2sat ${o2}`.replace(/\s+\|/g, ' |');
-    if (/^(?:Vitals|VS):.*$/im.test(txt)) txt = txt.replace(/^(?:Vitals|VS):.*$/im, vsLine);
-    else txt = `${vsLine}\n${txt}`;
-  }
-
-  if (ioIn || ioOut) {
-    const fb = ioIn && ioOut ? computeShiftFluidBalance(ioIn, ioOut) : '';
-    const ioLine = `Shift I&O: In: ${ioIn} | Out: ${ioOut} | FB: ${fb}`.trim();
-    if (/^Shift\s+I&O:.*$/im.test(txt)) txt = txt.replace(/^Shift\s+I&O:.*$/im, ioLine);
-    else txt = `${txt.trimEnd()}\n${ioLine}`;
-  }
-
-  if (newTask) {
-    if (/^\s*\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}:?\s*$/im.test(txt)) {
-      txt = appendPendingLineToLatestBlock(txt, newTask, defaultShiftForHour());
-    } else {
-      txt = `${txt.trimEnd()}\n\n**Pending:\n- [ ] ${newTask}`;
-    }
-  }
-
-  ['.tl-q-sbp', '.tl-q-dbp', '.tl-q-hr', '.tl-q-rr', '.tl-q-temp', '.tl-q-o2', '.tl-q-in', '.tl-q-out', '.tl-q-task'].forEach(
-    (sel) => {
-      const inp = card.querySelector(sel);
-      if (inp) inp.value = '';
-    }
-  );
-  ta.value = txt.trim();
-  markChartDirty();
-  return true;
-}
-
-  listEl.querySelectorAll('.tl-apply-quick-btn').forEach((btn) => {
-    btn.onclick = () => {
-      const card = btn.closest('.timeline-inline-edit');
-      const ta = card?.querySelector('.tl-edit-textarea');
-      if (applyTimelineQuickInputsToCard(card, ta)) {
-        toast('Inserted quick fields into block');
-      }
     };
   });
 
@@ -7699,7 +8400,7 @@ function applyTimelineQuickInputsToCard(card, ta) {
       const ta = listEl.querySelector(`.tl-edit-textarea[data-key="${CSS.escape(key)}"]`);
       if (!ta) return;
       const card = btn.closest('.timeline-inline-edit');
-      applyTimelineQuickInputsToCard(card, ta);
+      flushTlNewPendingInput(card);
       const { nextDate, nextShift } = resolveTimelineEditMeta(
         card,
         btn.dataset.date,
@@ -7719,15 +8420,22 @@ function applyTimelineQuickInputsToCard(card, ta) {
         $('noteText').value = res.text;
         lastSavedChartContent = res.text;
         editingTimelineKey = null;
+        timelineEditDraft = null;
+        timelineEditMode = 'guided';
         if (timelineDateFilter !== 'all' && res.date) {
           const curFilterIso = dateStringToIso(timelineDateFilter) || timelineDateFilter;
           const nextIso = dateStringToIso(res.date) || res.date;
           if (curFilterIso !== nextIso) timelineDateFilter = res.date;
         }
+        if (res.moved) {
+          timelineShiftFilter = 'all';
+        }
         await saveCurrent(res.moved ? `Updated (${res.date} · ${res.shift})` : 'Entry updated');
         renderChartTimeline();
       } else {
         editingTimelineKey = null;
+        timelineEditDraft = null;
+        timelineEditMode = 'guided';
         renderChartTimeline();
       }
     };
@@ -7748,6 +8456,8 @@ function applyTimelineQuickInputsToCard(card, ta) {
         $('noteText').value = res.text;
         lastSavedChartContent = res.text;
         editingTimelineKey = null;
+        timelineEditDraft = null;
+        timelineEditMode = 'guided';
         await saveCurrent(null, { silent: true });
         renderChartTimeline();
         toast('Shift block deleted', {
@@ -7802,7 +8512,7 @@ async function select(id, opts = {}) {
   clearTimeout(chartAutosaveTimer);
   dirtyChart = false;
   lastSavedChartContent = n.content || '';
-  updateSaveStatusPill('saved');
+  updateSaveStatusPill('saved', { silentHide: true });
   updateUndoButton();
 
   const selectMeta = metaOf(n.content);
@@ -7817,11 +8527,16 @@ async function select(id, opts = {}) {
   $('noteText').value = n.content;
   populateProfileInputs(n, n.content, false);
   renderAdmittingHistoryCard(n.content);
+  syncEditorSidebarFluidBalance(n.content);
   timelineDateFilter = 'all';
+  timelineShiftFilter = 'all';
   timelineSearchQuery = '';
   editingTimelineKey = null;
+  timelineEditDraft = null;
+  timelineEditMode = 'guided';
   labsPanelFilter = 'all';
   if ($('timelineSearchInput')) $('timelineSearchInput').value = '';
+  setTimelineSearchOpen(false);
   $('reply').hidden = true;
   $('preview').textContent = 'Press "Build redacted preview".';
   $('guardPill').textContent = 'CHECKING';
@@ -7845,6 +8560,9 @@ async function undoChartEdit() {
   if (!stack || !stack.length) return;
   const prev = stack.pop();
   updateUndoButton();
+  editingTimelineKey = null;
+  timelineEditDraft = null;
+  timelineEditMode = 'guided';
   $('noteText').value = prev;
   lastSavedChartContent = prev;
   const n = notes.find((x) => x.id === currentId) || {};
@@ -7873,12 +8591,12 @@ async function newNote() {
     updated: Date.now(),
   };
   await put(n);
-  await refresh();
+  syncSingleNoteInMemory(n, { skipUi: true });
   await select(n.id, { skipFlush: true });
   await setMode('editor');
   const detailsEl = $('profileDetails');
   if (detailsEl) detailsEl.open = true;
-  $('nameInput').focus();
+  openPatientInfoModal('demo', $('editorPatientMetaBtn'), $('nameInput'));
 }
 
 async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
@@ -7892,6 +8610,7 @@ async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
   }
   const text = $('noteText').value;
   renderAdmittingHistoryCard(text);
+  syncEditorSidebarFluidBalance(text);
   if (!opts.skipUndoPush && n.content && n.content !== text) {
     pushUndoSnapshot(currentId, n.content);
   }
@@ -7923,7 +8642,7 @@ async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
   lastSavedChartContent = text;
   clearRecoveryDraft('chart');
   updateSaveStatusPill('saved');
-  await refresh();
+  syncSingleNoteInMemory(updatedNote, { skipUi: Boolean(opts.silent) });
   if (!opts.silent && toastMsg) toast(toastMsg);
 }
 
@@ -8612,6 +9331,39 @@ $('loadSyntheticBtn').onclick = () => {
 };
 
 // Editor actions & Patient Switcher
+if ($('editorPatientTrigger')) {
+  $('editorPatientTrigger').onclick = (e) => {
+    e.stopPropagation();
+    const dropdown = $('editorPatientDropdown');
+    if (!dropdown) return;
+    const willOpen = dropdown.hidden;
+    closeAllMenus();
+    if (willOpen) {
+      renderEditorPatientDropdown();
+      dropdown.hidden = false;
+      $('editorPatientTrigger').setAttribute('aria-expanded', 'true');
+    }
+  };
+}
+if ($('editorMoreBtn')) {
+  $('editorMoreBtn').onclick = (e) => {
+    e.stopPropagation();
+    const menu = $('editorMorePopover');
+    if (!menu) return;
+    const willOpen = menu.hidden;
+    closeAllMenus();
+    menu.hidden = !willOpen;
+    $('editorMoreBtn').setAttribute('aria-expanded', String(willOpen));
+  };
+}
+if ($('editorPatientMetaBtn')) {
+  $('editorPatientMetaBtn').onclick = () => openPatientInfoModal('demo', $('editorPatientMetaBtn'));
+}
+if ($('patientInfoModalClose')) $('patientInfoModalClose').onclick = closePatientInfoModal;
+if ($('patientInfoDoneBtn')) $('patientInfoDoneBtn').onclick = closePatientInfoModal;
+if ($('patientInfoTabDemo')) $('patientInfoTabDemo').onclick = () => setPatientInfoTab('demo');
+if ($('patientInfoTabAdmit')) $('patientInfoTabAdmit').onclick = () => setPatientInfoTab('admit');
+
 if ($('editorPatientSelect')) {
   $('editorPatientSelect').onchange = async () => {
     const nextId = $('editorPatientSelect').value;
@@ -8643,7 +9395,10 @@ if ($('editorDictateBtn')) {
 }
 
 $('newBtn').onclick = () => openAdmitModal({ mode: 'new', triggerEl: $('newBtn') });
-$('saveBtn').onclick = () => saveCurrent();
+$('saveBtn').onclick = () => {
+  closeAllMenus();
+  saveCurrent();
+};
 $('editorTimelineTab').onclick = () => setEditorView('timeline');
 $('editorLabsTab').onclick = () => setEditorView('labs');
 $('editorRawTab').onclick = () => setEditorView('raw');
@@ -8676,10 +9431,33 @@ $('labsExportCsvBtn').onclick = () => {
     allowTextShare: false,
   });
 };
-$('timelineSearchInput').oninput = (e) => {
-  timelineSearchQuery = e.target.value;
-  renderChartTimeline();
-};
+if ($('timelineSearchToggleBtn')) {
+  $('timelineSearchToggleBtn').onclick = () => {
+    const wrap = $('timelineSearchWrap');
+    const willOpen = wrap ? wrap.hidden : true;
+    setTimelineSearchOpen(willOpen, { clear: !willOpen, focus: willOpen });
+  };
+}
+if ($('timelineSearchCloseBtn')) {
+  $('timelineSearchCloseBtn').onclick = () => setTimelineSearchOpen(false, { clear: true });
+}
+if ($('timelineSearchInput')) {
+  $('timelineSearchInput').oninput = (e) => {
+    timelineSearchQuery = e.target.value;
+    const toggleBtn = $('timelineSearchToggleBtn');
+    const wrap = $('timelineSearchWrap');
+    if (toggleBtn) {
+      toggleBtn.classList.toggle('is-active', Boolean(timelineSearchQuery.trim()) || Boolean(wrap && !wrap.hidden));
+    }
+    renderChartTimeline();
+  };
+  $('timelineSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setTimelineSearchOpen(false, { clear: true });
+    }
+  });
+}
 [
   'nameInput',
   'aliasesInput',
@@ -8736,7 +9514,14 @@ $('profileLinesList')?.addEventListener('click', (e) => {
 $('profileManageAbxBtn')?.addEventListener('click', () => {
   if (!currentId) return toast('Select or create a patient chart first');
   syncProfileInputsToMarkdown();
-  openAbxModal(currentId, $('profileManageAbxBtn'));
+  const trigger =
+    $('patientInfoModal') && !$('patientInfoModal').hidden
+      ? $('editorPatientMetaBtn')
+      : $('profileManageAbxBtn');
+  if ($('patientInfoModal') && !$('patientInfoModal').hidden) {
+    closeModalEl($('patientInfoModal'));
+  }
+  openAbxModal(currentId, trigger);
 });
 $('addAbxBtn')?.addEventListener('click', () => {
   const drug = $('addAbxDrugInput')?.value.trim();
@@ -8825,11 +9610,16 @@ $('appendShiftBtn').onclick = () => {
   openShiftModal(currentId, $('appendShiftBtn'));
 };
 $('chartLabsBtn').onclick = () => {
-  if (!currentId) return toast('Select or create a note first');
-  openInboxModal(currentId, $('chartLabsBtn'));
+  closeAllMenus();
+  if (!currentId) return toast('Select or create a patient chart first');
+  openInboxModal(currentId, $('editorMoreBtn') || $('chartLabsBtn'));
 };
-$('chartCalcBtn').onclick = () => openCalcModal(currentId, 'audit', $('chartCalcBtn'));
+$('chartCalcBtn').onclick = () => {
+  closeAllMenus();
+  openCalcModal(currentId, 'audit', $('editorMoreBtn') || $('chartCalcBtn'));
+};
 $('copyUpdateBtn').onclick = () => {
+  closeAllMenus();
   const note = notes.find((n) => n.id === currentId);
   const content = $('noteText').value;
   if (!content.trim()) return toast('Select or create a note first');
@@ -8837,6 +9627,7 @@ $('copyUpdateBtn').onclick = () => {
 };
 
 $('deleteBtn').onclick = async () => {
+  closeAllMenus();
   if (!currentId) return;
   const deletedNote = { ...(notes.find((n) => n.id === currentId) || {}) };
   if (!deletedNote.id || !confirm('Delete this patient chart from this device?')) return;
@@ -8851,7 +9642,7 @@ $('deleteBtn').onclick = async () => {
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   clearTimeout(chartAutosaveTimer);
   dirtyChart = false;
-  updateSaveStatusPill('saved');
+  updateSaveStatusPill('saved', { silentHide: true });
   await remove(currentId);
   if (deleteDiskFile) {
     try {
@@ -8862,15 +9653,14 @@ $('deleteBtn').onclick = async () => {
     } catch {}
   }
   currentId = null;
-  await refresh();
-  updateVaultUi();
+  removeNoteInMemory(deletedNote.id, { skipUi: true });
   $('noteText').value = '';
   renderEditorNoteTitle('', '', 'Untitled note');
   await setMode('rounds');
   toast(`Deleted ${deletedNote.room || deletedNote.title || 'chart'}`, {
     onUndo: async () => {
       await put(deletedNote);
-      await refresh();
+      syncSingleNoteInMemory(deletedNote, { skipUi: true });
       await select(deletedNote.id, { skipFlush: true });
       await setMode('editor');
       toast('Patient chart restored');
@@ -8884,6 +9674,7 @@ $('importInput').onchange = (e) => {
 };
 
 $('exportBtn').onclick = async () => {
+  closeAllMenus();
   const n = notes.find((x) => x.id === currentId);
   if (!n) return toast('Save a note first');
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
@@ -8899,6 +9690,7 @@ $('exportBtn').onclick = async () => {
 };
 
 $('exportDeidBtn').onclick = async () => {
+  closeAllMenus();
   const n = notes.find((x) => x.id === currentId);
   if (!n) return toast('Save a note first');
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
@@ -9289,7 +10081,7 @@ async function fileVoiceBlockToChart(rawMarkdownBody, statusVerb) {
   });
   note.updated = Date.now();
   await put(note);
-  await refresh();
+  syncSingleNoteInMemory(note);
 
   if (currentId === note.id) {
     $('noteText').value = note.content;
@@ -9757,12 +10549,25 @@ inboxItems = loadInbox();
 $('inboxModalClose').onclick = () => closeInboxModal(false);
 $('inboxPasteInput').oninput = () => {
   if ($('inboxPasteInput').value.trim()) {
+    const hadQueueSel = Boolean(inboxSelectedQueueId);
     inboxSelectedQueueId = null;
     if (!inboxPinnedNoteId) inboxUserSelectedTarget = false;
-    renderInboxQueue();
+    if (hadQueueSel) renderInboxQueue();
   }
-  updateInboxDryRun();
+  clearTimeout(inboxDryRunTimer);
+  inboxDryRunTimer = setTimeout(() => updateInboxDryRun(), 90);
 };
+$('inboxPasteInput').addEventListener('paste', () => {
+  setTimeout(() => {
+    if ($('inboxPasteInput').value.trim()) {
+      const hadQueueSel = Boolean(inboxSelectedQueueId);
+      inboxSelectedQueueId = null;
+      if (!inboxPinnedNoteId) inboxUserSelectedTarget = false;
+      if (hadQueueSel) renderInboxQueue();
+    }
+    updateInboxDryRun();
+  }, 0);
+});
 $('inboxCaptureBtn').onclick = () => captureToInbox($('inboxPasteInput').value);
 $('inboxSampleBtn').onclick = () => {
   const sampleText =
@@ -9880,7 +10685,7 @@ $('inboxFileBtn').onclick = async () => {
 
   saveInbox();
   updateInboxBadge();
-  await refresh();
+  syncSingleNoteInMemory(targetNote);
 
   if (currentId === targetNote.id) {
     $('noteText').value = targetNote.content;
@@ -9971,7 +10776,7 @@ async function saveAbxStateToChart(note, activeList, completedList, { logFinishL
   note.content = nextContent;
   note.updated = Date.now();
   await put(note);
-  await refresh();
+  syncSingleNoteInMemory(note);
 
   if (currentId === note.id) {
     if ($('noteText')) $('noteText').value = note.content;
@@ -10280,7 +11085,7 @@ $('calcQuickWeightSaveBtn').onclick = async () => {
   note.content = syncFrontmatter(baseContent, { weight: String(numWt) });
   note.updated = Date.now();
   await put(note);
-  await refresh();
+  syncSingleNoteInMemory(note);
 
   if (currentId === note.id) {
     $('noteText').value = note.content;
@@ -10320,7 +11125,7 @@ if ($('calcSaveProfileOverridesBtn')) {
     note.content = syncFrontmatter(baseContent, updates);
     note.updated = Date.now();
     await put(note);
-    await refresh();
+    syncSingleNoteInMemory(note);
     if (currentId === note.id) {
       $('noteText').value = note.content;
       lastSavedChartContent = note.content;
@@ -10479,7 +11284,7 @@ if ($('calcInsertChartBtn')) {
     });
     note.updated = Date.now();
     await put(note);
-    await refresh();
+    syncSingleNoteInMemory(note);
     if (currentId === note.id) {
       $('noteText').value = note.content;
       lastSavedChartContent = note.content;
@@ -10979,7 +11784,7 @@ async function commitAdmitModal() {
   }
 
   await put(note);
-  await refresh();
+  syncSingleNoteInMemory(note, { skipUi: true });
   await select(note.id, { skipFlush: true });
   closeAdmitModal();
   await setMode('editor');
@@ -10990,7 +11795,14 @@ async function commitAdmitModal() {
 if ($('editAdmittingHistoryBtn')) {
   $('editAdmittingHistoryBtn').onclick = () => {
     if (!currentId) return toast('Select or create a patient chart first');
-    openAdmitModal({ mode: 'edit', noteId: currentId, triggerEl: $('editAdmittingHistoryBtn') });
+    const trigger =
+      $('patientInfoModal') && !$('patientInfoModal').hidden
+        ? $('editorPatientMetaBtn')
+        : $('editAdmittingHistoryBtn');
+    if ($('patientInfoModal') && !$('patientInfoModal').hidden) {
+      closeModalEl($('patientInfoModal'));
+    }
+    openAdmitModal({ mode: 'edit', noteId: currentId, triggerEl: trigger });
   };
 }
 if ($('admitModalClose')) $('admitModalClose').onclick = closeAdmitModal;
@@ -11145,7 +11957,7 @@ if ($('pitchOpenChartBtn')) {
 }
 
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.header-more-wrap, .row-more-wrap')) {
+  if (!e.target.closest('.header-more-wrap, .row-more-wrap, .editor-patient-switcher')) {
     closeAllMenus();
   }
 });
@@ -11162,6 +11974,7 @@ document.querySelectorAll('.modal-overlay').forEach((overlay) => {
     else if (overlay.id === 'calcModal') closeCalcModal();
     else if (overlay.id === 'pitchModal') closePitchModal();
     else if (overlay.id === 'abxModal') closeAbxModal();
+    else if (overlay.id === 'patientInfoModal') closePatientInfoModal();
     else if (overlay.id === 'restoreModal' || overlay.id === 'manualCopyModal') closeModalEl(overlay);
   });
 });
@@ -11186,6 +11999,7 @@ document.addEventListener('keydown', (e) => {
       else if (activeModalEl.id === 'calcModal') closeCalcModal();
       else if (activeModalEl.id === 'pitchModal') closePitchModal();
       else if (activeModalEl.id === 'abxModal') closeAbxModal();
+      else if (activeModalEl.id === 'patientInfoModal') closePatientInfoModal();
       else closeModalEl(activeModalEl);
       return;
     }
@@ -11337,17 +12151,14 @@ setInterval(updateDutyClockUi, 60000);
   }
 
   await refresh();
-  await refreshStorageAndPwaStatus({ requestPersist: true });
-  await initVaultLink();
-  if (notes.length) {
-    await select(notes[0].id, { skipFlush: true });
-  }
   restorePendingRecoveryDraftsIfNeeded();
   updateInboxBadge();
   updateCompanionConnHint();
   updateApiKeyStatusPill();
-  refreshWhisperCacheStatus();
   setMode('rounds');
+  refreshStorageAndPwaStatus({ requestPersist: true }).catch(() => {});
+  refreshWhisperCacheStatus();
+  initVaultLink().catch(() => {});
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker

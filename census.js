@@ -408,6 +408,10 @@ export function parseShiftTimeTo24h(shiftLabel) {
   if (m24) {
     return `${String(parseInt(m24[1], 10)).padStart(2, '0')}:${m24[2]}`;
   }
+  const mMil = s.match(/\b([01]\d|2[0-3])([0-5]\d)\s*h\b/i);
+  if (mMil) {
+    return `${mMil[1]}:${mMil[2]}`;
+  }
   return '';
 }
 
@@ -3518,6 +3522,571 @@ export function buildStructuredShiftUpdate({
   return `### ${cleanShift}\n${blocks.join('\n\n')}\n`;
 }
 
+function stripListItemPrefix(line) {
+  return String(line || '')
+    .replace(/^(?:[•\-*]|\d+[.)])\s+/, '')
+    .trim();
+}
+
+function isShiftEditBoundary(trimmed) {
+  if (!trimmed) return false;
+  if (/^#{2,6}\s+/.test(trimmed) || /^---+$/.test(trimmed)) return true;
+  if (/^\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}\s*:?\s*$/i.test(trimmed)) return true;
+  if (/^[-*]\s*\[[ xX]\]/.test(trimmed)) return true;
+  if (/^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed)) return true;
+  return /^(?:\*{0,2})(?:Subjective|S>|S|Objective|O>|O|Assessment|Impression|Working\s+Impression|Problem\s+list|PE|Physical\s+Exam(?:ination)?|Event\s*\/\s*Update|Interval|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Settings|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Medications?|Therapeutics|Service\s+Plans?|Problem-?Based\s+Plans?|Systems-?Based(?:\s+ICU)?\s+Plans?|Plans?|Generic\s+Plans?|General\s+Plans?|Routine\s+Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Contingenc(?:y|ies)|If\s*\/\s*Then|HGTs?|CBGs?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
+    trimmed
+  ) || /^(?:\*{0,2})(?:Medications?|Meds?|Drips?|Pending|Plans?|Labs?)(?:\*{0,2})\s*$/i.test(trimmed);
+}
+
+export function parseShiftBlockForEdit(blockBody) {
+  const text = String(blockBody || '').replace(/\r\n/g, '\n').trim();
+  const empty = {
+    subjective: '',
+    sbp: '',
+    dbp: '',
+    hr: '',
+    rr: '',
+    temp: '',
+    o2: '',
+    vitalsExtra: '',
+    ioIn: '',
+    ioOut: '',
+    ioUnit: 'ml',
+    io24: '',
+    vent: '',
+    feeding: '',
+    pe: '',
+    labs: '',
+    assessment: '',
+    drips: '',
+    meds: '',
+    servicePlans: '',
+    planHeading: '',
+    contingencies: '',
+    pending: [],
+    prefixBoilerplate: '',
+    suffixBoilerplate: '',
+    otherNotes: '',
+  };
+  if (!text) return empty;
+
+  const lines = text.split('\n');
+  const metrics = extractClinicalMetricsFromBlock(text);
+  const claimed = new Set(metrics.consumedLineIndices || []);
+
+  // Split vitals string into split quick-inputs + extras
+  let sbp = '';
+  let dbp = '';
+  let hr = '';
+  let rr = '';
+  let temp = '';
+  let o2 = '';
+  const vitalsExtraParts = [];
+  if (metrics.vitals) {
+    for (const part of metrics.vitals.split(/\s*\|\s*/)) {
+      const p = part.trim();
+      if (!p) continue;
+      const bpMatch = p.match(/^(?:BP\s*[:=]?\s*)?(\d{2,3})\s*\/\s*(\d{2,3})(?:\s*\(([^)]+)\))?$/i);
+      if (bpMatch && !sbp && !dbp) {
+        sbp = bpMatch[1];
+        dbp = bpMatch[2];
+        if (bpMatch[3] && !/^MAP\b/i.test(bpMatch[3].trim())) {
+          vitalsExtraParts.push(`BP (${bpMatch[3].trim()})`);
+        }
+        continue;
+      }
+      const hrMatch = p.match(/^(?:HR|PR)\s*[:=]?\s*(.+)$/i);
+      if (hrMatch && !hr) {
+        hr = hrMatch[1].trim();
+        continue;
+      }
+      const rrMatch = p.match(/^RR\s*[:=]?\s*(.+)$/i);
+      if (rrMatch && !rr) {
+        rr = rrMatch[1].trim();
+        continue;
+      }
+      const tMatch = p.match(/^(?:Tmax|Temp|T)\s*[:=]?\s*(.+)$/i);
+      if (tMatch && !temp) {
+        temp = tMatch[1].trim();
+        continue;
+      }
+      const o2Match = p.match(/^(?:O2(?:\s*sat)?|SpO2)\s*[:=]?\s*(.+)$/i);
+      if (o2Match && !o2) {
+        const val = o2Match[1].trim();
+        if (!/^%\s*on\s*RA$/i.test(val)) o2 = val;
+        continue;
+      }
+      vitalsExtraParts.push(p);
+    }
+  }
+
+  // Split I&O + 24h net into form inputs
+  let ioIn = '';
+  let ioOut = '';
+  let ioUnit = 'ml';
+  let io24 = metrics.io24h || '';
+  if (metrics.io) {
+    let shiftIoStr = metrics.io;
+    const inline24Match = shiftIoStr.match(/\(24h\s+(?:Net|FB)\s*:\s*([^)]+)\)/i);
+    if (inline24Match) {
+      if (!io24) io24 = inline24Match[1].trim();
+      shiftIoStr = shiftIoStr.replace(inline24Match[0], '').trim();
+    }
+    const split24Match = shiftIoStr.match(/\s*·\s*24h\s*:\s*(.+)$/i);
+    if (split24Match) {
+      if (!io24) io24 = split24Match[1].trim();
+      shiftIoStr = shiftIoStr.slice(0, split24Match.index).trim();
+    }
+    const inM = shiftIoStr.match(/\bIn\s*:\s*([^|()]+)/i);
+    const outM = shiftIoStr.match(/\bOut\s*:\s*([^|()]+)/i);
+    const rawIn = inM ? inM[1].trim() : '';
+    const rawOut = outM ? outM[1].trim() : '';
+    const inIsL = /^\d+(?:\.\d+)?\s*l$/i.test(rawIn);
+    const outIsL = /^\d+(?:\.\d+)?\s*l$/i.test(rawOut);
+    const inIsMl = /^\d+(?:\.\d+)?\s*(?:ml|cc)?$/i.test(rawIn);
+    const outIsMl = /^\d+(?:\.\d+)?\s*(?:ml|cc)?$/i.test(rawOut);
+    if ((inIsL || !rawIn) && (outIsL || !rawOut) && (inIsL || outIsL)) {
+      ioUnit = 'L';
+      ioIn = rawIn.replace(/\s*l$/i, '').trim();
+      ioOut = rawOut.replace(/\s*l$/i, '').trim();
+    } else {
+      ioUnit = 'ml';
+      ioIn = inIsMl ? rawIn.replace(/\s*(?:ml|cc)$/i, '').trim() : rawIn;
+      ioOut = outIsMl ? rawOut.replace(/\s*(?:ml|cc)$/i, '').trim() : rawOut;
+    }
+  }
+
+  const drips = metrics.drips
+    ? metrics.drips
+        .split(/\s*\|\s*/)
+        .map((d) => d.trim())
+        .filter(Boolean)
+        .join('\n')
+    : '';
+
+  // Detect leading greeting/patient-header boilerplate & trailing sign-off footer
+  const prefixLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      if (prefixLines.length > 0) continue;
+      break;
+    }
+    if (/^(?:Greeting:|Good\s+(?:day|morning|afternoon|evening)|Update\s+on\s+your\s+patient)/i.test(trimmed)) {
+      prefixLines.push(trimmed);
+      claimed.add(i);
+      continue;
+    }
+    if (
+      prefixLines.length > 0 &&
+      !isShiftEditBoundary(trimmed) &&
+      !claimed.has(i) &&
+      trimmed.length <= 60 &&
+      (/^Room\s+/i.test(trimmed) || /^\d{1,3}\s*\/\s*[MF]$/i.test(trimmed) || /^[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)+$/.test(trimmed))
+    ) {
+      prefixLines.push(trimmed);
+      claimed.add(i);
+      continue;
+    }
+    break;
+  }
+
+  const suffixLines = [];
+  let footerStartIdx = lines.length;
+  for (let i = Math.max(0, lines.length - 6); i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (/^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed)) {
+      footerStartIdx = i;
+      break;
+    }
+  }
+  if (footerStartIdx < lines.length) {
+    for (let i = footerStartIdx; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      if (!isShiftEditBoundary(trimmed) || /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed)) {
+        suffixLines.push(trimmed);
+        claimed.add(i);
+      }
+    }
+  }
+
+  const subjectiveLines = [];
+  const peLines = [];
+  const assessmentLines = [];
+  const feedingLines = [];
+  const contingencyLines = [];
+  const medLines = [];
+  const medSeen = new Set();
+  const planLines = [];
+  const planSeen = new Set();
+  const rawLabLines = [];
+  const pending = [];
+  const pendingSeen = new Set();
+  let planHeading = '';
+  let section = '';
+  let activeSpecialtyPlan = '';
+
+  const pushMedLine = (raw) => {
+    const clean = stripListItemPrefix(String(raw || '').replace(/^[-*]\s*\[[ xX]\]\s*/, ''));
+    if (isMedPlaceholder(clean)) return;
+    const key = clean.toLowerCase();
+    if (!medSeen.has(key)) {
+      medSeen.add(key);
+      medLines.push(clean);
+    }
+  };
+
+  const pushPlanLine = (raw, tagPrefix = '') => {
+    const clean = stripListItemPrefix(raw);
+    if (!clean || /^none$/i.test(clean)) return;
+    const labeled = tagPrefix && !clean.toLowerCase().startsWith(`${tagPrefix.toLowerCase()}:`)
+      ? `${tagPrefix}: ${clean}`
+      : clean;
+    const key = labeled.toLowerCase();
+    if (!planSeen.has(key)) {
+      planSeen.add(key);
+      planLines.push(labeled);
+    }
+  };
+
+  const pushPendingLine = (txt, checked) => {
+    const clean = String(txt || '').trim();
+    if (!clean || /^none$/i.test(clean)) return;
+    const key = clean.toLowerCase();
+    if (!pendingSeen.has(key)) {
+      pendingSeen.add(key);
+      pending.push({ text: clean, checked: Boolean(checked) });
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      if (section && !['pending', 'meds', 'plans'].includes(section)) {
+        section = '';
+      }
+      continue;
+    }
+
+    if (claimed.has(i) && !/^(?:\*{0,2})(?:Labs?|Laboratory(?:\s+updates?)?)(?:\*{0,2})\s*:/i.test(trimmed)) {
+      if (section === 'labs') {
+        if (isShiftEditBoundary(trimmed)) section = '';
+        else rawLabLines.push(stripListItemPrefix(trimmed));
+      } else if (section) {
+        section = '';
+      }
+      continue;
+    }
+
+    // Explicit checkboxes anywhere
+    const cbMatch = trimmed.match(/^[-*]?\s*\[([ xX])\]\s*(.*)$/);
+    if (cbMatch) {
+      claimed.add(i);
+      pushPendingLine(cbMatch[2], cbMatch[1].toLowerCase() === 'x');
+      continue;
+    }
+
+    // Pending header
+    if (/^\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}\s*:?\s*$/i.test(trimmed)) {
+      claimed.add(i);
+      section = 'pending';
+      continue;
+    }
+
+    // Subjective / Event heading
+    const subjMatch = trimmed.match(/^(?:\*{0,2})(?:Subjective|S>|S|Event\s*\/\s*Update|Interval)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (subjMatch) {
+      claimed.add(i);
+      section = 'subjective';
+      const inline = subjMatch[1].trim();
+      if (inline && !/^(?:none|n\/a|-)$/i.test(inline)) subjectiveLines.push(inline);
+      continue;
+    }
+
+    // PE heading
+    const peMatch = trimmed.match(/^(?:\*{0,2})(?:PE|Physical\s+Exam(?:ination)?)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (peMatch) {
+      claimed.add(i);
+      section = 'pe';
+      const inline = peMatch[1].trim();
+      if (inline && !/^(?:none|n\/a|-)$/i.test(inline)) peLines.push(inline);
+      continue;
+    }
+
+    // Labs heading
+    const labsMatch = trimmed.match(/^(?:\*{0,2})(?:Labs?|Laboratory(?:\s+updates?)?)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (labsMatch) {
+      claimed.add(i);
+      section = 'labs';
+      const inline = labsMatch[1].trim();
+      if (inline) rawLabLines.push(inline);
+      continue;
+    }
+
+    // Assessment heading
+    const assessMatch = trimmed.match(/^(?:\*{0,2})(?:Assessment|Impression|Working\s+Impression|Problem\s+list)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (assessMatch) {
+      claimed.add(i);
+      section = 'assessment';
+      const inline = assessMatch[1].trim();
+      if (inline && !/^(?:none|n\/a|-)$/i.test(inline)) assessmentLines.push(inline);
+      continue;
+    }
+
+    // Feeding heading
+    const feedMatch = trimmed.match(/^(?:\*{0,2})(?:Feeding|Diet|Nutrition)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (feedMatch) {
+      claimed.add(i);
+      section = 'feeding';
+      const inline = feedMatch[1].trim();
+      if (inline && !/^(?:none|n\/a|-)$/i.test(inline)) feedingLines.push(inline);
+      continue;
+    }
+
+    // Contingencies heading
+    const contMatch = trimmed.match(/^(?:\*{0,2})(?:Contingenc(?:y|ies)|If\s*\/\s*Then)(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (contMatch) {
+      claimed.add(i);
+      section = 'contingencies';
+      const inline = contMatch[1].trim();
+      if (inline && !/^(?:none|nil|n\/a|-)$/i.test(inline)) contingencyLines.push(inline);
+      continue;
+    }
+
+    // Medications heading
+    const medMatch =
+      trimmed.match(/^(?:#{2,6}\s+)?(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Medications?|Meds?)(?:\s*\/\s*Drips?)?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i) ||
+      trimmed.match(/^(?:\*{0,2})Therapeutics(?:\*{0,2})\s*:\s*(.*)$/i);
+    if (medMatch) {
+      claimed.add(i);
+      section = 'meds';
+      const inline = (medMatch[1] || '').trim();
+      if (inline) {
+        for (const piece of inline.split(/[|;]/)) pushMedLine(piece);
+      }
+      continue;
+    }
+
+    // Plans heading
+    const planHdrMatch = trimmed.match(
+      /^(?:\*{0,2})(Service|Problem-?Based|Systems-?Based(?:\s+ICU)?|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})?\s*Plans?(?:\*{0,2})\s*:\s*(.*)$/i
+    );
+    if (planHdrMatch) {
+      const prefix = (planHdrMatch[1] || '').trim();
+      if (/^(?:generic|general|routine)$/i.test(prefix)) {
+        // Keep generic routine plans in otherNotes only if meaningful, or preserve cleanly as un-tagged plans
+        section = '';
+        continue;
+      }
+      claimed.add(i);
+      section = 'plans';
+      const normalizedHdr = `${prefix ? `${prefix} ` : ''}Plans:`.replace(/\s+/g, ' ');
+      if (!planHeading) {
+        planHeading = normalizedHdr;
+        activeSpecialtyPlan = '';
+      } else if (normalizedHdr.toLowerCase() !== planHeading.toLowerCase()) {
+        activeSpecialtyPlan = prefix;
+      } else {
+        activeSpecialtyPlan = '';
+      }
+      const inline = (planHdrMatch[2] || '').trim();
+      if (inline) pushPlanLine(inline, activeSpecialtyPlan);
+      continue;
+    }
+
+    // Continuation inside an active section
+    if (section) {
+      if (isShiftEditBoundary(trimmed)) {
+        section = '';
+        // Re-evaluate this line below if not claimed
+      } else {
+        claimed.add(i);
+        if (section === 'subjective') subjectiveLines.push(trimmed);
+        else if (section === 'pe') peLines.push(trimmed);
+        else if (section === 'labs') rawLabLines.push(stripListItemPrefix(trimmed));
+        else if (section === 'assessment') assessmentLines.push(trimmed);
+        else if (section === 'feeding') feedingLines.push(trimmed);
+        else if (section === 'contingencies') contingencyLines.push(trimmed);
+        else if (section === 'meds') {
+          if (/[|;]/.test(trimmed) && !/^(?:[•\-*]|\d+[.)])\s+/.test(trimmed)) {
+            for (const piece of trimmed.split(/[|;]/)) pushMedLine(piece);
+          } else {
+            pushMedLine(trimmed);
+          }
+        } else if (section === 'plans') {
+          pushPlanLine(trimmed, activeSpecialtyPlan);
+        } else if (section === 'pending') {
+          const item = stripListItemPrefix(trimmed);
+          if (item && !/^none$/i.test(item)) pushPendingLine(item, false);
+        }
+        continue;
+      }
+    }
+  }
+
+  // Catch implicit PE & implicit Subjective on remaining unclaimed lines
+  const implicitPeSet = new Set(
+    peLines.length === 0
+      ? extractPeLinesFromBlock(text)
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+      : []
+  );
+
+  const otherNotesLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (claimed.has(i)) continue;
+    const trimmed = lines[i].trim();
+    if (!trimmed || /^[-*]\s*$/.test(trimmed)) continue;
+    if (implicitPeSet.has(trimmed)) {
+      peLines.push(trimmed);
+      claimed.add(i);
+      continue;
+    }
+    if (PE_SUBJECTIVE_LINE_RE.test(trimmed)) {
+      subjectiveLines.push(trimmed);
+      claimed.add(i);
+      continue;
+    }
+    otherNotesLines.push(lines[i].trimEnd());
+  }
+
+  const labsText = rawLabLines.length > 0 ? rawLabLines.join('\n') : metrics.labs || '';
+
+  return {
+    subjective: subjectiveLines.join('\n'),
+    sbp,
+    dbp,
+    hr,
+    rr,
+    temp,
+    o2,
+    vitalsExtra: vitalsExtraParts.join(' | '),
+    ioIn,
+    ioOut,
+    ioUnit,
+    io24,
+    vent: metrics.vent || '',
+    feeding: feedingLines.join('\n'),
+    pe: peLines.join('\n'),
+    labs: labsText,
+    assessment: assessmentLines.join('\n'),
+    drips,
+    meds: medLines.join('\n'),
+    servicePlans: planLines.join('\n'),
+    planHeading,
+    contingencies: contingencyLines.join('\n'),
+    pending,
+    prefixBoilerplate: prefixLines.join('\n'),
+    suffixBoilerplate: suffixLines.join('\n'),
+    otherNotes: otherNotesLines.join('\n'),
+  };
+}
+
+export function serializeEditedShiftBlock(
+  fields = {},
+  { isInterim = false, planMode = 'service' } = {}
+) {
+  const blocks = [];
+
+  const prefix = String(fields.prefixBoilerplate || '').trim();
+  if (prefix) blocks.push(prefix);
+
+  const subj = String(fields.subjective || '').trim();
+  if (subj) {
+    if (/^(?:\*{0,2})(?:Subjective|S>|S:|Event\s*\/\s*Update|Interval)\b/i.test(subj)) {
+      blocks.push(subj);
+    } else if (isInterim && !subj.includes('\n')) {
+      blocks.push(`Event / Update: ${subj}`);
+    } else {
+      blocks.push(subj.includes('\n') ? `Subjective:\n${subj}` : `Subjective: ${subj}`);
+    }
+  }
+
+  const vsCore = formatStructuredVitals(fields);
+  const vsExtra = String(fields.vitalsExtra || '').trim();
+  if (vsCore && vsExtra) blocks.push(`${vsCore} | ${vsExtra}`);
+  else if (vsCore) blocks.push(vsCore);
+  else if (vsExtra) blocks.push(`Vitals: ${vsExtra}`);
+
+  const ventTxt = String(fields.vent || '').trim();
+  if (ventTxt) blocks.push(`Vent: ${ventTxt}`);
+
+  const io24Val = String(fields.io24 || '').trim();
+  let ioLine = formatStructuredIo(fields);
+  if (ioLine && io24Val) ioLine = `${ioLine} (24h Net: ${io24Val})`;
+  if (ioLine) blocks.push(ioLine);
+  else if (io24Val) blocks.push(`24h Net: ${io24Val}`);
+
+  const feedingTxt = String(fields.feeding || '').trim();
+  if (feedingTxt) {
+    blocks.push(feedingTxt.includes('\n') ? `Feeding:\n${feedingTxt}` : `Feeding: ${feedingTxt}`);
+  }
+
+  const peTxt = String(fields.pe || '').trim();
+  if (peTxt) {
+    if (/^(?:\*{0,2})(?:PE|Physical\s+Exam(?:ination)?)(?:\*{0,2})\s*:/i.test(peTxt)) {
+      blocks.push(peTxt);
+    } else {
+      blocks.push(peTxt.includes('\n') ? `PE:\n${peTxt}` : `PE: ${peTxt}`);
+    }
+  }
+
+  const labsTxt = String(fields.labs || '').trim();
+  if (labsTxt) {
+    if (/^(?:\*{0,2})(?:Labs?|Laboratory(?:\s+updates?)?)(?:\*{0,2})\s*:/i.test(labsTxt)) {
+      blocks.push(labsTxt);
+    } else if (labsTxt.includes('\n') || /^(?:CXR|Chest\s+X-?ray|12\s*-?\s*L|ECG|EKG|Blood|Sputum|Urine|ABG|CBC|BMP|CMP)/i.test(labsTxt)) {
+      blocks.push(`Labs:\n${labsTxt}`);
+    } else {
+      blocks.push(`Labs: ${labsTxt}`);
+    }
+  }
+
+  const assessTxt = String(fields.assessment || '').trim();
+  if (assessTxt) {
+    blocks.push(assessTxt.includes('\n') ? `Assessment:\n${assessTxt}` : `Assessment: ${assessTxt}`);
+  }
+
+  const dripsBlk = formatDripsMarkdownBlock(fields.drips);
+  if (dripsBlk) blocks.push(dripsBlk);
+
+  const medLines = normalizeStructuredLines(fields.meds);
+  if (medLines.length) blocks.push(`Medications:\n${medLines.join('\n')}`);
+
+  const otherTxt = String(fields.otherNotes || '').trim();
+  if (otherTxt) blocks.push(otherTxt);
+
+  const defaultPlanHdr = (PLAN_MODES[planMode] || PLAN_MODES.service).heading;
+  const planHdr = String(fields.planHeading || '').trim() || defaultPlanHdr;
+  const planLines = normalizeStructuredLines(fields.servicePlans);
+  if (planLines.length) blocks.push(`${planHdr}\n${planLines.join('\n')}`);
+
+  const contTxt = String(fields.contingencies || '').trim();
+  if (contTxt) blocks.push(`Contingencies: ${contTxt}`);
+
+  const pendItems = Array.isArray(fields.pending)
+    ? fields.pending
+        .map((p) => ({
+          text: String(p?.text || '').trim(),
+          checked: Boolean(p?.checked),
+        }))
+        .filter((p) => p.text)
+    : [];
+  if (pendItems.length) {
+    const pendLines = pendItems.map((p) => `- [${p.checked ? 'x' : ' '}] ${p.text}`);
+    blocks.push(`**Pending:\n${pendLines.join('\n')}`);
+  }
+
+  const suffix = String(fields.suffixBoilerplate || '').trim();
+  if (suffix) blocks.push(suffix);
+
+  return blocks.join('\n\n');
+}
+
 export function formatUpdateText(content, note = {}) {
   const segment = getLatestShiftSegment(content);
   let block = String(segment.latestShiftBlock || '').replace(/\r\n/g, '\n');
@@ -5149,7 +5718,7 @@ function dateComparableValue(dateStr) {
   return p ? p.year * 10000 + p.month * 100 + p.day : null;
 }
 
-function shiftSortMinutes(shiftLabel) {
+export function shiftSortMinutes(shiftLabel) {
   const clean = String(shiftLabel || '').trim();
   if (!clean || /^entry$/i.test(clean)) return -1;
   const t24 = parseShiftTimeTo24h(clean);
@@ -5158,10 +5727,22 @@ function shiftSortMinutes(shiftLabel) {
     const total = hh * 60 + mm;
     return total < 240 ? total + 1440 - 240 : total - 240;
   }
-  if (/^morning\b/i.test(clean)) return 120;
-  if (/^afternoon\b/i.test(clean)) return 600;
-  if (/^(?:night|evening)\b/i.test(clean)) return 1080;
+  if (/^(?:morning|am)\b/i.test(clean)) return 120;
+  if (/^(?:afternoon|pm)\b/i.test(clean)) return 600;
+  if (/^(?:night|evening|nod)\b/i.test(clean)) return 1080;
   return Number.MAX_SAFE_INTEGER;
+}
+
+export function sortTimelineShiftsChronologically(shifts) {
+  if (!Array.isArray(shifts)) return [];
+  return shifts
+    .map((item, idx) => ({
+      item,
+      idx,
+      sortMins: shiftSortMinutes(typeof item === 'string' ? item : item?.shift),
+    }))
+    .sort((a, b) => a.sortMins - b.sortMins || a.idx - b.idx)
+    .map((entry) => entry.item);
 }
 
 function insertShiftChunkChronologically(sectionBody, newShiftLabel, newShiftChunk) {
