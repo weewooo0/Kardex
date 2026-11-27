@@ -107,7 +107,12 @@ export function isUneditedSyntheticNote(note) {
 /**
  * Pure two-way state reconciliation for a single chart/file pair.
  */
-export function reconcileVaultEntry({ diskText = null, diskLastModified = 0, localNote = null } = {}) {
+export function reconcileVaultEntry({
+  diskText = null,
+  diskLastModified = 0,
+  localNote = null,
+  conflictPolicy = 'latest-wins',
+} = {}) {
   const hasDisk = typeof diskText === 'string';
   const hasLocal = Boolean(localNote && typeof localNote.content === 'string');
 
@@ -167,9 +172,29 @@ export function reconcileVaultEntry({ diskText = null, diskLastModified = 0, loc
     };
   }
 
-  // Both edited independently since last sync -> preserve both safely
+  // Both edited independently since last sync
   const localTs = Number(localNote.updated || 0);
   const diskTs = Number(diskLastModified || 0);
+
+  if (conflictPolicy !== 'conflict-copy') {
+    if (diskTs > localTs) {
+      return {
+        action: 'pull',
+        winnerContent: diskText,
+        diskHash,
+        localHash,
+        reason: 'both-changed-disk-newer',
+      };
+    }
+    return {
+      action: 'push',
+      winnerContent: localNote.content,
+      diskHash,
+      localHash,
+      reason: 'both-changed-local-newer',
+    };
+  }
+
   if (diskTs > localTs) {
     return {
       action: 'conflict',
@@ -427,6 +452,46 @@ function isStatUnchanged(localNote, diskLastMod, diskSize) {
   );
 }
 
+export async function readFreshNoteFromVault(dirHandle, localNote) {
+  if (!dirHandle || !localNote?.sourceFileName || localNote.localDirtySync) {
+    return { updated: false, note: localNote };
+  }
+  try {
+    const fh = await dirHandle.getFileHandle(localNote.sourceFileName, { create: false });
+    const rawFile = await fh.getFile();
+    const diskLastMod = Number(rawFile.lastModified || 0);
+    const diskSize = typeof rawFile.size === 'number' ? rawFile.size : -1;
+    if (isStatUnchanged(localNote, diskLastMod, diskSize)) {
+      return { updated: false, note: localNote };
+    }
+    const content = await rawFile.text();
+    const diskHash = hashContent(content);
+    if (localNote.sourceContentHash && diskHash === localNote.sourceContentHash) {
+      return {
+        updated: false,
+        note: {
+          ...localNote,
+          sourceLastModified: diskLastMod,
+          sourceFileSize: diskSize,
+        },
+      };
+    }
+    const nextNote = buildLocalNoteFromVaultFile(
+      {
+        name: fh.name || localNote.sourceFileName,
+        content,
+        lastModified: diskLastMod,
+        size: diskSize,
+        hash: diskHash,
+      },
+      localNote
+    );
+    return { updated: true, note: nextNote };
+  } catch {
+    return { updated: false, note: localNote };
+  }
+}
+
 async function applyDiskReconcileDecision({
   dirHandle,
   file,
@@ -437,11 +502,13 @@ async function applyDiskReconcileDecision({
   persistNote,
   counts,
   conflictFiles,
+  conflictPolicy = 'latest-wins',
 }) {
   const decision = reconcileVaultEntry({
     diskText: file.content,
     diskLastModified: file.lastModified,
     localNote,
+    conflictPolicy,
   });
 
   if (decision.action === 'noop') {
@@ -508,6 +575,7 @@ export async function syncActiveVaultNotes({
   generateId = null,
   now = new Date(),
   onProgress = null,
+  conflictPolicy = 'latest-wins',
 } = {}) {
   if (!dirHandle) throw new Error('No linked folder handle');
   if (typeof putNote !== 'function') throw new Error('putNote callback required');
@@ -648,6 +716,7 @@ export async function syncActiveVaultNotes({
             persistNote,
             counts,
             conflictFiles,
+            conflictPolicy,
           });
         }
       } catch (err) {
@@ -694,6 +763,7 @@ export async function syncVaultDirectory({
   onProgress = null,
   activeOnly = false,
   inactiveCache = null,
+  conflictPolicy = 'latest-wins',
 } = {}) {
   if (!dirHandle) throw new Error('No linked folder handle');
   if (typeof putNote !== 'function') throw new Error('putNote callback required');
@@ -845,6 +915,7 @@ export async function syncVaultDirectory({
             persistNote,
             counts,
             conflictFiles,
+            conflictPolicy,
           });
         }
       } catch (err) {

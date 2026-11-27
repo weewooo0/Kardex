@@ -1313,13 +1313,14 @@ export function extractClinicalMetricsFromBlock(blockText) {
   let inPendingSection = false;
   let inServicePlans = false;
   let inMedsSection = false;
+  let inDripsSection = false;
 
   const isSectionBoundary = (trimmed, { inLabs = false } = {}) =>
     /^#{2,3}\s+/.test(trimmed) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
       trimmed
     ) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
+    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|HGTs?|CBGs?|Contingenc(?:y|ies)|If\s*\/\s*Then|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
       trimmed
     ) ||
     /^(?:BP|HR|PR|RR|Tmax|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
@@ -1347,6 +1348,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inPendingSection = false;
       inServicePlans = false;
       inMedsSection = false;
+      inDripsSection = false;
       ioContext = null;
       continue;
     }
@@ -1357,6 +1359,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inPendingSection = true;
       inServicePlans = false;
       inMedsSection = false;
+      inDripsSection = false;
       ioContext = null;
       continue;
     }
@@ -1370,6 +1373,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inPendingSection = false;
       inServicePlans = true;
       inMedsSection = false;
+      inDripsSection = false;
       ioContext = null;
       continue;
     }
@@ -1384,8 +1388,20 @@ export function extractClinicalMetricsFromBlock(blockText) {
       inPendingSection = false;
       inServicePlans = false;
       inMedsSection = true;
+      inDripsSection = false;
       ioContext = null;
       continue;
+    }
+
+    if (inDripsSection) {
+      if (isSectionBoundary(trimmed) || /^---+$/.test(trimmed)) {
+        inDripsSection = false;
+      } else {
+        const cleanDripLine = trimmed.replace(/^[-*•]\s+/, '').trim();
+        if (cleanDripLine) dripParts.push(cleanDripLine);
+        consumedLineIndices.add(i);
+        continue;
+      }
     }
 
     if (inPendingSection) {
@@ -1689,11 +1705,17 @@ export function extractClinicalMetricsFromBlock(blockText) {
       }
     }
 
-    // Drips header
-    if (/^(?:[-*]\s*)?(?:Drips?|Infusions?):\s*/i.test(trimmed)) {
+    // Drips header (supports inline "Drips: a | b" and stacked multi-line "Drips:\nline1\nline2")
+    const dripsHeaderMatch = trimmed.match(/^(?:[-*]\s*)?(?:\*{0,2})(?:Drips?|Infusions?)(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i);
+    if (dripsHeaderMatch) {
       consumedLineIndices.add(i);
       ioContext = null;
-      const val = trimmed.replace(/^(?:[-*]\s*)?(?:Drips?|Infusions?):\s*/i, '').trim();
+      inLabsSection = false;
+      inPendingSection = false;
+      inServicePlans = false;
+      inMedsSection = false;
+      inDripsSection = true;
+      const val = String(dripsHeaderMatch[1] || '').trim();
       if (val) dripParts.push(val);
       continue;
     }
@@ -2144,8 +2166,8 @@ export function togglePendingItem(content, targetText, newCheckedState, scope = 
 
 function cleanActiveDrips(rawDripText) {
   const parts = String(rawDripText || '')
-    .split('|')
-    .map((p) => p.trim())
+    .split(/\s*\|\s*|\n/)
+    .map((p) => p.replace(/^[-*•]\s+/, '').trim())
     .filter(Boolean);
   const active = parts.filter((part) => {
     if (/^(?:none|off|nil|n\/a|-)$/i.test(part)) return false;
@@ -2153,6 +2175,16 @@ function cleanActiveDrips(rawDripText) {
     return true;
   });
   return active.join(' | ');
+}
+
+function formatDripsMarkdownBlock(rawDrips) {
+  const items = String(rawDrips || '')
+    .split(/\n|\s*\|\s*/)
+    .map((s) => s.replace(/^[-*•]\s+/, '').trim())
+    .filter(Boolean);
+  if (!items.length) return '';
+  if (items.length === 1) return `Drips: ${items[0]}`;
+  return `Drips:\n${items.join('\n')}`;
 }
 
 function extractServicePlansFromBlock(blockText) {
@@ -2950,6 +2982,13 @@ export function extractCarryForwardData(content) {
     if (!feeding) {
       feeding = extractFeedingFromBlock(blk);
     }
+    if (!dripsEvaluated) {
+      const blkMetrics = extractClinicalMetricsFromBlock(blk);
+      if (blkMetrics.drips) {
+        drips = cleanActiveDrips(blkMetrics.drips);
+        dripsEvaluated = true;
+      }
+    }
     for (const line of blk.split('\n')) {
       const trimmed = line.trim();
       if (!vent && /^(?:[-*]\s*)?(?:Vent(?:ilator)?|Vent\s+Settings|Settings):\s*(.+)$/i.test(trimmed)) {
@@ -2957,11 +2996,6 @@ export function extractCarryForwardData(content) {
         if (val && !/^(?:same\s+settings|none|off|extubated|discontinued|d\/c)$/i.test(val)) {
           vent = val;
         }
-      }
-      if (!dripsEvaluated && /^(?:[-*]\s*)?(?:Drips?|Infusions?):\s*(.+)$/i.test(trimmed)) {
-        const rawDrip = trimmed.replace(/^(?:[-*]\s*)?(?:Drips?|Infusions?):\s*/i, '').trim();
-        drips = cleanActiveDrips(rawDrip);
-        dripsEvaluated = true;
       }
     }
     if (vent && feeding && dripsEvaluated) break;
@@ -3047,7 +3081,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
 
   // 2. Double-brace placeholders (including friendly layman aliases)
   const ventVal = carryStanding ? data.vent : '';
-  const dripsVal = carryStanding ? data.drips : '';
+  const dripsVal = carryStanding ? String(data.drips || '').split(/\s*\|\s*/).filter(Boolean).join('\n') : '';
   const feedingVal = carryFeeding ? data.feeding : '';
   const peVal = carryPe ? data.pe : '';
   const pendingVal = carryPending ? data.openPending.map((p) => `- [ ] ${p}`).join('\n') : '';
@@ -3138,7 +3172,10 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   const standingLines = [];
   if (carryStanding) {
     if (data.vent && !hasExplicitVent) standingLines.push(`Vent: ${data.vent}`);
-    if (data.drips && !hasExplicitDrips) standingLines.push(`Drips: ${data.drips}`);
+    if (data.drips && !hasExplicitDrips) {
+      const dripsBlk = formatDripsMarkdownBlock(data.drips);
+      if (dripsBlk) standingLines.push(dripsBlk);
+    }
   }
 
   if (!hasExplicitPlans && (carriedLines.length > 0 || standingLines.length > 0)) {
@@ -3187,7 +3224,10 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
       'Vitals: BP  | HR  | RR  | T  | O2sat % on RA',
     ];
     if (carryStanding && data.vent) lines.push(`Vent: ${data.vent}`);
-    if (carryStanding && data.drips) lines.push(`Drips: ${data.drips}`);
+    if (carryStanding && data.drips) {
+      const dripsBlk = formatDripsMarkdownBlock(data.drips);
+      if (dripsBlk) lines.push(dripsBlk);
+    }
     if (carryContingencies && data.contingencies) lines.push(`Contingencies: ${data.contingencies}`);
     if (carryPending && data.openPending.length > 0) {
       lines.push('**Pending:');
@@ -3222,7 +3262,8 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
   }
 
   if (carryStanding && data.drips) {
-    lines.push(`Drips: ${data.drips}`);
+    const dripsBlk = formatDripsMarkdownBlock(data.drips);
+    if (dripsBlk) lines.push(dripsBlk);
   }
 
   if (carryContingencies && data.contingencies) {
@@ -3353,8 +3394,8 @@ export function buildStructuredShiftUpdate({
     if (vsLine) blocks.push(vsLine);
     const ventLine = String(values.vent || '').trim();
     if (ventLine) blocks.push(`Vent: ${ventLine}`);
-    const dripsLine = String(values.drips || '').trim();
-    if (dripsLine) blocks.push(`Drips: ${dripsLine}`);
+    const dripsBlk = formatDripsMarkdownBlock(values.drips);
+    if (dripsBlk) blocks.push(dripsBlk);
     const contLine = String(values.contingencies || '').trim();
     if (contLine) blocks.push(`Contingencies: ${contLine}`);
     const labsTxt = String(values.labs || '').trim();
@@ -3450,8 +3491,8 @@ export function buildStructuredShiftUpdate({
       }
       case 'meds': {
         const medBlocks = [];
-        const dripsTxt = String(values.drips || '').trim();
-        if (dripsTxt) medBlocks.push(`Drips: ${dripsTxt}`);
+        const dripsBlk = formatDripsMarkdownBlock(values.drips);
+        if (dripsBlk) medBlocks.push(dripsBlk);
         const medLines = normalizeStructuredLines(values.meds);
         if (medLines.length) medBlocks.push(`Medications:\n${medLines.join('\n')}`);
         if (medBlocks.length) blocks.push(medBlocks.join('\n\n'));

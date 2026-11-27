@@ -141,6 +141,7 @@ import {
   scanVaultEntries,
   listVaultMarkdownFiles,
   readVaultFile,
+  readFreshNoteFromVault,
   writeVaultFile,
   deleteVaultFile,
   syncVaultDirectory,
@@ -711,6 +712,7 @@ let vaultSyncProgress = null;
 let vaultBannerDismissed = false;
 let vaultActiveOnly = safeGetItem(VAULT_ACTIVE_ONLY_KEY, '0') === '1';
 const vaultWriteQueues = new Map();
+const vaultPendingMirrorIds = new Set();
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -977,7 +979,34 @@ function updateVaultUi() {
   renderVaultSyncProgress(vaultSyncProgress);
 }
 
-async function mirrorNoteToVault(note) {
+async function refreshNoteFromVaultIfClean(noteId) {
+  if (!noteId || !vaultDirHandle || vaultPermission !== 'granted' || !isDirectoryPickerSupported()) {
+    return null;
+  }
+  const existing = notes.find((x) => x.id === noteId);
+  if (!existing || !existing.sourceFileName || existing.localDirtySync) {
+    return existing || null;
+  }
+  if (currentMode === 'editor' && currentId === noteId && dirtyChart) {
+    return existing;
+  }
+  try {
+    const res = await readFreshNoteFromVault(vaultDirHandle, existing);
+    if (res.updated && res.note) {
+      const idx = notes.findIndex((n) => n.id === noteId);
+      if (idx !== -1) notes[idx] = res.note;
+      await rawPutNote(res.note);
+      return res.note;
+    }
+    return existing;
+  } catch {
+    return existing;
+  }
+}
+
+async function mirrorNoteToVault(noteOrId) {
+  const noteId = typeof noteOrId === 'string' ? noteOrId : noteOrId?.id;
+  const note = (noteId && notes.find((x) => x.id === noteId)) || (typeof noteOrId === 'object' ? noteOrId : null);
   if (!note || !vaultDirHandle || !isDirectoryPickerSupported()) return;
   if (isUneditedSyntheticNote(note)) return;
 
@@ -1000,18 +1029,18 @@ async function mirrorNoteToVault(note) {
   try {
     const existingDisk = await readVaultFile(vaultDirHandle, targetName);
     const localHash = hashContent(note.content);
-    if (
-      existingDisk &&
-      note.sourceContentHash &&
-      existingDisk.hash !== note.sourceContentHash &&
-      existingDisk.hash !== localHash
-    ) {
-      const conflictName = buildConflictFileName(targetName, new Date());
-      await writeVaultFile(vaultDirHandle, conflictName, existingDisk.content);
-      toast(`Obsidian conflict saved to "${conflictName}"`);
+    let written;
+    if (existingDisk && existingDisk.hash === localHash) {
+      written = {
+        name: existingDisk.name || targetName,
+        lastModified: existingDisk.lastModified || Date.now(),
+        size: note.content.length,
+        hash: existingDisk.hash,
+      };
+    } else {
+      written = await writeVaultFile(vaultDirHandle, targetName, note.content);
     }
 
-    const written = await writeVaultFile(vaultDirHandle, targetName, note.content);
     note.sourceFileName = written.name;
     note.sourceLastModified = written.lastModified;
     note.sourceFileSize = typeof written.size === 'number' ? written.size : -1;
@@ -1035,20 +1064,30 @@ async function mirrorNoteToVault(note) {
   }
 }
 
-function enqueueVaultMirror(note) {
-  if (!note?.id) return Promise.resolve();
-  const prev = vaultWriteQueues.get(note.id) || Promise.resolve();
-  const next = prev.catch(() => {}).then(() => mirrorNoteToVault(note));
-  vaultWriteQueues.set(note.id, next);
+function enqueueVaultMirror(noteOrId) {
+  const id = typeof noteOrId === 'string' ? noteOrId : noteOrId?.id;
+  if (!id) return Promise.resolve();
+  const prev = vaultWriteQueues.get(id) || Promise.resolve();
+  if (vaultPendingMirrorIds.has(id)) {
+    return prev;
+  }
+  vaultPendingMirrorIds.add(id);
+  const next = prev
+    .catch(() => {})
+    .then(() => {
+      vaultPendingMirrorIds.delete(id);
+      return mirrorNoteToVault(id);
+    });
+  vaultWriteQueues.set(id, next);
   return next;
 }
 
-async function put(note, { skipVaultMirror = false } = {}) {
+async function put(note, { skipVaultMirror = false, deferVaultMirror = false } = {}) {
   if (!skipVaultMirror && vaultDirHandle && !isUneditedSyntheticNote(note)) {
     note.localDirtySync = true;
   }
   await rawPutNote(note);
-  if (!skipVaultMirror) {
+  if (!skipVaultMirror && !deferVaultMirror) {
     await enqueueVaultMirror(note);
   }
 }
@@ -1408,7 +1447,7 @@ function markChartDirty() {
   chartAutosaveTimer = setTimeout(() => {
     if (dirtyChart && currentId) {
       updateSaveStatusPill('saving');
-      saveCurrent(null, { silent: true }).catch(() => updateSaveStatusPill('unsaved'));
+      saveCurrent(null, { silent: true, deferVaultMirror: true }).catch(() => updateSaveStatusPill('unsaved'));
     }
   }, 650);
 }
@@ -1443,6 +1482,11 @@ async function flushPendingChartSave() {
   }
   if (dirtyChart) {
     await saveCurrent(null, { silent: true });
+  } else {
+    const curr = notes.find((n) => n.id === currentId);
+    if (curr?.localDirtySync && vaultDirHandle && vaultPermission === 'granted') {
+      await enqueueVaultMirror(curr.id);
+    }
   }
 }
 
@@ -1853,6 +1897,7 @@ async function setMode(mode) {
     lastRoundsScrollY = window.scrollY;
   }
   if (currentMode === 'editor' && mode !== 'editor') {
+    setRawMdFullscreen(false);
     await flushPendingChartSave();
   }
   if (mode === 'editor' && currentId) {
@@ -2485,7 +2530,7 @@ function renderRounds() {
 
         <div class="ledger-body">
           ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
-          ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${esc(pt.drips)}</span></div>` : ''}
+          ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${pt.drips.split(/\s*\|\s*/).map((d) => esc(d)).join('<br>')}</span></div>` : ''}
           <div class="ledger-params">${paramRows.join('')}</div>
           ${medsAccordion}
           ${plansAccordion}
@@ -2913,8 +2958,8 @@ function renderShiftGuidedForm() {
         <div class="shift-field-card-head"><span class="shift-field-card-title">Drips &amp; Medications</span></div>
         <div class="shift-field-subgrid">
           <div class="field">
-            <label for="sfDrips">Active Drips / Infusions</label>
-            <input id="sfDrips" data-sf-key="drips" value="${esc(shiftFormValues.drips)}" placeholder="e.g. Norepinephrine @ 0.08 mcg/kg/min">
+            <label for="sfDrips">Active Drips / Infusions (one per line)</label>
+            <textarea id="sfDrips" data-sf-key="drips" rows="2" placeholder="One drip per line (e.g. Norepinephrine at 1.4mkm (42.2cc/h))">${esc(shiftFormValues.drips)}</textarea>
           </div>
           <div class="field">
             <label for="sfMeds">Medications (one per line)</label>
@@ -3022,8 +3067,8 @@ function renderShiftGuidedForm() {
             <div class="shift-field-card-head"><span class="shift-field-card-title">Medications / Drips</span></div>
             <div class="shift-field-subgrid">
               <div class="field">
-                <label for="sfDrips">Active Drips / Infusions</label>
-                <input id="sfDrips" data-sf-key="drips" value="${esc(shiftFormValues.drips)}" placeholder="e.g. Norepinephrine @ 0.08 mcg/kg/min">
+                <label for="sfDrips">Active Drips / Infusions (one per line)</label>
+                <textarea id="sfDrips" data-sf-key="drips" rows="2" placeholder="One drip per line (e.g. Norepinephrine at 1.4mkm (42.2cc/h))">${esc(shiftFormValues.drips)}</textarea>
               </div>
               <div class="field">
                 <label for="sfMeds">Medication List (one per line)</label>
@@ -3143,7 +3188,9 @@ function applyCarryForwardToggleToShiftForm(changedId = null) {
   }
   if (!changedId || changedId === 'cfStanding') {
     shiftFormValues.vent = carryStanding ? cfData.vent || '' : '';
-    shiftFormValues.drips = carryStanding ? cfData.drips || '' : '';
+    shiftFormValues.drips = carryStanding
+      ? String(cfData.drips || '').split(/\s*\|\s*/).filter(Boolean).join('\n')
+      : '';
     shiftFormValues.meds = carryStanding ? (parsed.medications || []).join('\n') : '';
     domMap.sfVent = shiftFormValues.vent;
     domMap.sfDrips = shiftFormValues.drips;
@@ -3185,8 +3232,8 @@ function updateShiftPreview(forceRebuild = false) {
   syncShiftPreviewFromForm({ forceRawUpdate: true });
 }
 
-function openShiftModal(noteId, triggerEl = null) {
-  const note = notes.find((n) => n.id === noteId);
+async function openShiftModal(noteId, triggerEl = null) {
+  const note = (await refreshNoteFromVaultIfClean(noteId)) || notes.find((n) => n.id === noteId);
   if (!note) return;
 
   shiftingNoteId = noteId;
@@ -6188,8 +6235,8 @@ function rerecordTelegram() {
   }
 }
 
-function openDictateModal(noteId, triggerEl = null) {
-  const note = notes.find((n) => n.id === noteId);
+async function openDictateModal(noteId, triggerEl = null) {
+  const note = (await refreshNoteFromVaultIfClean(noteId)) || notes.find((n) => n.id === noteId);
   if (!note) return;
 
   dictatingNoteId = noteId;
@@ -6696,6 +6743,18 @@ function renderProfileLinesList() {
 }
 
 let currentProfileCompletedAbx = [];
+let profileAbxEditIdx = null;
+
+function resetProfileAbxForm() {
+  profileAbxEditIdx = null;
+  if ($('addAbxDrugInput')) $('addAbxDrugInput').value = '';
+  if ($('addAbxFreqSelect')) $('addAbxFreqSelect').value = 'q8h';
+  if ($('addAbxDateInput')) $('addAbxDateInput').value = '';
+  if ($('addAbxTimeInput')) $('addAbxTimeInput').value = nowHhMm();
+  if ($('addAbxDaysInput')) $('addAbxDaysInput').value = '';
+  if ($('addAbxBtn')) $('addAbxBtn').textContent = 'Add Abx';
+  if ($('cancelProfileAbxEditBtn')) $('cancelProfileAbxEditBtn').hidden = true;
+}
 
 function renderProfileAbxList() {
   const container = $('profileAbxList');
@@ -6716,15 +6775,21 @@ function renderProfileAbxList() {
   container.innerHTML = items
     .map(
       (it, idx) => `
-      <div class="tracked-row ${it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : ''}">
+      <div class="tracked-row ${it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : ''} ${profileAbxEditIdx === idx ? 'is-editing' : ''}">
         <span class="tracked-row-lbl">${esc(it.label)}${it.freq ? ` <span class="cf-meta">· ${esc(it.freq)}${it.startTime ? ` @ ${esc(it.startTime)}` : ''}</span>` : ''}</span>
-        <button type="button" class="ghost-action sm-btn tracked-del-abx-btn" data-idx="${idx}" aria-label="Remove ${esc(it.drug)}">${uiIcon('x')}</button>
+        <div class="tracked-row-actions">
+          <button type="button" class="ghost-action sm-btn tracked-edit-abx-btn" data-idx="${idx}" aria-label="Edit ${esc(it.drug)}" title="Edit">${uiIcon('pencil')}</button>
+          <button type="button" class="ghost-action sm-btn tracked-del-abx-btn" data-idx="${idx}" aria-label="Remove ${esc(it.drug)}" title="Remove">${uiIcon('x')}</button>
+        </div>
       </div>`
     )
     .join('');
 }
 
 function populateProfileInputs(note = {}, content = '', preserveAliases = false) {
+  if (!preserveAliases) {
+    resetProfileAbxForm();
+  }
   const m = metaOf(content);
   const parsed = parseChart(content, note);
   const derivedName = parsed.name && parsed.name !== 'Unknown Patient' ? parsed.name : '';
@@ -6859,8 +6924,42 @@ function refreshActiveEditorView() {
   else if (editorViewMode === 'labs') renderChartLabsSummary();
 }
 
+let rawMdFullscreen = false;
+
+function setRawMdFullscreen(enabled) {
+  rawMdFullscreen = Boolean(enabled) && currentMode === 'editor' && editorViewMode === 'raw';
+  const pane = $('chartRawPane');
+  const btn = $('rawMdExpandBtn');
+  const saveBtn = $('rawMdFsSaveBtn');
+  const titleEl = $('rawMdFsTitle');
+  const lblEl = $('rawMdLabel');
+  if (pane) pane.classList.toggle('is-fullscreen', rawMdFullscreen);
+  document.body.classList.toggle('raw-md-fs-open', rawMdFullscreen);
+  if (btn) {
+    btn.setAttribute('aria-pressed', String(rawMdFullscreen));
+    btn.innerHTML = rawMdFullscreen
+      ? `${uiIcon('minimize')}<span>Exit</span>`
+      : `${uiIcon('maximize')}<span>Fullscreen</span>`;
+  }
+  if (saveBtn) saveBtn.hidden = !rawMdFullscreen;
+  if (lblEl) lblEl.hidden = rawMdFullscreen;
+  if (titleEl) {
+    titleEl.hidden = !rawMdFullscreen;
+    if (rawMdFullscreen) {
+      const note = notes.find((n) => n.id === currentId);
+      const room = $('roomInput')?.value.trim() || note?.room || '';
+      const name = $('nameInput')?.value.trim() || note?.name || note?.title || 'Raw Markdown';
+      titleEl.textContent = room ? `${room} · ${name}` : name;
+    }
+  }
+  if (rawMdFullscreen && $('noteText')) {
+    requestAnimationFrame(() => $('noteText').focus());
+  }
+}
+
 function setEditorView(mode) {
   editorViewMode = mode;
+  if (mode !== 'raw') setRawMdFullscreen(false);
   $('chartTimelinePane').hidden = mode !== 'timeline';
   $('chartLabsPane').hidden = mode !== 'labs';
   $('chartRawPane').hidden = mode !== 'raw';
@@ -7696,7 +7795,7 @@ async function select(id, opts = {}) {
   if (!opts.skipFlush && currentId && currentId !== id && dirtyChart) {
     await flushPendingChartSave();
   }
-  const n = notes.find((x) => x.id === id);
+  const n = (await refreshNoteFromVaultIfClean(id)) || notes.find((x) => x.id === id);
   if (!n) return;
   currentId = id;
   if (currentMode === 'editor') lastEditedRoundsId = id;
@@ -7819,7 +7918,7 @@ async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
     title: nextTitle,
     updated: Date.now(),
   };
-  await put(updatedNote);
+  await put(updatedNote, { deferVaultMirror: Boolean(opts.deferVaultMirror) });
   dirtyChart = false;
   lastSavedChartContent = text;
   clearRecoveryDraft('chart');
@@ -8647,23 +8746,65 @@ $('addAbxBtn')?.addEventListener('click', () => {
   const startTime = $('addAbxTimeInput')?.value.trim() || nowHhMm();
   const plannedNum = parseInt($('addAbxDaysInput')?.value || '', 10);
   const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
-  currentProfileAbx.push({ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 });
-  if ($('addAbxDrugInput')) $('addAbxDrugInput').value = '';
-  if ($('addAbxDateInput')) $('addAbxDateInput').value = '';
-  if ($('addAbxDaysInput')) $('addAbxDaysInput').value = '';
+  const wasEditing = profileAbxEditIdx !== null && Boolean(currentProfileAbx[profileAbxEditIdx]);
+  if (wasEditing) {
+    const prev = currentProfileAbx[profileAbxEditIdx];
+    currentProfileAbx[profileAbxEditIdx] = {
+      drug,
+      startDate,
+      plannedDays,
+      freq,
+      startTime,
+      doseOffset: prev.doseOffset || 0,
+    };
+  } else {
+    currentProfileAbx.push({ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 });
+  }
+  resetProfileAbxForm();
   renderProfileAbxList();
   syncProfileInputsToMarkdown();
   markChartDirty();
+  if (wasEditing) toast(`Updated ${drug}`);
+});
+$('cancelProfileAbxEditBtn')?.addEventListener('click', () => {
+  resetProfileAbxForm();
+  renderProfileAbxList();
 });
 $('profileAbxList')?.addEventListener('click', (e) => {
+  const editBtn = e.target.closest('.tracked-edit-abx-btn[data-idx]');
+  if (editBtn) {
+    const idx = parseInt(editBtn.dataset.idx, 10);
+    const target = currentProfileAbx[idx];
+    if (!target) return;
+    profileAbxEditIdx = idx;
+    if ($('addAbxDrugInput')) $('addAbxDrugInput').value = target.drug || '';
+    if ($('addAbxFreqSelect')) $('addAbxFreqSelect').value = target.freq || 'q8h';
+    if ($('addAbxDateInput')) $('addAbxDateInput').value = target.startDate || '';
+    if ($('addAbxTimeInput')) $('addAbxTimeInput').value = target.startTime || '08:00';
+    if ($('addAbxDaysInput')) $('addAbxDaysInput').value = target.plannedDays ? String(target.plannedDays) : '';
+    if ($('addAbxBtn')) $('addAbxBtn').textContent = 'Save Abx';
+    if ($('cancelProfileAbxEditBtn')) $('cancelProfileAbxEditBtn').hidden = false;
+    renderProfileAbxList();
+    $('addAbxDrugInput')?.focus();
+    return;
+  }
+
   const btn = e.target.closest('.tracked-del-abx-btn[data-idx]');
   if (!btn) return;
   const idx = parseInt(btn.dataset.idx, 10);
   if (Number.isNaN(idx)) return;
   currentProfileAbx.splice(idx, 1);
+  if (profileAbxEditIdx === idx) resetProfileAbxForm();
+  else if (profileAbxEditIdx !== null && idx < profileAbxEditIdx) profileAbxEditIdx--;
   renderProfileAbxList();
   syncProfileInputsToMarkdown();
   markChartDirty();
+});
+$('rawMdExpandBtn')?.addEventListener('click', () => {
+  setRawMdFullscreen(!rawMdFullscreen);
+});
+$('rawMdFsSaveBtn')?.addEventListener('click', () => {
+  saveCurrent('Saved on this device');
 });
 if ($('censusToggle')) {
   $('censusToggle').onchange = () => {
@@ -9756,6 +9897,20 @@ $('inboxFileBtn').onclick = async () => {
 
 // Quick Antibiotics Tracker modal (Rounds pop-up)
 let abxModalNoteId = null;
+let abxModalEditIdx = null;
+
+function resetAbxModalForm() {
+  abxModalEditIdx = null;
+  if ($('abxModalFormTitle')) $('abxModalFormTitle').textContent = 'Start / Add Antibiotic';
+  if ($('abxModalAddBtn')) $('abxModalAddBtn').innerHTML = `${uiIcon('plus')} Add Antibiotic`;
+  if ($('abxModalCancelEditBtn')) $('abxModalCancelEditBtn').hidden = true;
+  if ($('abxModalDrugInput')) $('abxModalDrugInput').value = '';
+  if ($('abxModalFreqSelect')) $('abxModalFreqSelect').value = 'q8h';
+  if ($('abxModalDaysInput')) $('abxModalDaysInput').value = '';
+  if ($('abxModalDateInput')) $('abxModalDateInput').value = getTodayDateStrings().yyyymmdd;
+  if ($('abxModalTimeInput')) $('abxModalTimeInput').value = nowHhMm();
+  updateAbxModalLivePreview();
+}
 
 function getActiveAbxNoteContent(note) {
   if (!note) return '';
@@ -9858,12 +10013,13 @@ function renderAbxModal() {
           .join(' · ');
 
         return `
-          <div class="abx-modal-row ${statusCls}">
+          <div class="abx-modal-row ${statusCls} ${abxModalEditIdx === idx ? 'is-editing' : ''}">
             <div class="abx-modal-row-main">
               <div class="abx-modal-row-title">${esc(it.label)}</div>
               <div class="abx-modal-row-meta">${esc(scheduleDesc)}</div>
             </div>
             <div class="abx-modal-row-actions">
+              <button type="button" class="ghost-action sm-btn abx-edit-btn" data-idx="${idx}" title="Edit antibiotic name, schedule, or start date/time">Edit</button>
               ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="-1" title="Mark 1 dose held / missed">-1 Held</button>` : ''}
               ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="1" title="Count 1 additional dose given">+1 Dose</button>` : ''}
               <button type="button" class="btn-secondary sm-btn abx-finish-btn" data-idx="${idx}" title="Complete course and log into today's shift">Finish</button>
@@ -9890,19 +10046,15 @@ function renderAbxModal() {
   }
 }
 
-function openAbxModal(noteId, triggerEl = null) {
-  const note = notes.find((n) => n.id === noteId);
+async function openAbxModal(noteId, triggerEl = null) {
+  const note = (await refreshNoteFromVaultIfClean(noteId)) || notes.find((n) => n.id === noteId);
   if (!note) return;
   abxModalNoteId = noteId;
   const parsed = parseChart(getActiveAbxNoteContent(note), note);
   if ($('abxModalSubtitle')) {
     $('abxModalSubtitle').textContent = `${parsed.room || 'Unassigned'} · ${parsed.name || 'Patient'}`;
   }
-  if ($('abxModalDrugInput')) $('abxModalDrugInput').value = '';
-  if ($('abxModalFreqSelect')) $('abxModalFreqSelect').value = 'q8h';
-  if ($('abxModalDaysInput')) $('abxModalDaysInput').value = '';
-  if ($('abxModalDateInput')) $('abxModalDateInput').value = getTodayDateStrings().yyyymmdd;
-  if ($('abxModalTimeInput')) $('abxModalTimeInput').value = nowHhMm();
+  resetAbxModalForm();
   if ($('abxModalCompletedDetails')) $('abxModalCompletedDetails').open = false;
 
   renderAbxModal();
@@ -9911,12 +10063,17 @@ function openAbxModal(noteId, triggerEl = null) {
 }
 
 function closeAbxModal() {
+  resetAbxModalForm();
   abxModalNoteId = null;
   closeModalEl($('abxModal'));
 }
 
 $('abxModalClose')?.addEventListener('click', closeAbxModal);
 $('abxModalDoneBtn')?.addEventListener('click', closeAbxModal);
+$('abxModalCancelEditBtn')?.addEventListener('click', () => {
+  resetAbxModalForm();
+  renderAbxModal();
+});
 
 ['abxModalDrugInput', 'abxModalFreqSelect', 'abxModalDaysInput', 'abxModalDateInput', 'abxModalTimeInput'].forEach((id) => {
   if (!$(id)) return;
@@ -9936,22 +10093,31 @@ $('abxModalForm')?.addEventListener('submit', async (e) => {
   const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
 
   const parsed = parseChart(getActiveAbxNoteContent(note), note);
-  const nextActive = [
-    ...(parsed.trackedAntibiotics || []).map((it) => ({
-      drug: it.drug,
-      startDate: it.startDate,
-      plannedDays: it.plannedDays,
-      freq: it.freq,
-      startTime: it.startTime,
-      doseOffset: it.doseOffset || 0,
-    })),
-    { drug, startDate, plannedDays, freq, startTime, doseOffset: 0 },
-  ];
+  const nextActive = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+  }));
+  const wasEditing = abxModalEditIdx !== null && Boolean(nextActive[abxModalEditIdx]);
+  if (wasEditing) {
+    const prev = nextActive[abxModalEditIdx];
+    nextActive[abxModalEditIdx] = {
+      drug,
+      startDate,
+      plannedDays,
+      freq,
+      startTime,
+      doseOffset: prev.doseOffset || 0,
+    };
+  } else {
+    nextActive.push({ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 });
+  }
+  resetAbxModalForm();
   await saveAbxStateToChart(note, nextActive, parsed.completedAntibiotics || []);
-  if ($('abxModalDrugInput')) $('abxModalDrugInput').value = '';
-  if ($('abxModalDaysInput')) $('abxModalDaysInput').value = '';
-  updateAbxModalLivePreview();
-  toast(`Added ${drug}`);
+  toast(wasEditing ? `Updated ${drug}` : `Added ${drug}`);
 });
 
 $('abxModalActiveList')?.addEventListener('click', async (e) => {
@@ -9968,6 +10134,28 @@ $('abxModalActiveList')?.addEventListener('click', async (e) => {
     dayCount: it.dayCount,
   }));
   const completed = (parsed.completedAntibiotics || []).map((c) => ({ ...c }));
+
+  const editBtn = e.target.closest('.abx-edit-btn[data-idx]');
+  if (editBtn) {
+    const idx = parseInt(editBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    abxModalEditIdx = idx;
+    if ($('abxModalFormTitle')) $('abxModalFormTitle').textContent = 'Edit Antibiotic';
+    if ($('abxModalAddBtn')) $('abxModalAddBtn').innerHTML = `${uiIcon('check')} Save Changes`;
+    if ($('abxModalCancelEditBtn')) $('abxModalCancelEditBtn').hidden = false;
+    if ($('abxModalDrugInput')) $('abxModalDrugInput').value = target.drug || '';
+    if ($('abxModalFreqSelect')) $('abxModalFreqSelect').value = target.freq || 'q8h';
+    if ($('abxModalDaysInput')) $('abxModalDaysInput').value = target.plannedDays ? String(target.plannedDays) : '';
+    if ($('abxModalDateInput')) {
+      $('abxModalDateInput').value = dateStringToIso(target.startDate) || getTodayDateStrings().yyyymmdd;
+    }
+    if ($('abxModalTimeInput')) $('abxModalTimeInput').value = target.startTime || '08:00';
+    renderAbxModal();
+    updateAbxModalLivePreview();
+    $('abxModalDrugInput')?.focus();
+    return;
+  }
 
   const offsetBtn = e.target.closest('.abx-offset-btn[data-idx]');
   if (offsetBtn) {
@@ -9986,6 +10174,8 @@ $('abxModalActiveList')?.addEventListener('click', async (e) => {
     const idx = parseInt(finishBtn.dataset.idx, 10);
     const target = active[idx];
     if (!target) return;
+    if (abxModalEditIdx === idx) resetAbxModalForm();
+    else if (abxModalEditIdx !== null && idx < abxModalEditIdx) abxModalEditIdx--;
     active.splice(idx, 1);
     const todayStr = getTodayDateStrings().mmddyyyy;
     const doneDays = target.dayCount !== null && target.dayCount !== undefined ? target.dayCount : 0;
@@ -10008,6 +10198,8 @@ $('abxModalActiveList')?.addEventListener('click', async (e) => {
     const idx = parseInt(removeBtn.dataset.idx, 10);
     const target = active[idx];
     if (!target) return;
+    if (abxModalEditIdx === idx) resetAbxModalForm();
+    else if (abxModalEditIdx !== null && idx < abxModalEditIdx) abxModalEditIdx--;
     active.splice(idx, 1);
     await saveAbxStateToChart(note, active, completed);
     toast(`Removed ${target.drug}`);
@@ -10969,6 +11161,7 @@ document.querySelectorAll('.modal-overlay').forEach((overlay) => {
     else if (overlay.id === 'inboxModal') closeInboxModal(false);
     else if (overlay.id === 'calcModal') closeCalcModal();
     else if (overlay.id === 'pitchModal') closePitchModal();
+    else if (overlay.id === 'abxModal') closeAbxModal();
     else if (overlay.id === 'restoreModal' || overlay.id === 'manualCopyModal') closeModalEl(overlay);
   });
 });
@@ -10976,6 +11169,11 @@ document.querySelectorAll('.modal-overlay').forEach((overlay) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (!activeModalEl || activeModalEl.hidden)) {
     closeAllMenus();
+    if (rawMdFullscreen) {
+      e.preventDefault();
+      setRawMdFullscreen(false);
+      return;
+    }
   }
   if (activeModalEl && !activeModalEl.hidden) {
     if (e.key === 'Escape') {
@@ -10987,6 +11185,7 @@ document.addEventListener('keydown', (e) => {
       else if (activeModalEl.id === 'inboxModal') closeInboxModal(false);
       else if (activeModalEl.id === 'calcModal') closeCalcModal();
       else if (activeModalEl.id === 'pitchModal') closePitchModal();
+      else if (activeModalEl.id === 'abxModal') closeAbxModal();
       else closeModalEl(activeModalEl);
       return;
     }

@@ -50,6 +50,12 @@
     <symbol id="ico-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M9 18l6-6-6-6"/>
     </symbol>
+    <symbol id="ico-maximize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+    </symbol>
+    <symbol id="ico-minimize" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/>
+    </symbol>
     <symbol id="ico-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
       <path d="M21 3v6h-6"/>
@@ -583,6 +589,7 @@
                 <input id="addAbxTimeInput" type="time" aria-label="First dose time">
                 <input id="addAbxDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="Days">
                 <button type="button" id="addAbxBtn" class="btn-secondary sm-btn">Add Abx</button>
+                <button type="button" id="cancelProfileAbxEditBtn" class="ghost-action sm-btn" hidden>Cancel</button>
               </div>
             </div>
           </div>
@@ -660,7 +667,16 @@
       </div>
 
       <div id="chartRawPane" hidden>
-        <label for="noteText" class="lbl">Raw Markdown file — stays on this phone</label>
+        <div class="raw-md-bar">
+          <div class="raw-md-bar-left">
+            <label for="noteText" class="lbl" id="rawMdLabel">Raw Markdown file — stays on this phone</label>
+            <span id="rawMdFsTitle" class="raw-md-fs-title" hidden></span>
+          </div>
+          <div class="raw-md-bar-actions">
+            <button type="button" id="rawMdFsSaveBtn" class="primary sm-btn" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg> Save</button>
+            <button type="button" id="rawMdExpandBtn" class="ghost-action sm-btn" aria-pressed="false" title="Toggle fullscreen markdown editor"><svg class="ui-ico" aria-hidden="true"><use href="#ico-maximize"></use></svg><span>Fullscreen</span></button>
+          </div>
+        </div>
         <textarea id="noteText" spellcheck="false" placeholder="---&#10;name: Juan B. Dela Cruz&#10;room: 412&#10;---&#10;&#10;# Progress note"></textarea>
       </div>
 
@@ -1729,7 +1745,7 @@
       </div>
 
       <form id="abxModalForm" class="abx-form-card">
-        <div class="abx-section-title mb-8">Start / Add Antibiotic</div>
+        <div id="abxModalFormTitle" class="abx-section-title mb-8">Start / Add Antibiotic</div>
         <div class="abx-form-grid">
           <div class="field abx-field-span2">
             <label for="abxModalDrugInput">Antibiotic &amp; Dose</label>
@@ -1762,6 +1778,7 @@
         <div id="abxModalLivePreview" class="abx-live-preview"></div>
         <div class="abx-form-actions">
           <button type="submit" id="abxModalAddBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Antibiotic</button>
+          <button type="button" id="abxModalCancelEditBtn" class="ghost-action" hidden>Cancel Edit</button>
         </div>
       </form>
 
