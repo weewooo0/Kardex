@@ -1,4 +1,4 @@
-const CACHE = 'kardex-v73';
+const CACHE = 'kardex-v75';
 const WHISPER_RUNTIME_CACHE = 'companion-md-whisper-runtime';
 const SHELL = [
   './',

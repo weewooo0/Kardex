@@ -1,7 +1,8 @@
 // On-device deterministic clinical calculators & guideline pre-pass audits
 // Strictly follows CLINICAL-WORKFLOW-STE.md §8 and §11. Pure local computation — zero network calls.
 
-import { parseChart, metaOf, getTodayDateStrings } from './census.js';
+import { parseChart, metaOf, getTodayDateStrings, extractClinicalMetricsFromBlock } from './census.js';
+import { parseRawLabs } from './labs.js';
 
 export const DRIP_PRESETS = [
   {
@@ -420,14 +421,27 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
               /^(?:µmol|umol|mmol)/i.test(unit) ||
               /(?:Creatinine|Creat|Crea|SCr|Cr)\b[^|;\n]{0,30}(?:µmol\/?L|umol\/?L)/i.test(trimmed);
             const stale = ageDays !== null && ageDays > maxCrAgeDays;
-            lineCr = {
-              value: num,
-              unit: umolOnLine ? unit || 'umol/L' : unit || 'mg/dL',
-              invalidUnit: umolOnLine,
-              date: sec.date || 'Undated',
-              ageDays,
-              stale,
-            };
+            if (umolOnLine && options.unitSystem === 'si') {
+              lineCr = {
+                value: roundTo(num / 88.4, 2),
+                unit: 'mg/dL',
+                invalidUnit: false,
+                rawSiValue: num,
+                rawSiUnit: unit || 'µmol/L',
+                date: sec.date || 'Undated',
+                ageDays,
+                stale,
+              };
+            } else {
+              lineCr = {
+                value: num,
+                unit: umolOnLine ? unit || 'umol/L' : unit || 'mg/dL',
+                invalidUnit: umolOnLine,
+                date: sec.date || 'Undated',
+                ageDays,
+                stale,
+              };
+            }
           }
           if (lineCr) creatinine = lineCr;
         }
@@ -507,6 +521,7 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
   const ov = options.overrides || {};
   const finalAge = parsePositiveNumber(ov.age, 1, 120) ?? age;
   const finalSex = normalizeSex(ov.sex) || sex;
+  const heightCm = parsePositiveNumber(ov.heightCm ?? parsed.heightCm ?? meta.height_cm ?? meta.height, 80, 250);
 
   const ovWeightKg = parsePositiveNumber(ov.weightKg, 1, 400);
   const finalWeight =
@@ -535,11 +550,80 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
         }
       : creatinine;
 
+  // Extract structured latest labs & vitals for auto-filled Physiology & Scores
+  const latestLabsMap = {};
+  const labKeyToField = {
+    Na: 'na', K: 'k', Cl: 'cl', HCO3: 'hco3', BUN: 'bun', Cr: 'cr',
+    Glu: 'glu', Ca: 'ca', Alb: 'alb', TBili: 'tbili', INR: 'inr',
+    pH: 'ph', pCO2: 'pco2', pO2: 'po2', Lactate: 'lactate',
+  };
+  for (const sec of dateSectionsDesc) {
+    const shiftsDesc = splitShiftChunks(sec.text).reverse();
+    for (const blk of shiftsDesc) {
+      const metrics = extractClinicalMetricsFromBlock(blk);
+      if (metrics.labs) {
+        const parsedItems = parseRawLabs(metrics.labs);
+        for (const it of parsedItems) {
+          const fld = labKeyToField[it.key];
+          if (fld && latestLabsMap[fld] === undefined && Number.isFinite(it.num)) {
+            if (it.key === 'Cr' && creatinine?.invalidUnit) continue;
+            latestLabsMap[fld] = it.num;
+          }
+        }
+      }
+      if (blk.includes('ABG') || /\bpH\b|\bpCO2\b|\bpO2\b/i.test(blk)) {
+        const abgItems = parseRawLabs(blk);
+        for (const it of abgItems) {
+          const fld = labKeyToField[it.key];
+          if (fld && latestLabsMap[fld] === undefined && Number.isFinite(it.num)) {
+            if (it.key === 'Cr' && creatinine?.invalidUnit) continue;
+            latestLabsMap[fld] = it.num;
+          }
+        }
+      }
+    }
+  }
+  if (finalCr && !finalCr.invalidUnit && finalCr.value !== null) {
+    latestLabsMap.cr = finalCr.value;
+  }
+
+  const vitalRaw = String(parsed.vitals || '');
+  const ventRaw = String(parsed.vent || '');
+  const bpMatch = vitalRaw.match(/\b(?:BP|NIBP)?\s*(\d{2,3})\s*\/\s*(\d{2,3})\b/i);
+  const hrMatch = vitalRaw.match(/\b(?:HR|PR|CR)\s*[:=]?\s*(\d{2,3})\b/i);
+  const rrMatch = vitalRaw.match(/\bRR\s*[:=]?\s*(\d{1,2})\b/i);
+  const tempMatch = vitalRaw.match(/\b(?:Tmax|Temp|T)\s*[:=]?\s*(\d{2}(?:\.\d+)?)\s*(?:°?\s*[CF])?/i);
+  const spo2Match = vitalRaw.match(/\b(?:SpO2|O2sat|O2\s*sat|O2)\s*[:=]?\s*(\d{2,3})\s*%?/i);
+  const fio2VentMatch = ventRaw.match(/\bFiO2\s*[:=]?\s*(\d{2,3})\s*%?/i);
+  const fio2VitalMatch = vitalRaw.match(/\b(?:FiO2\s*(\d{2,3})\s*%|(\d{1,2})\s*L\s*(?:NC|FM|O2)|on\s+(?:Vent|MV|BiPAP|CPAP|HFNC))\b/i);
+
+  let fio2Pct = null;
+  if (fio2VentMatch) {
+    fio2Pct = parsePositiveNumber(fio2VentMatch[1], 21, 100);
+  } else if (fio2VitalMatch) {
+    if (fio2VitalMatch[1]) fio2Pct = parsePositiveNumber(fio2VitalMatch[1], 21, 100);
+    else if (fio2VitalMatch[2]) fio2Pct = Math.min(100, 20 + 4 * parseInt(fio2VitalMatch[2], 10));
+  } else if (/\b(?:RA|Room\s*Air)\b/i.test(vitalRaw)) {
+    fio2Pct = 21;
+  }
+
+  const vitalsExtracted = {
+    sbp: bpMatch ? parsePositiveNumber(bpMatch[1], 30, 300) : null,
+    dbp: bpMatch ? parsePositiveNumber(bpMatch[2], 15, 220) : null,
+    hr: hrMatch ? parsePositiveNumber(hrMatch[1], 20, 260) : null,
+    rr: rrMatch ? parsePositiveNumber(rrMatch[1], 4, 80) : null,
+    tempC: tempMatch ? parsePositiveNumber(tempMatch[1], 28, 45) : null,
+    spo2: spo2Match ? parsePositiveNumber(spo2Match[1], 40, 100) : null,
+    onO2: Boolean((fio2Pct !== null && fio2Pct > 21) || /\b(?:Vent|MV|NC|FM|BiPAP|CPAP|HFNC|FiO2|O2\b)/i.test(`${vitalRaw} ${ventRaw}`) && !/\b(?:RA|Room\s*Air)\b/i.test(vitalRaw)),
+    fio2Pct,
+  };
+
   return {
     parsed,
     todayStr,
     age: finalAge,
     sex: finalSex,
+    heightCm,
     weight: finalWeight,
     creatinine: finalCr,
     potassium,
@@ -547,6 +631,11 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
     chartedEgfr,
     chartedCrCl,
     medLines,
+    allergies: parsed.allergies || '',
+    trackedLines: parsed.trackedLines || [],
+    trackedAntibiotics: parsed.trackedAntibiotics || [],
+    labs: latestLabsMap,
+    vitals: vitalsExtracted,
   };
 }
 
@@ -882,6 +971,100 @@ const INTERACTION_RULES = [
  * Checks active medication lines (+ optional proposed drug) for clinically significant interactions.
  * Formats each finding per STE §8.7: `drug A + drug B -> effect -> action`.
  */
+const ALLERGY_CONFLICT_RULES = [
+  {
+    allergyRe: /\b(?:penicillin|pcn|amoxicillin|ampicillin|piperacillin|beta-?lactam)\b/i,
+    medRe: /\b(?:penicillin|amoxicillin|ampicillin|co-?amoxiclav|augmentin|piperacillin|pip-?tazo|tazocin|nafcillin|oxacillin|cef\w+|ceph\w+|meropenem|ertapenem|imipenem)\b/i,
+    note: 'Beta-lactam cross-reactivity risk',
+  },
+  {
+    allergyRe: /\b(?:sulfa|sulfonamide|sulfamethoxazole|bactrim|cotrimoxazole|tmp-?smx)\b/i,
+    medRe: /\b(?:sulfamethoxazole|bactrim|cotrimoxazole|tmp-?smx|sulfasalazine|furosemide|hydrochlorothiazide|hctz|celecoxib|acetazolamide)\b/i,
+    note: 'Sulfonamide hypersensitivity / structural overlap',
+  },
+  {
+    allergyRe: /\b(?:nsaid|aspirin|asa|ibuprofen|ketorolac|naproxen|diclofenac|celecoxib)\b/i,
+    medRe: /\b(?:aspirin|asa\b|ibuprofen|ketorolac|naproxen|diclofenac|celecoxib|indomethacin|meloxicam|mefenamic)\b/i,
+    note: 'NSAID / ASA sensitivity',
+  },
+  {
+    allergyRe: /\b(?:morphine|opioid|codeine|tramadol|fentanyl|oxycodone|hydromorphone)\b/i,
+    medRe: /\b(?:morphine|codeine|tramadol|fentanyl|oxycodone|hydromorphone|meperidine)\b/i,
+    note: 'Opioid class allergy documented',
+  },
+  {
+    allergyRe: /\b(?:vancomycin|vanc)\b/i,
+    medRe: /\b(?:vancomycin|vanc)\b/i,
+    note: 'Direct vancomycin reaction history',
+  },
+  {
+    allergyRe: /\b(?:acei|ace\s*inhibitor|enalapril|lisinopril|captopril|ramipril)\b/i,
+    medRe: /\b(?:enalapril|lisinopril|captopril|ramipril|perindopril)\b/i,
+    note: 'ACE inhibitor angioedema/cough risk',
+  },
+  {
+    allergyRe: /\b(?:contrast|iodine|radiocontrast)\b/i,
+    medRe: /\b(?:amiodarone|iodinated\s*contrast|ct\s*w\/\s*contrast|iv\s*contrast)\b/i,
+    note: 'Iodine / contrast sensitivity documented',
+  },
+];
+
+export function checkAllergyConflicts(allergiesText, medLines = [], extraDrug = '') {
+  const cleanAllergy = String(allergiesText || '').trim();
+  if (!cleanAllergy || /^(?:nkda|nka|none|nil|no\s+known\s+drug\s+allerg(?:y|ies)|-)$/i.test(cleanAllergy)) {
+    return [];
+  }
+  const meds = [...(Array.isArray(medLines) ? medLines : [String(medLines || '')])];
+  if (String(extraDrug || '').trim()) meds.push(String(extraDrug).trim());
+  const medJoined = meds.join('\n');
+  if (!medJoined.trim()) return [];
+
+  const findings = [];
+  const seen = new Set();
+
+  for (const rule of ALLERGY_CONFLICT_RULES) {
+    const aMatch = cleanAllergy.match(rule.allergyRe);
+    const mMatch = medJoined.match(rule.medRe);
+    if (aMatch && mMatch) {
+      const key = `${aMatch[0].toLowerCase()}->${mMatch[0].toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        findings.push({
+          allergen: aMatch[0],
+          medication: mMatch[0],
+          note: rule.note,
+          question: `Chart documents allergy "${cleanAllergy}" while ${mMatch[0]} is active/proposed (${rule.note}) — has allergy safety been verified?`,
+        });
+      }
+    }
+  }
+
+  // Fallback custom direct token match for drugs not in preset table
+  const allergyTokens = cleanAllergy
+    .replace(/\([^)]*\)/g, ' ')
+    .split(/[,;/]+/)
+    .map((s) => s.trim())
+    .filter((t) => t.length >= 4 && !/^(?:rash|hives|itch|anaphylaxis|reaction|allergy|mild|severe)$/i.test(t));
+  for (const token of allergyTokens) {
+    const re = new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    const hit = medJoined.match(re);
+    if (hit) {
+      const key = `direct->${hit[0].toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        findings.push({
+          allergen: token,
+          medication: hit[0],
+          note: 'Direct allergen match',
+          question: `Chart documents allergy "${cleanAllergy}" matching active/proposed ${hit[0]} — should this agent be held or clarified?`,
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
 export function checkDrugInteractions(medLines = [], extraDrug = '') {
   const combined = [...(Array.isArray(medLines) ? medLines : [String(medLines || '')])];
   if (String(extraDrug || '').trim()) {
@@ -1040,6 +1223,52 @@ export function runClinicalAudit(note, options = {}) {
     }
   }
 
+  // Trigger: Allergy cross-check
+  const allergyConflicts = checkAllergyConflicts(inputs.allergies, inputs.medLines, options.extraDrug || '');
+  for (const ac of allergyConflicts) {
+    addFlag({
+      severity: 'warn',
+      criterion: 'Allergy Cross-Check',
+      question: ac.question,
+      missingEvidence: `Documented allergy: ${inputs.allergies}`,
+      source: 'Allergy Safety Pre-Pass',
+    });
+  }
+
+  // Trigger: Overdue Lines / Drains / Airways
+  for (const line of inputs.trackedLines || []) {
+    if (line.overdue) {
+      addFlag({
+        severity: 'warn',
+        criterion: 'Line / Device Duration Check',
+        question: `${line.name} is on Day ${line.dayCount} (>= ${line.thresholdDays}d institutional threshold) — is it still clinically indicated or due for removal/exchange?`,
+        missingEvidence: `Start date: ${line.startDate}`,
+        source: 'CLABSI / CAUTI Stewardship Check',
+      });
+    }
+  }
+
+  // Trigger: Antibiotic Day Check (due or overdue)
+  for (const ab of inputs.trackedAntibiotics || []) {
+    if (ab.overdue) {
+      addFlag({
+        severity: 'warn',
+        criterion: 'Antibiotic Duration Stewardship',
+        question: `${ab.label} has exceeded planned/7-day review window — should therapy be stopped or de-escalated?`,
+        missingEvidence: `Started: ${ab.startDate}`,
+        source: 'Antimicrobial Stewardship Check',
+      });
+    } else if (ab.dueSoon) {
+      addFlag({
+        severity: 'ask',
+        criterion: 'Antibiotic Completion Today',
+        question: `${ab.label} reaches planned end day today — confirm stop vs extension?`,
+        missingEvidence: `Started: ${ab.startDate}`,
+        source: 'Antimicrobial Stewardship Check',
+      });
+    }
+  }
+
   // Trigger: Drug interactions formatted as questions for team confirmation
   for (const ix of interactions) {
     addFlag({
@@ -1055,6 +1284,7 @@ export function runClinicalAudit(note, options = {}) {
     inputs,
     renal,
     interactions,
+    allergyConflicts,
     flags,
   };
 }
@@ -1240,5 +1470,542 @@ export function calculatePumpRateFromTargetDose({
     }),
     targetDose: dose,
     targetUnit: tUnit,
+  };
+}
+
+/**
+ * Deterministic Bedside Physiology Calculators (Western ICU / Internal Medicine):
+ * Anion Gap, Albumin-Corrected AG, Delta-Delta, Corrected Na, Corrected Ca,
+ * P/F Ratio + Berlin ARDS Band, A-a Gradient, and Devine PBW / 6-8 mL/kg ARDS Vt.
+ */
+export function calculatePhysiology({
+  na = null,
+  cl = null,
+  hco3 = null,
+  alb = null,
+  glu = null,
+  ca = null,
+  pao2 = null,
+  paco2 = null,
+  fio2Pct = null,
+  heightCm = null,
+  sex = '',
+  age = null,
+} = {}) {
+  const nNa = parsePositiveNumber(na, 80, 200);
+  const nCl = parsePositiveNumber(cl, 50, 160);
+  const nHco3 = parsePositiveNumber(hco3, 2, 60);
+  const nAlb = parsePositiveNumber(alb, 0.5, 8);
+  const nGlu = parsePositiveNumber(glu, 10, 2000);
+  const nCa = parsePositiveNumber(ca, 2, 20);
+  const nPao2 = parsePositiveNumber(pao2, 10, 700);
+  const nPaco2 = parsePositiveNumber(paco2, 5, 160);
+  const nFio2 = parsePositiveNumber(fio2Pct, 21, 100);
+  const nHt = parsePositiveNumber(heightCm, 100, 250);
+  const normSex = normalizeSex(sex);
+  const nAge = parsePositiveNumber(age, 1, 120);
+
+  // 1. Anion Gap & Delta-Delta
+  let anionGap = null;
+  let correctedAg = null;
+  let deltaDelta = null;
+  let agStatus = 'NOT_AVAILABLE';
+  let agNote = 'Requires Na, Cl, and HCO3';
+  if (nNa !== null && nCl !== null && nHco3 !== null) {
+    anionGap = roundTo(nNa - (nCl + nHco3), 1);
+    agStatus = 'OK';
+    if (nAlb !== null) {
+      correctedAg = roundTo(anionGap + 2.5 * (4.0 - nAlb), 1);
+    }
+    const agUsed = correctedAg !== null ? correctedAg : anionGap;
+    if (agUsed > 12 && nHco3 < 24) {
+      const ratio = roundTo((agUsed - 12) / (24 - nHco3), 2);
+      deltaDelta = ratio;
+      if (ratio < 1) agNote = `HAGMA + concurrent non-AG acidosis (delta/delta ${ratio})`;
+      else if (ratio <= 2) agNote = `Pure HAGMA likely (delta/delta ${ratio})`;
+      else agNote = `HAGMA + concurrent metabolic alkalosis (delta/delta ${ratio})`;
+    } else if (agUsed > 12) {
+      agNote = 'Elevated anion gap (>= 12 mEq/L)';
+    } else {
+      agNote = 'Normal anion gap (< 12 mEq/L)';
+    }
+  }
+
+  // 2. Corrected Sodium (Katz formula)
+  let correctedNa = null;
+  let correctedNaNote = 'Requires Na and Glucose (mg/dL)';
+  if (nNa !== null && nGlu !== null) {
+    correctedNa = roundTo(nNa + 0.016 * (nGlu - 100), 1);
+    correctedNaNote = nGlu > 140 ? 'Adjusted for hyperglycemia (Katz +1.6/100)' : 'Glucose near normal';
+  }
+
+  // 3. Corrected Calcium
+  let correctedCa = null;
+  let correctedCaNote = 'Requires Calcium (mg/dL) and Albumin (g/dL)';
+  if (nCa !== null && nAlb !== null) {
+    correctedCa = roundTo(nCa + 0.8 * (4.0 - nAlb), 2);
+    correctedCaNote = correctedCa < 8.5 ? 'Hypocalcemia (< 8.5)' : correctedCa > 10.5 ? 'Hypercalcemia (> 10.5)' : 'Normal corrected range (8.5-10.5)';
+  }
+
+  // 4. P/F Ratio & Berlin ARDS Severity
+  let pfRatio = null;
+  let pfBand = '';
+  let pfNote = 'Requires PaO2 (mmHg) and FiO2 (%)';
+  if (nPao2 !== null && nFio2 !== null) {
+    pfRatio = Math.round(nPao2 / (nFio2 / 100));
+    if (pfRatio >= 400) pfBand = 'Normal (>= 400)';
+    else if (pfRatio > 300) pfBand = 'Mild hypoxemia (301-399)';
+    else if (pfRatio > 200) pfBand = 'Mild ARDS range (201-300)';
+    else if (pfRatio > 100) pfBand = 'Moderate ARDS range (101-200)';
+    else pfBand = 'Severe ARDS range (<= 100)';
+    pfNote = `${pfBand} · FiO2 ${nFio2}%`;
+  }
+
+  // 5. A-a Gradient
+  let aaGradient = null;
+  let expectedAa = null;
+  let aaNote = 'Requires PaO2, PaCO2, and FiO2 (%)';
+  if (nPao2 !== null && nPaco2 !== null && nFio2 !== null) {
+    const pao2Alveolar = (nFio2 / 100) * 713 - nPaco2 / 0.8;
+    aaGradient = roundTo(pao2Alveolar - nPao2, 1);
+    expectedAa = nAge !== null ? roundTo(nAge / 4 + 4, 1) : null;
+    aaNote = expectedAa !== null ? `Expected normal ~ ${expectedAa} mmHg (Age/4 + 4)` : 'Normal ~ 5-15 mmHg on RA';
+  }
+
+  // 6. Devine PBW & ARDS Tidal Volume Target (6-8 mL/kg)
+  let pbwKg = null;
+  let vt6Ml = null;
+  let vt8Ml = null;
+  let pbwNote = 'Requires Height (cm) and Sex (M/F)';
+  if (nHt !== null && normSex) {
+    const base = normSex === 'M' ? 50 : 45.5;
+    pbwKg = roundTo(base + 0.91 * (nHt - 152.4), 1);
+    vt6Ml = Math.round(pbwKg * 6);
+    vt8Ml = Math.round(pbwKg * 8);
+    pbwNote = `6-8 mL/kg PBW = ${vt6Ml}-${vt8Ml} mL`;
+  }
+
+  return {
+    anionGap: { status: agStatus, value: anionGap, correctedAg, deltaDelta, note: agNote },
+    correctedNa: { status: correctedNa !== null ? 'OK' : 'NOT_AVAILABLE', value: correctedNa, note: correctedNaNote },
+    correctedCa: { status: correctedCa !== null ? 'OK' : 'NOT_AVAILABLE', value: correctedCa, note: correctedCaNote },
+    pfRatio: { status: pfRatio !== null ? 'OK' : 'NOT_AVAILABLE', value: pfRatio, band: pfBand, note: pfNote },
+    aaGradient: { status: aaGradient !== null ? 'OK' : 'NOT_AVAILABLE', value: aaGradient, expectedNormal: expectedAa, note: aaNote },
+    pbwArds: { status: pbwKg !== null ? 'OK' : 'NOT_AVAILABLE', pbwKg, vt6Ml, vt8Ml, note: pbwNote },
+  };
+}
+
+/**
+ * RCP UK NEWS2 (National Early Warning Score 2)
+ */
+export function calculateNEWS2({
+  rr = null,
+  spo2 = null,
+  onO2 = false,
+  scale2 = false,
+  sbp = null,
+  hr = null,
+  tempC = null,
+  consciousness = 'A', // A | C | V | P | U
+} = {}) {
+  const nRr = parsePositiveNumber(rr, 1, 80);
+  const nSpo2 = parsePositiveNumber(spo2, 30, 100);
+  const nSbp = parsePositiveNumber(sbp, 20, 320);
+  const nHr = parsePositiveNumber(hr, 10, 300);
+  const nTemp = parsePositiveNumber(tempC, 25, 45);
+  const avpu = String(consciousness || 'A').trim().toUpperCase();
+
+  const missing = [];
+  if (nRr === null) missing.push('RR');
+  if (nSpo2 === null) missing.push('SpO2');
+  if (nSbp === null) missing.push('SBP');
+  if (nHr === null) missing.push('HR');
+  if (nTemp === null) missing.push('Temp (°C)');
+
+  const breakdown = [];
+  let total = 0;
+  let singleThree = false;
+  const addPart = (label, pts) => {
+    total += pts;
+    if (pts === 3) singleThree = true;
+    breakdown.push(`${label}: +${pts}`);
+  };
+
+  if (nRr !== null) {
+    let pts = 0;
+    if (nRr <= 8 || nRr >= 25) pts = 3;
+    else if (nRr >= 21) pts = 2;
+    else if (nRr <= 11) pts = 1;
+    addPart(`RR ${nRr}`, pts);
+  }
+
+  if (nSpo2 !== null) {
+    let pts = 0;
+    if (scale2) {
+      if (nSpo2 <= 83) pts = 3;
+      else if (nSpo2 <= 85) pts = 2;
+      else if (nSpo2 <= 87) pts = 1;
+      else if (nSpo2 <= 92 || !onO2) pts = 0;
+      else if (nSpo2 <= 94) pts = 1;
+      else if (nSpo2 <= 96) pts = 2;
+      else pts = 3;
+    } else {
+      if (nSpo2 <= 91) pts = 3;
+      else if (nSpo2 <= 93) pts = 2;
+      else if (nSpo2 <= 95) pts = 1;
+      else pts = 0;
+    }
+    addPart(`SpO2 ${nSpo2}%`, pts);
+  }
+
+  addPart(onO2 ? 'Supp O2: Yes' : 'Room Air', onO2 ? 2 : 0);
+
+  if (nTemp !== null) {
+    let pts = 0;
+    if (nTemp <= 35.0) pts = 3;
+    else if (nTemp >= 39.1) pts = 2;
+    else if (nTemp <= 36.0 || nTemp >= 38.1) pts = 1;
+    addPart(`Temp ${nTemp}C`, pts);
+  }
+
+  if (nSbp !== null) {
+    let pts = 0;
+    if (nSbp <= 90 || nSbp >= 220) pts = 3;
+    else if (nSbp <= 100) pts = 2;
+    else if (nSbp <= 110) pts = 1;
+    addPart(`SBP ${nSbp}`, pts);
+  }
+
+  if (nHr !== null) {
+    let pts = 0;
+    if (nHr <= 40 || nHr >= 131) pts = 3;
+    else if (nHr >= 111) pts = 2;
+    else if (nHr <= 50 || nHr >= 91) pts = 1;
+    addPart(`HR ${nHr}`, pts);
+  }
+
+  addPart(`ACVPU: ${avpu}`, avpu === 'A' ? 0 : 3);
+
+  let risk = 'Low (0-4)';
+  let response = 'Ward monitoring q4-6h';
+  if (total >= 7) {
+    risk = 'High (>= 7)';
+    response = 'Urgent critical care / senior team review + continuous monitoring';
+  } else if (total >= 5 || singleThree) {
+    risk = singleThree && total < 5 ? 'Low-Medium (single 3)' : 'Medium (5-6)';
+    response = 'Urgent clinician review + hourly obs';
+  }
+
+  return {
+    name: 'NEWS2',
+    score: missing.length ? null : total,
+    partialScore: total,
+    missing,
+    singleThree,
+    risk: missing.length ? `Incomplete (${missing.join(', ')} needed)` : risk,
+    summary: missing.length ? `Partial NEWS2 ${total} (missing ${missing.join(', ')})` : `NEWS2 ${total} (${risk}) — ${response}`,
+    breakdown,
+  };
+}
+
+export function calculateQSOFA({ rr = null, sbp = null, alteredMentalStatus = false } = {}) {
+  const nRr = parsePositiveNumber(rr, 1, 80);
+  const nSbp = parsePositiveNumber(sbp, 20, 320);
+  const missing = [];
+  if (nRr === null) missing.push('RR');
+  if (nSbp === null) missing.push('SBP');
+
+  const ptsRr = nRr !== null && nRr >= 22 ? 1 : 0;
+  const ptsSbp = nSbp !== null && nSbp <= 100 ? 1 : 0;
+  const ptsAms = alteredMentalStatus ? 1 : 0;
+  const score = ptsRr + ptsSbp + ptsAms;
+  const highRisk = score >= 2;
+  const breakdown = [
+    `RR >= 22 (${nRr ?? '—'}): +${ptsRr}`,
+    `SBP <= 100 (${nSbp ?? '—'}): +${ptsSbp}`,
+    `Altered mentation (GCS < 15): +${ptsAms}`,
+  ];
+  return {
+    name: 'qSOFA',
+    score: missing.length ? null : score,
+    missing,
+    risk: highRisk ? 'High risk (>= 2)' : 'Low risk (0-1)',
+    summary: missing.length
+      ? `qSOFA partial ${score}/3 (missing ${missing.join(', ')})`
+      : `qSOFA ${score}/3 (${highRisk ? 'Sepsis high-risk >= 2' : 'Below >= 2 threshold'})`,
+    breakdown,
+  };
+}
+
+export function calculateCURB65({
+  confusion = false,
+  bunMgDl = null,
+  rr = null,
+  sbp = null,
+  dbp = null,
+  age = null,
+} = {}) {
+  const nBun = parsePositiveNumber(bunMgDl, 0.5, 300);
+  const nRr = parsePositiveNumber(rr, 1, 80);
+  const nSbp = parsePositiveNumber(sbp, 20, 320);
+  const nDbp = parsePositiveNumber(dbp, 10, 220);
+  const nAge = parsePositiveNumber(age, 1, 120);
+
+  const missing = [];
+  if (nBun === null) missing.push('BUN');
+  if (nRr === null) missing.push('RR');
+  if (nSbp === null && nDbp === null) missing.push('BP');
+  if (nAge === null) missing.push('Age');
+
+  const pC = confusion ? 1 : 0;
+  const pU = nBun !== null && nBun > 19 ? 1 : 0; // BUN > 19 mg/dL (> 7 mmol/L)
+  const pR = nRr !== null && nRr >= 30 ? 1 : 0;
+  const pB = (nSbp !== null && nSbp < 90) || (nDbp !== null && nDbp <= 60) ? 1 : 0;
+  const p65 = nAge !== null && nAge >= 65 ? 1 : 0;
+  const score = pC + pU + pR + pB + p65;
+  const risk = score >= 3 ? 'High (consider ICU)' : score === 2 ? 'Moderate (inpatient admission)' : 'Low (outpatient consideration)';
+  return {
+    name: 'CURB-65',
+    score: missing.length ? null : score,
+    missing,
+    risk,
+    summary: missing.length ? `CURB-65 partial ${score}/5 (missing ${missing.join(', ')})` : `CURB-65 ${score}/5 — ${risk}`,
+    breakdown: [
+      `Confusion: +${pC}`,
+      `BUN > 19 mg/dL (${nBun ?? '—'}): +${pU}`,
+      `RR >= 30 (${nRr ?? '—'}): +${pR}`,
+      `BP < 90 or <= 60 (${nSbp ?? '—'}/${nDbp ?? '—'}): +${pB}`,
+      `Age >= 65 (${nAge ?? '—'}): +${p65}`,
+    ],
+  };
+}
+
+export function calculateMELDNa({
+  crMgDl = null,
+  tbiliMgDl = null,
+  inr = null,
+  na = null,
+  dialysis = false,
+} = {}) {
+  const rawCr = parsePositiveNumber(crMgDl, 0.1, 30);
+  const rawBili = parsePositiveNumber(tbiliMgDl, 0.1, 80);
+  const rawInr = parsePositiveNumber(inr, 0.5, 20);
+  const rawNa = parsePositiveNumber(na, 100, 180);
+
+  const missing = [];
+  if (rawCr === null && !dialysis) missing.push('SCr');
+  if (rawBili === null) missing.push('Total Bili');
+  if (rawInr === null) missing.push('INR');
+  if (rawNa === null) missing.push('Na');
+
+  if (missing.length) {
+    return {
+      name: 'MELD-Na',
+      score: null,
+      missing,
+      risk: `Missing ${missing.join(', ')}`,
+      summary: `MELD-Na incomplete (missing ${missing.join(', ')})`,
+      breakdown: [],
+    };
+  }
+
+  let cr = dialysis ? 4.0 : Math.max(1.0, Math.min(4.0, rawCr));
+  if (rawCr !== null && rawCr > 4.0) cr = 4.0;
+  const bili = Math.max(1.0, rawBili);
+  const inrVal = Math.max(1.0, rawInr);
+  const naVal = Math.max(125, Math.min(137, rawNa));
+
+  const meldRaw = 3.78 * Math.log(bili) + 11.2 * Math.log(inrVal) + 9.57 * Math.log(cr) + 6.43;
+  const meld = Math.round(meldRaw);
+  let meldNa = meld;
+  if (meld > 11) {
+    meldNa = Math.round(meld + 1.32 * (137 - naVal) - 0.033 * meld * (137 - naVal));
+  }
+  const finalScore = Math.max(6, Math.min(40, meldNa));
+  const risk = finalScore >= 30 ? 'Critical (>= 30)' : finalScore >= 20 ? 'High (20-29)' : finalScore >= 10 ? 'Moderate (10-19)' : 'Low (< 10)';
+
+  return {
+    name: 'MELD-Na',
+    score: finalScore,
+    meldBase: Math.max(6, Math.min(40, meld)),
+    missing: [],
+    risk,
+    summary: `MELD-Na ${finalScore} (MELD(i) ${Math.max(6, Math.min(40, meld))}) — ${risk}`,
+    breakdown: [
+      `Cr clamped: ${cr} mg/dL${dialysis ? ' (Dialysis 2x/wk = 4.0)' : ''}`,
+      `Bili clamped: ${bili} mg/dL`,
+      `INR clamped: ${inrVal}`,
+      `Na clamped: ${naVal} mEq/L`,
+    ],
+  };
+}
+
+export function calculateCHA2DS2VASc({
+  chf = false,
+  htn = false,
+  age = null,
+  dm = false,
+  strokeTia = false,
+  vascular = false,
+  female = false,
+} = {}) {
+  const nAge = parsePositiveNumber(age, 1, 120) || 0;
+  const pAge = nAge >= 75 ? 2 : nAge >= 65 ? 1 : 0;
+  const score =
+    (chf ? 1 : 0) +
+    (htn ? 1 : 0) +
+    pAge +
+    (dm ? 1 : 0) +
+    (strokeTia ? 2 : 0) +
+    (vascular ? 1 : 0) +
+    (female ? 1 : 0);
+
+  const nonSexPoints = score - (female ? 1 : 0);
+  const risk =
+    nonSexPoints >= 2
+      ? 'Oral anticoagulation recommended'
+      : nonSexPoints === 1
+        ? 'Consider oral anticoagulation'
+        : 'Low thromboembolic risk';
+  return {
+    name: 'CHA2DS2-VASc',
+    score,
+    missing: [],
+    risk,
+    summary: `CHA2DS2-VASc ${score}/9 — ${risk}`,
+    breakdown: [
+      `CHF: +${chf ? 1 : 0}`,
+      `Hypertension: +${htn ? 1 : 0}`,
+      `Age ${nAge || '—'}: +${pAge}`,
+      `Diabetes: +${dm ? 1 : 0}`,
+      `Stroke/TIA/TE: +${strokeTia ? 2 : 0}`,
+      `Vascular disease: +${vascular ? 1 : 0}`,
+      `Female sex category: +${female ? 1 : 0}`,
+    ],
+  };
+}
+
+export function calculateHASBLED({
+  htnUncontrolled = false,
+  abnormalRenal = false,
+  abnormalLiver = false,
+  stroke = false,
+  bleeding = false,
+  labileInr = false,
+  ageOver65 = false,
+  drugs = false,
+  alcohol = false,
+} = {}) {
+  const score =
+    (htnUncontrolled ? 1 : 0) +
+    (abnormalRenal ? 1 : 0) +
+    (abnormalLiver ? 1 : 0) +
+    (stroke ? 1 : 0) +
+    (bleeding ? 1 : 0) +
+    (labileInr ? 1 : 0) +
+    (ageOver65 ? 1 : 0) +
+    (drugs ? 1 : 0) +
+    (alcohol ? 1 : 0);
+  const risk = score >= 3 ? 'High bleed risk (>= 3) — address modifiable factors' : 'Low-Moderate bleed risk (0-2)';
+  return {
+    name: 'HAS-BLED',
+    score,
+    missing: [],
+    risk,
+    summary: `HAS-BLED ${score}/9 — ${risk}`,
+    breakdown: [
+      `Uncontrolled HTN (SBP >160): +${htnUncontrolled ? 1 : 0}`,
+      `Abnormal renal function: +${abnormalRenal ? 1 : 0}`,
+      `Abnormal liver function: +${abnormalLiver ? 1 : 0}`,
+      `Stroke history: +${stroke ? 1 : 0}`,
+      `Prior major bleeding/predisposition: +${bleeding ? 1 : 0}`,
+      `Labile INR: +${labileInr ? 1 : 0}`,
+      `Age > 65: +${ageOver65 ? 1 : 0}`,
+      `Antiplatelets / NSAIDs: +${drugs ? 1 : 0}`,
+      `Alcohol use (>= 8 drinks/wk): +${alcohol ? 1 : 0}`,
+    ],
+  };
+}
+
+export function calculateWellsPE({
+  dvtSigns = false,
+  peMostLikely = false,
+  hrOver100 = false,
+  immobSurgery = false,
+  prevDvtPe = false,
+  hemoptysis = false,
+  malignancy = false,
+} = {}) {
+  const score = roundTo(
+    (dvtSigns ? 3 : 0) +
+      (peMostLikely ? 3 : 0) +
+      (hrOver100 ? 1.5 : 0) +
+      (immobSurgery ? 1.5 : 0) +
+      (prevDvtPe ? 1.5 : 0) +
+      (hemoptysis ? 1 : 0) +
+      (malignancy ? 1 : 0),
+    1
+  );
+  const risk = score > 4 ? 'PE Likely (> 4.0) — CTPA recommended' : 'PE Unlikely (<= 4.0) — consider D-dimer / PERC';
+  return {
+    name: 'Wells PE',
+    score,
+    missing: [],
+    risk,
+    summary: `Wells PE ${score} — ${risk}`,
+    breakdown: [
+      `Clinical signs of DVT (+3): ${dvtSigns ? '3' : '0'}`,
+      `PE is #1 / equally likely (+3): ${peMostLikely ? '3' : '0'}`,
+      `HR > 100 bpm (+1.5): ${hrOver100 ? '1.5' : '0'}`,
+      `Immobilization / surgery <=4w (+1.5): ${immobSurgery ? '1.5' : '0'}`,
+      `Prior DVT/PE (+1.5): ${prevDvtPe ? '1.5' : '0'}`,
+      `Hemoptysis (+1): ${hemoptysis ? '1' : '0'}`,
+      `Active malignancy (+1): ${malignancy ? '1' : '0'}`,
+    ],
+  };
+}
+
+export function calculateWellsDVT({
+  activeCancer = false,
+  paralysisImmob = false,
+  bedriddenSurgery = false,
+  localizedTenderness = false,
+  entireLegSwollen = false,
+  calfSwelling3cm = false,
+  pittingEdema = false,
+  collateralVeins = false,
+  prevDvt = false,
+  altDxLikely = false,
+} = {}) {
+  const score =
+    (activeCancer ? 1 : 0) +
+    (paralysisImmob ? 1 : 0) +
+    (bedriddenSurgery ? 1 : 0) +
+    (localizedTenderness ? 1 : 0) +
+    (entireLegSwollen ? 1 : 0) +
+    (calfSwelling3cm ? 1 : 0) +
+    (pittingEdema ? 1 : 0) +
+    (collateralVeins ? 1 : 0) +
+    (prevDvt ? 1 : 0) +
+    (altDxLikely ? -2 : 0);
+  const risk = score >= 2 ? 'DVT Likely (>= 2) — venous duplex ultrasound' : 'DVT Unlikely (< 2) — consider D-dimer';
+  return {
+    name: 'Wells DVT',
+    score,
+    missing: [],
+    risk,
+    summary: `Wells DVT ${score} — ${risk}`,
+    breakdown: [
+      `Active cancer (+1): ${activeCancer ? '1' : '0'}`,
+      `Paralysis/paresis/immobilization (+1): ${paralysisImmob ? '1' : '0'}`,
+      `Bedridden >3d / major surgery <=12w (+1): ${bedriddenSurgery ? '1' : '0'}`,
+      `Deep venous tenderness (+1): ${localizedTenderness ? '1' : '0'}`,
+      `Entire leg swollen (+1): ${entireLegSwollen ? '1' : '0'}`,
+      `Calf swelling >3cm (+1): ${calfSwelling3cm ? '1' : '0'}`,
+      `Pitting edema (+1): ${pittingEdema ? '1' : '0'}`,
+      `Collateral superficial veins (+1): ${collateralVeins ? '1' : '0'}`,
+      `Previous DVT (+1): ${prevDvt ? '1' : '0'}`,
+      `Alternative dx at least as likely (-2): ${altDxLikely ? '-2' : '0'}`,
+    ],
   };
 }

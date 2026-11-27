@@ -27,14 +27,28 @@ import {
   formatChartLabSummaryText,
   formatChartLabSummaryMarkdown,
   formatChartLabSummaryCsv,
+  LAB_UNIT_SYSTEMS,
+  convertLabValue,
+  getLabUnitMeta,
+  buildFishboneData,
 } from './labs.js';
 import {
   DRIP_PRESETS,
   extractClinicalInputs,
   checkDrugInteractions,
+  checkAllergyConflicts,
   runClinicalAudit,
   calculateDripRate,
   calculatePumpRateFromTargetDose,
+  calculatePhysiology,
+  calculateNEWS2,
+  calculateQSOFA,
+  calculateCURB65,
+  calculateMELDNa,
+  calculateCHA2DS2VASc,
+  calculateHASBLED,
+  calculateWellsPE,
+  calculateWellsDVT,
 } from './clinical.js';
 import {
    WHISPER_MODELS,
@@ -99,6 +113,19 @@ import {
   parseAiDictationResponse,
   applyDictationPeCarryover,
   verifyAppendedChart,
+  PLAN_MODES,
+  HANDOVER_FORMATS,
+  CODE_STATUS_OPTIONS,
+  SEVERITY_LEVELS,
+  ABX_FREQUENCIES,
+  FASTHUG_BID_ITEMS,
+  parseTrackedLines,
+  formatTrackedLines,
+  parseTrackedAntibiotics,
+  formatTrackedAntibiotics,
+  parseCompletedAntibiotics,
+  formatCompletedAntibiotics,
+  buildPrintableScutsheetData,
 } from './census.js';
 
 const DB = 'companion-md', STORE = 'notes';
@@ -133,7 +160,10 @@ const SHIFT_SCHEDULE_KEY = 'cm.shiftSchedule';
 const THEME_KEY = 'cm.theme';
 const LAST_DARK_THEME_KEY = 'cm.lastDarkTheme';
 const ACCENT_KEY = 'cm.accent';
-const VALID_SETTINGS_TABS = new Set(['appearance', 'shifts', 'template', 'ai', 'voice', 'storage']);
+const PLAN_MODE_KEY = 'cm.planMode';
+const UNIT_SYSTEM_KEY = 'cm.unitSystem';
+const HANDOVER_FORMAT_KEY = 'cm.handoverFormat';
+const VALID_SETTINGS_TABS = new Set(['appearance', 'clinical', 'shifts', 'template', 'ai', 'voice', 'storage']);
 
 const RESERVED_CATEGORY_NAMES = new Set([
   'all',
@@ -249,10 +279,14 @@ const expandedApIds = new Set();
 const rawSavedSettingsTab = safeGetItem(SETTINGS_TAB_KEY, 'appearance');
 let activeSettingsTab = VALID_SETTINGS_TABS.has(rawSavedSettingsTab) ? rawSavedSettingsTab : 'appearance';
 let currentThemeId = normalizeThemeId(safeGetItem(THEME_KEY, 'obsidian'));
+let currentPlanMode = PLAN_MODES[safeGetItem(PLAN_MODE_KEY, 'service')] ? safeGetItem(PLAN_MODE_KEY, 'service') : 'service';
+let currentUnitSystem = LAB_UNIT_SYSTEMS[safeGetItem(UNIT_SYSTEM_KEY, 'conventional')] ? safeGetItem(UNIT_SYSTEM_KEY, 'conventional') : 'conventional';
+let currentHandoverFormat = HANDOVER_FORMATS[safeGetItem(HANDOVER_FORMAT_KEY, 'standard')] ? safeGetItem(HANDOVER_FORMAT_KEY, 'standard') : 'standard';
 let backupBannerDismissed = false;
 
 const SETTINGS_PANEL_IDS = {
   appearance: 'settingsPanelAppearance',
+  clinical: 'settingsPanelClinical',
   shifts: 'settingsPanelShifts',
   template: 'settingsPanelTemplate',
   ai: 'settingsPanelAi',
@@ -384,7 +418,9 @@ function setSettingsTab(tabId, { persist = true, focus = false } = {}) {
     if (panel) panel.hidden = key !== next;
   }
 
-  if (next === 'shifts') {
+  if (next === 'clinical') {
+    renderClinicalSettings();
+  } else if (next === 'shifts') {
     renderShiftScheduleSettings();
   } else if (next === 'template') {
     renderTemplateBuilder();
@@ -458,6 +494,122 @@ function initAppearanceSettings() {
       applyAppearance(card.dataset.themeId, { persist: true });
     });
   }
+}
+
+function setPlanMode(mode, { persist = true } = {}) {
+  const next = PLAN_MODES[mode] ? mode : 'service';
+  currentPlanMode = next;
+  if (persist) safeSetItem(PLAN_MODE_KEY, next);
+  renderClinicalSettings();
+  if (currentMode === 'rounds') renderRounds();
+  if (!$('shiftModal')?.hidden) {
+    renderShiftGuidedForm();
+    syncShiftPreviewFromForm({ forceRawUpdate: !shiftRawEdited });
+  }
+}
+
+function setUnitSystem(sys, { persist = true } = {}) {
+  const next = LAB_UNIT_SYSTEMS[sys] ? sys : 'conventional';
+  currentUnitSystem = next;
+  if (persist) safeSetItem(UNIT_SYSTEM_KEY, next);
+  renderClinicalSettings();
+  if ($('labsUnitToggle')) {
+    $('labsUnitToggle').querySelectorAll('[data-unit-sys]').forEach((btn) => {
+      const active = btn.dataset.unitSys === next;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+  }
+  if (currentMode === 'editor' && editorViewMode === 'labs') renderChartLabsSummary();
+  if (!$('calcModal')?.hidden) {
+    renderAuditPane();
+  }
+}
+
+function setHandoverFormat(fmt, { persist = true } = {}) {
+  const next = HANDOVER_FORMATS[fmt] ? fmt : 'standard';
+  currentHandoverFormat = next;
+  if (persist) safeSetItem(HANDOVER_FORMAT_KEY, next);
+  renderClinicalSettings();
+  if ($('handoverFormatSelect') && $('handoverModal') && !$('handoverModal').hidden) {
+    $('handoverFormatSelect').value = next;
+    rebuildHandoverReport();
+  }
+}
+
+function renderClinicalSettings() {
+  const planMeta = [
+    { id: 'service', title: 'Service Plans', desc: 'ID, Pulmo, Cardio, Nephro specialty plans' },
+    { id: 'problem', title: 'Problem-Based A&P', desc: '#1 Sepsis, #2 AKI, #3 AF problem list' },
+    { id: 'systems', title: 'Systems-Based ICU', desc: 'Neuro, CV, Pulm, Renal + FASTHUG-BID' },
+  ];
+  const planGrid = $('clinicalPlanModeGrid');
+  if (planGrid) {
+    planGrid.innerHTML = planMeta
+      .map((item) => {
+        const checked = currentPlanMode === item.id;
+        return `<button type="button" class="clinical-option-card" role="radio" aria-checked="${checked}" data-plan-mode="${item.id}"><span class="clinical-option-title">${esc(item.title)}</span><span class="clinical-option-desc">${esc(item.desc)}</span></button>`;
+      })
+      .join('');
+  }
+  if ($('clinicalPlanModePill')) {
+    $('clinicalPlanModePill').textContent = PLAN_MODES[currentPlanMode]?.label || 'Service Plans';
+  }
+
+  const unitMeta = [
+    { id: 'conventional', title: 'Conventional (US)', desc: 'mg/dL, mEq/L, g/dL, mmHg' },
+    { id: 'si', title: 'SI (International)', desc: 'µmol/L, mmol/L, g/L, kPa' },
+  ];
+  const unitGrid = $('clinicalUnitSystemGrid');
+  if (unitGrid) {
+    unitGrid.innerHTML = unitMeta
+      .map((item) => {
+        const checked = currentUnitSystem === item.id;
+        return `<button type="button" class="clinical-option-card" role="radio" aria-checked="${checked}" data-unit-sys="${item.id}"><span class="clinical-option-title">${esc(item.title)}</span><span class="clinical-option-desc">${esc(item.desc)}</span></button>`;
+      })
+      .join('');
+  }
+  if ($('clinicalUnitSystemPill')) {
+    $('clinicalUnitSystemPill').textContent = LAB_UNIT_SYSTEMS[currentUnitSystem]?.label || 'Conventional (US)';
+  }
+
+  const hoMeta = [
+    { id: 'standard', title: 'Standard Shift Relay', desc: 'Bedside shift telemetry & plans' },
+    { id: 'ipass', title: 'I-PASS Sign-out', desc: 'Illness severity, summary, actions, If/Then' },
+    { id: 'sbar', title: 'SBAR Handover', desc: 'Situation, Background, Assessment, Recommendation' },
+  ];
+  const hoGrid = $('clinicalHandoverFormatGrid');
+  if (hoGrid) {
+    hoGrid.innerHTML = hoMeta
+      .map((item) => {
+        const checked = currentHandoverFormat === item.id;
+        return `<button type="button" class="clinical-option-card" role="radio" aria-checked="${checked}" data-handover-fmt="${item.id}"><span class="clinical-option-title">${esc(item.title)}</span><span class="clinical-option-desc">${esc(item.desc)}</span></button>`;
+      })
+      .join('');
+  }
+  if ($('clinicalHandoverFormatPill')) {
+    $('clinicalHandoverFormatPill').textContent = HANDOVER_FORMATS[currentHandoverFormat]?.label || 'Standard Shift Relay';
+  }
+}
+
+function initClinicalSettings() {
+  renderClinicalSettings();
+  $('clinicalPlanModeGrid')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-plan-mode]');
+    if (btn) setPlanMode(btn.dataset.planMode, { persist: true });
+  });
+  $('clinicalUnitSystemGrid')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-unit-sys]');
+    if (btn) setUnitSystem(btn.dataset.unitSys, { persist: true });
+  });
+  $('clinicalHandoverFormatGrid')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-handover-fmt]');
+    if (btn) setHandoverFormat(btn.dataset.handoverFmt, { persist: true });
+  });
+  $('labsUnitToggle')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-unit-sys]');
+    if (btn) setUnitSystem(btn.dataset.unitSys, { persist: true });
+  });
 }
 let dirtyChart = false;
 let chartAutosaveTimer = null;
@@ -1362,7 +1514,9 @@ function formatCompactDemographics(pt) {
       ? `${pt.age}yo`
       : pt.sex || '';
   const wt = pt.weight ? `${String(pt.weight).replace(/\s*kg$/i, '')}kg` : '';
-  return [ageSex, wt, pt.service || ''].filter(Boolean);
+  const hd = pt.hospitalDay ? `HD #${pt.hospitalDay}` : '';
+  const icuD = pt.icuDay ? `ICU #${pt.icuDay}` : '';
+  return [ageSex, wt, hd, icuD, pt.service || ''].filter(Boolean);
 }
 
 function formatShortStatusDate(dateStr) {
@@ -1549,6 +1703,69 @@ function renderRounds() {
           </div>`);
       }
 
+      const isUnstable = String(pt.severity || '').toLowerCase() === 'unstable';
+      const isWatcher = String(pt.severity || '').toLowerCase() === 'watcher';
+
+      if (Array.isArray(pt.trackedLines) && pt.trackedLines.length) {
+        const linesHtml = pt.trackedLines
+          .map((item) => {
+            const cls = item.overdue ? 'ledger-inline-warn' : '';
+            const suffix = item.overdue ? ' · Review' : '';
+            return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}${esc(suffix)}</strong></span>`;
+          })
+          .join('<span class="ledger-dot" aria-hidden="true"> · </span>');
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">LINES</div>
+            <div class="ledger-v">${linesHtml}</div>
+          </div>`);
+      }
+
+      const hasAbx = Array.isArray(pt.trackedAntibiotics) && pt.trackedAntibiotics.length > 0;
+      const abxHtml = hasAbx
+        ? pt.trackedAntibiotics
+            .map((item) => {
+              const cls = item.overdue ? 'ledger-inline-crit' : item.dueSoon ? 'ledger-inline-warn' : '';
+              return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}</strong></span>`;
+            })
+            .join('<span class="ledger-dot" aria-hidden="true"> · </span>')
+        : '';
+      paramRows.push(`
+        <div class="ledger-kv is-abx">
+          <div class="ledger-labs-head">
+            <span class="ledger-k">ABX</span>
+            <button type="button" class="ledger-all-labs-btn open-abx-btn" data-id="${pt.id}">${hasAbx ? 'Manage →' : '+ Abx'}</button>
+          </div>
+          <div class="ledger-v ${hasAbx ? '' : 'muted'}">${hasAbx ? abxHtml : 'No active antibiotics'}</div>
+        </div>`);
+
+      if (pt.contingencies) {
+        paramRows.push(`
+          <div class="ledger-kv">
+            <div class="ledger-k">IF/THEN</div>
+            <div class="ledger-v">${esc(pt.contingencies)}</div>
+          </div>`);
+      }
+
+      const safetyTags = [];
+      if (pt.codeStatus && pt.codeStatus.toLowerCase() !== 'full code') {
+        safetyTags.push(`<span class="safety-tag is-code">${esc(pt.codeStatus)}</span>`);
+      }
+      if (isUnstable) {
+        safetyTags.push(`<span class="safety-tag is-crit">Unstable</span>`);
+      } else if (isWatcher) {
+        safetyTags.push(`<span class="safety-tag is-warn">Watcher</span>`);
+      }
+      if (pt.allergies && !/^nkda$/i.test(pt.allergies.trim())) {
+        safetyTags.push(`<span class="safety-tag is-warn">Allergy: ${esc(pt.allergies)}</span>`);
+      }
+      if (Array.isArray(pt.isolation) && pt.isolation.length) {
+        safetyTags.push(`<span class="safety-tag is-iso">${esc(pt.isolation.join(' · '))}</span>`);
+      }
+      const safetyStripHtml = safetyTags.length
+        ? `<div class="ledger-safety-strip">${safetyTags.join('')}</div>`
+        : '';
+
       const medsAgeSuffix =
         pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
           ? ` (${formatShortStatusDate(pt.medicationsDate)})`
@@ -1565,6 +1782,7 @@ function renderRounds() {
 
       const planGroups = Array.isArray(pt.servicePlanGroups) ? pt.servicePlanGroups : [];
       const planCount = planGroups.length || (pt.servicePlans ? pt.servicePlans.length : 0);
+      const planTitle = PLAN_MODES[currentPlanMode]?.label || 'Service Plans';
       const plansContent = planGroups.length
         ? `<div class="ledger-plans-grid">${planGroups
             .map(
@@ -1575,7 +1793,7 @@ function renderRounds() {
       const plansAccordion = planCount
         ? `<details class="ledger-accordion">
             <summary>
-              <span class="acc-title">Service Plans</span>
+              <span class="acc-title">${esc(planTitle)}</span>
               <span class="acc-right"><span class="acc-count">${planCount}</span>${uiIcon('chevron-right')}</span>
             </summary>
             ${plansContent}
@@ -1596,7 +1814,7 @@ function renderRounds() {
         : '';
 
       return `
-      <article class="ledger-row ${isStale ? 'is-overdue' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
+      <article class="ledger-row ${isUnstable ? 'severity-unstable' : isStale ? 'is-overdue' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
         <div class="ledger-head" role="button" tabindex="0" aria-expanded="${isExpanded}" data-toggle-row-id="${pt.id}">
           <div class="ledger-head-top">
             <div class="ledger-id-group">
@@ -1609,6 +1827,7 @@ function renderRounds() {
             </div>
           </div>
           <div class="ledger-meta-compact">${compactMetaLine}</div>
+          ${safetyStripHtml}
           ${expandedDemoLine ? `<div class="ledger-meta-expanded">${expandedDemoLine}</div>` : ''}
           ${expandedApLine ? `<div class="ledger-ap-expanded">${expandedApLine}</div>` : ''}
         </div>
@@ -1623,6 +1842,7 @@ function renderRounds() {
               <div class="popover-menu row-more-menu" role="menu" hidden>
                 <button type="button" class="popover-menu-item open-chart-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pencil')}<span>Open Chart</span></button>
                 <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
+                <button type="button" class="popover-menu-item open-abx-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pill')}<span>Antibiotics</span></button>
                 <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
                 <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
               </div>
@@ -1653,6 +1873,7 @@ function renderRounds() {
               <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
               <div class="popover-menu row-more-menu" role="menu" hidden>
                 <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
+                <button type="button" class="popover-menu-item open-abx-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pill')}<span>Antibiotics</span></button>
                 <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
                 <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
               </div>
@@ -1776,6 +1997,14 @@ function renderRounds() {
     btn.onclick = async (e) => {
       e.stopPropagation();
       await openPatientLabsTab(btn.dataset.id);
+    };
+  });
+
+  container.querySelectorAll('.open-abx-btn').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      closeAllMenus();
+      openAbxModal(btn.dataset.id, btn);
     };
   });
 
@@ -1922,6 +2151,7 @@ function populateShiftFormDefaults() {
   const carryStanding = $('cfStanding') ? $('cfStanding').checked : true;
   const carryFeeding = $('cfFeeding') ? $('cfFeeding').checked : Boolean(cfData.feeding);
   const carryPe = $('cfPe') ? $('cfPe').checked : Boolean(cfData.pe);
+  const carryContingencies = $('cfContingencies') ? $('cfContingencies').checked : Boolean(cfData.contingencies || parsed.contingencies);
 
   shiftFormValues = {
     interimEvent: '',
@@ -1944,6 +2174,7 @@ function populateShiftFormDefaults() {
     drips: carryStanding ? cfData.drips || '' : '',
     meds: carryStanding ? (parsed.medications || []).join('\n') : '',
     servicePlans: carryPlans ? (cfData.servicePlans || []).join('\n') : '',
+    contingencies: carryContingencies ? (cfData.contingencies || parsed.contingencies || '') : '',
     pending: carryPend ? (cfData.openPending || []).join('\n') : '',
   };
 }
@@ -1965,6 +2196,7 @@ function syncShiftPreviewFromForm({ forceRawUpdate = false } = {}) {
     parsed,
     isInterim,
     dateStr,
+    planMode: currentPlanMode,
   });
   if (forceRawUpdate) shiftRawEdited = false;
 }
@@ -2159,13 +2391,31 @@ function renderShiftGuidedForm() {
             </div>
           </div>`);
       } else if (sec.id === 'plan') {
+        const planMeta = PLAN_MODES[currentPlanMode] || PLAN_MODES.service;
+        const planPlaceholder =
+          currentPlanMode === 'problem'
+            ? '#1 Sepsis: continue broad-spectrum abx\n#2 AKI: strict I&O'
+            : currentPlanMode === 'systems'
+              ? 'Neuro: RASS 0 to -1\nCV: target MAP >= 65\nPulm: wean FiO2'
+              : 'Standing treatment plans, one per line...';
+        const fastHugBtn =
+          currentPlanMode === 'systems'
+            ? '<button type="button" id="sfFastHugBtn" class="ghost-action sm-btn" title="Append FASTHUG-BID ICU checklist">+ FASTHUG-BID</button>'
+            : '';
         cards.push(`
           <div class="shift-field-card" data-shift-section="plan">
-            <div class="shift-field-card-head"><span class="shift-field-card-title">Plan &amp; Pending Items</span></div>
+            <div class="shift-field-card-head">
+              <span class="shift-field-card-title">${esc(planMeta.label)} &amp; Pending Items</span>
+              ${fastHugBtn}
+            </div>
             <div class="shift-field-subgrid">
               <div class="field">
-                <label for="sfServicePlans">Service Plans (one per line)</label>
-                <textarea id="sfServicePlans" data-sf-key="servicePlans" rows="3" placeholder="Standing treatment plans, one per line...">${esc(shiftFormValues.servicePlans)}</textarea>
+                <label for="sfServicePlans">${esc(planMeta.label)} (one per line)</label>
+                <textarea id="sfServicePlans" data-sf-key="servicePlans" rows="3" placeholder="${esc(planPlaceholder)}">${esc(shiftFormValues.servicePlans)}</textarea>
+              </div>
+              <div class="field">
+                <label for="sfContingencies">If / Then Contingencies</label>
+                <input id="sfContingencies" data-sf-key="contingencies" value="${esc(shiftFormValues.contingencies || '')}" placeholder="If MAP < 65 -> titrate pressor">
               </div>
               <div class="field">
                 <label for="sfPending">Pending Items / Checklist (one per line)</label>
@@ -2215,6 +2465,20 @@ function renderShiftGuidedForm() {
       syncShiftPreviewFromForm();
     };
   });
+
+  if ($('sfFastHugBtn')) {
+    $('sfFastHugBtn').onclick = () => {
+      const existing = String(shiftFormValues.servicePlans || '').trim();
+      const lines = FASTHUG_BID_ITEMS.filter((item) => !existing.toLowerCase().includes(item.split(':')[0].toLowerCase()));
+      const merged = [existing, ...lines].filter(Boolean).join('\n');
+      shiftFormValues.servicePlans = merged;
+      if ($('sfServicePlans')) $('sfServicePlans').value = merged;
+      shiftPreviewDirty = true;
+      shiftRawEdited = false;
+      syncShiftPreviewFromForm();
+      toast('Inserted FASTHUG-BID ICU checklist');
+    };
+  }
 }
 
 function applyCarryForwardToggleToShiftForm(changedId = null) {
@@ -2225,6 +2489,7 @@ function applyCarryForwardToggleToShiftForm(changedId = null) {
   const carryStanding = $('cfStanding')?.checked !== false;
   const carryFeeding = Boolean($('cfFeeding')?.checked);
   const carryPe = Boolean($('cfPe')?.checked);
+  const carryContingencies = Boolean($('cfContingencies')?.checked);
 
   const domMap = {};
   if (!changedId || changedId === 'cfPending') {
@@ -2250,6 +2515,10 @@ function applyCarryForwardToggleToShiftForm(changedId = null) {
   if (!changedId || changedId === 'cfPe') {
     shiftFormValues.pe = carryPe && cfData.pe ? cfData.pe : '';
     domMap.sfPe = shiftFormValues.pe;
+  }
+  if (!changedId || changedId === 'cfContingencies') {
+    shiftFormValues.contingencies = carryContingencies ? (cfData.contingencies || parsed.contingencies || '') : '';
+    domMap.sfContingencies = shiftFormValues.contingencies;
   }
 
   for (const [id, val] of Object.entries(domMap)) {
@@ -2313,6 +2582,19 @@ function openShiftModal(noteId, triggerEl = null) {
   if ($('cfPe')) {
     $('cfPe').checked = hasPrevPe;
     $('cfPe').disabled = !hasPrevPe;
+  }
+
+  const parsedForCf = getShiftingParsedNote();
+  const prevCont = cfData.contingencies || parsedForCf.contingencies || '';
+  const hasPrevCont = Boolean(prevCont);
+  if ($('cfContingencies')) {
+    $('cfContingencies').checked = hasPrevCont;
+    $('cfContingencies').disabled = !hasPrevCont;
+  }
+  if ($('cfContingenciesMeta')) {
+    $('cfContingenciesMeta').textContent = hasPrevCont
+      ? `(${prevCont.length > 42 ? `${prevCont.slice(0, 39)}...` : prevCont})`
+      : '(none set)';
   }
 
   $('cfPendingMeta').textContent = cfData.hasPriorBlock
@@ -2626,19 +2908,22 @@ function rebuildHandoverReport() {
   const dateIso = $('handoverDateInput')?.value || getDutyDateStrings().yyyymmdd;
   currentHandoverDate = isoToMmDdYyyy(dateIso) || getTodayDateStrings().mmddyyyy;
   const scope = $('handoverScopeSelect')?.value || 'all';
+  const format = $('handoverFormatSelect')?.value || currentHandoverFormat || 'standard';
   const includeVitalsLabs = $('hoShowVitalsLabs') ? $('hoShowVitalsLabs').checked : true;
   const includeResolvedPending = $('hoShowResolved') ? $('hoShowResolved').checked : true;
 
   const { markdown, stats, patientMeta } = formatHandoverReport(notes, currentHandoverDate, {
     scope,
+    format,
     includeVitalsLabs,
     includeResolvedPending,
   });
   currentHandoverRaw = markdown;
   currentHandoverPatientMeta = patientMeta || [];
 
+  const fmtLabel = HANDOVER_FORMATS[format]?.label || 'Standard Shift Relay';
   $('handoverModalSubtitle').textContent =
-    `${currentHandoverDate} · ${stats.activeCount} active · ${stats.updatedCount} updated · ${stats.openPendingCount} open pending · ${stats.gapsCount} gaps`;
+    `${currentHandoverDate} · ${fmtLabel} · ${stats.activeCount} active · ${stats.updatedCount} updated · ${stats.openPendingCount} open pending · ${stats.gapsCount} gaps`;
 
   renderHandoverPreview();
 }
@@ -2646,11 +2931,76 @@ function rebuildHandoverReport() {
 function openHandoverModal(triggerEl = null) {
   if ($('handoverDateInput')) $('handoverDateInput').value = getDutyDateStrings().yyyymmdd;
   if ($('handoverScopeSelect')) $('handoverScopeSelect').value = 'all';
+  if ($('handoverFormatSelect')) $('handoverFormatSelect').value = currentHandoverFormat || 'standard';
   if ($('hoShowVitalsLabs')) $('hoShowVitalsLabs').checked = true;
   if ($('hoShowResolved')) $('hoShowResolved').checked = true;
   handoverViewingDeid = false;
   rebuildHandoverReport();
   openModalEl($('handoverModal'), triggerEl);
+}
+
+function printScutsheet() {
+  const root = $('printScutsheetRoot');
+  if (!root) return;
+  const data = buildPrintableScutsheetData(notes, { includeCharity: false });
+  if (!data.patients.length) {
+    toast('No active patients in census to print');
+    return;
+  }
+
+  const cardsHtml = data.patients
+    .map((pt) => {
+      const days = [pt.hospitalDay ? `HD#${pt.hospitalDay}` : '', pt.icuDay ? `ICU#${pt.icuDay}` : ''].filter(Boolean).join(' · ');
+      const isoTxt = pt.isolation.length ? ` · Iso: ${pt.isolation.join('/')}` : '';
+      const linesTxt = pt.trackedLines.length ? pt.trackedLines.map((l) => l.label).join(', ') : '';
+      const abxTxt = pt.trackedAntibiotics.length ? pt.trackedAntibiotics.map((a) => a.label).join(', ') : '';
+      const pendingHtml = pt.openPending.length
+        ? pt.openPending.slice(0, 5).map((t) => `<div class="ps-task"><span class="ps-box">□</span> ${esc(t)}</div>`).join('')
+        : '<div class="ps-task"><span class="ps-box">□</span> __________________________</div>';
+      return `
+        <article class="ps-card">
+          <header class="ps-card-head">
+            <div><strong class="ps-bed">${esc(pt.room)}</strong> <strong class="ps-name">${esc(pt.name)}</strong></div>
+            <div class="ps-code">${esc(pt.codeStatus)}${pt.severity !== 'Stable' ? ` · ${esc(pt.severity)}` : ''}</div>
+          </header>
+          <div class="ps-meta">${esc([pt.ageSex, days, pt.ap ? `AP: ${pt.ap}` : ''].filter(Boolean).join(' · '))}${esc(isoTxt)}</div>
+          <div class="ps-allergy">Allergy: ${esc(pt.allergies)}</div>
+          ${pt.assessment ? `<div class="ps-dx"><strong>Dx:</strong> ${esc(pt.assessment)}</div>` : ''}
+          ${pt.vitals ? `<div class="ps-row"><span>VS</span> ${esc(pt.vitals)}</div>` : ''}
+          ${pt.vent ? `<div class="ps-row"><span>VENT</span> ${esc(pt.vent)}</div>` : ''}
+          ${pt.io ? `<div class="ps-row"><span>I&amp;O</span> ${esc(pt.io)}</div>` : ''}
+          ${pt.drips ? `<div class="ps-row"><span>DRIPS</span> ${esc(pt.drips)}</div>` : ''}
+          ${linesTxt ? `<div class="ps-row"><span>LINES</span> ${esc(linesTxt)}</div>` : ''}
+          ${abxTxt ? `<div class="ps-row"><span>ABX</span> ${esc(abxTxt)}</div>` : ''}
+          ${pt.labs ? `<div class="ps-row"><span>LABS</span> ${esc(pt.labs)}</div>` : ''}
+          ${pt.contingencies ? `<div class="ps-row"><span>IF/THEN</span> ${esc(pt.contingencies)}</div>` : ''}
+          ${pt.servicePlans.length ? `<div class="ps-plans"><strong>Plan:</strong> ${esc(pt.servicePlans.slice(0, 4).join(' | '))}</div>` : ''}
+          <div class="ps-tasks">${pendingHtml}<div class="ps-task"><span class="ps-box">□</span> __________________________</div></div>
+        </article>
+      `;
+    })
+    .join('');
+
+  root.innerHTML = `
+    <div class="ps-sheet-header">
+      <strong>KARDEX ROUNDING SCUTSHEET</strong>
+      <span>${esc(data.generatedDate)} · ${data.patients.length} Active</span>
+    </div>
+    <div class="ps-grid">${cardsHtml}</div>
+  `;
+  root.setAttribute('aria-hidden', 'false');
+
+  const cleanup = () => {
+    root.setAttribute('aria-hidden', 'true');
+  };
+  window.addEventListener('afterprint', cleanup, { once: true });
+  setTimeout(() => {
+    try {
+      window.print();
+    } catch {
+      cleanup();
+    }
+  }, 40);
 }
 
 function closeHandoverModal() {
@@ -3821,6 +4171,10 @@ let calcActiveTab = 'audit';
 let calcDripMode = 'rate2dose';
 let lastAuditResult = null;
 let lastDripResult = null;
+let lastPhysiologyResult = null;
+let lastScoreResult = null;
+let calcSelectedScore = 'news2';
+let calcScoreState = {};
 
 function populateCalcPatientSelect(selectedId = '') {
   const selectEl = $('calcPatientSelect');
@@ -3836,14 +4190,26 @@ function populateDripPresets() {
 }
 
 function setCalcTab(tab) {
-  calcActiveTab = tab === 'drip' ? 'drip' : 'audit';
+  const validTabs = new Set(['audit', 'drip', 'physiology', 'scores']);
+  calcActiveTab = validTabs.has(tab) ? tab : 'audit';
   if (calcActiveTab === 'drip') calcUserTouchedDrip = true;
-  $('calcAuditPane').hidden = calcActiveTab !== 'audit';
-  $('calcDripPane').hidden = calcActiveTab !== 'drip';
-  $('calcTabAudit').classList.toggle('active', calcActiveTab === 'audit');
-  $('calcTabAudit').setAttribute('aria-pressed', String(calcActiveTab === 'audit'));
-  $('calcTabDrip').classList.toggle('active', calcActiveTab === 'drip');
-  $('calcTabDrip').setAttribute('aria-pressed', String(calcActiveTab === 'drip'));
+  if ($('calcAuditPane')) $('calcAuditPane').hidden = calcActiveTab !== 'audit';
+  if ($('calcDripPane')) $('calcDripPane').hidden = calcActiveTab !== 'drip';
+  if ($('calcPhysiologyPane')) $('calcPhysiologyPane').hidden = calcActiveTab !== 'physiology';
+  if ($('calcScoresPane')) $('calcScoresPane').hidden = calcActiveTab !== 'scores';
+
+  const tabBtnMap = {
+    audit: 'calcTabAudit',
+    drip: 'calcTabDrip',
+    physiology: 'calcTabPhysiology',
+    scores: 'calcTabScores',
+  };
+  for (const [key, btnId] of Object.entries(tabBtnMap)) {
+    const btn = $(btnId);
+    if (!btn) continue;
+    btn.classList.toggle('active', calcActiveTab === key);
+    btn.setAttribute('aria-pressed', String(calcActiveTab === key));
+  }
 }
 
 function setDripMode(mode, rerender = true) {
@@ -4137,6 +4503,383 @@ function renderDripCalculator() {
       : '';
 }
 
+function syncPhysiologyFromChart(note) {
+  const content = getActiveCalcNoteContent(note);
+  const inputs = extractClinicalInputs(content, note || {}, {
+    unitSystem: currentUnitSystem === 'si' ? 'si' : 'conventional',
+  });
+  const labs = inputs.labs || {};
+  const v = inputs.vitals || {};
+  const setVal = (id, val) => {
+    if ($(id)) $(id).value = val !== null && val !== undefined && val !== '' ? String(val) : '';
+  };
+  setVal('physNa', labs.na);
+  setVal('physCl', labs.cl);
+  setVal('physHco3', labs.hco3);
+  setVal('physAlb', labs.alb);
+  setVal('physGlu', labs.glu);
+  setVal('physCa', labs.ca);
+  setVal('physPao2', labs.po2);
+  setVal('physPaco2', labs.pco2);
+  setVal('physFio2', v.fio2Pct);
+  setVal('physHeight', inputs.heightCm);
+  setVal('physSex', inputs.sex);
+  setVal('physAge', inputs.age);
+}
+
+function renderPhysiologyPane() {
+  const grid = $('physResultsGrid');
+  if (!grid) return;
+  const numOf = (id) => {
+    const raw = $(id)?.value?.trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  const res = calculatePhysiology({
+    na: numOf('physNa'),
+    cl: numOf('physCl'),
+    hco3: numOf('physHco3'),
+    alb: numOf('physAlb'),
+    glu: numOf('physGlu'),
+    ca: numOf('physCa'),
+    pao2: numOf('physPao2'),
+    paco2: numOf('physPaco2'),
+    fio2Pct: numOf('physFio2'),
+    heightCm: numOf('physHeight'),
+    sex: $('physSex')?.value || '',
+    age: numOf('physAge'),
+  });
+  lastPhysiologyResult = res;
+
+  const cards = [
+    {
+      title: 'Anion Gap & Delta/Delta',
+      ok: res.anionGap.status === 'OK',
+      val: res.anionGap.status === 'OK'
+        ? `${res.anionGap.value} mEq/L${res.anionGap.correctedAg !== null ? ` (Corr ${res.anionGap.correctedAg})` : ''}`
+        : '—',
+      sub: res.anionGap.note,
+    },
+    {
+      title: 'Corrected Na (Katz)',
+      ok: res.correctedNa.status === 'OK',
+      val: res.correctedNa.status === 'OK' ? `${res.correctedNa.value} mEq/L` : '—',
+      sub: res.correctedNa.note,
+    },
+    {
+      title: 'Corrected Calcium',
+      ok: res.correctedCa.status === 'OK',
+      val: res.correctedCa.status === 'OK' ? `${res.correctedCa.value} mg/dL` : '—',
+      sub: res.correctedCa.note,
+    },
+    {
+      title: 'P/F Ratio (Berlin ARDS)',
+      ok: res.pfRatio.status === 'OK',
+      val: res.pfRatio.status === 'OK' ? `${res.pfRatio.value}` : '—',
+      sub: res.pfRatio.note,
+    },
+    {
+      title: 'A-a Gradient',
+      ok: res.aaGradient.status === 'OK',
+      val: res.aaGradient.status === 'OK' ? `${res.aaGradient.value} mmHg` : '—',
+      sub: res.aaGradient.note,
+    },
+    {
+      title: 'Devine PBW & ARDS Vt',
+      ok: res.pbwArds.status === 'OK',
+      val: res.pbwArds.status === 'OK' ? `${res.pbwArds.pbwKg} kg` : '—',
+      sub: res.pbwArds.note,
+    },
+  ];
+
+  grid.innerHTML = cards
+    .map(
+      (c) => `
+      <div class="phys-card ${c.ok ? '' : 'is-missing'}">
+        <div class="phys-card-title">${esc(c.title)}</div>
+        <div class="phys-card-val">${esc(c.val)}</div>
+        <div class="phys-card-sub">${esc(c.sub)}</div>
+      </div>`
+    )
+    .join('');
+}
+
+function syncScoresFromChart(note) {
+  const content = getActiveCalcNoteContent(note);
+  const inputs = extractClinicalInputs(content, note || {}, {
+    unitSystem: currentUnitSystem === 'si' ? 'si' : 'conventional',
+  });
+  const labs = inputs.labs || {};
+  const v = inputs.vitals || {};
+  const textLower = `${inputs.parsed?.assessment || ''} ${inputs.parsed?.vitals || ''} ${inputs.parsed?.subjective || ''} ${(inputs.parsed?.servicePlans || []).join(' ')}`.toLowerCase();
+
+  calcScoreState = {
+    rr: v.rr ?? '',
+    spo2: v.spo2 ?? '',
+    onO2: Boolean(v.onO2),
+    scale2: /\b(?:copd|hypercapni|type\s*2\s*resp)\b/i.test(textLower),
+    sbp: v.sbp ?? '',
+    dbp: v.dbp ?? '',
+    hr: v.hr ?? '',
+    tempC: v.tempC ?? '',
+    consciousness: /\b(?:unresponsive|coma|gcs\s*(?:3|4|5|6|7|8)\b)\b/i.test(textLower) ? 'U' : /\b(?:confused|lethargic|delirium|drowsy|altered|encephalopath)\b/i.test(textLower) ? 'C' : 'A',
+    alteredMentalStatus: /\b(?:confused|lethargic|delirium|altered|encephalopath|gcs\s*<\s*15)\b/i.test(textLower),
+    confusion: /\b(?:confused|delirium|disoriented|encephalopath)\b/i.test(textLower),
+    bunMgDl: labs.bun ?? '',
+    crMgDl: labs.cr ?? '',
+    tbiliMgDl: labs.tbili ?? '',
+    inr: labs.inr ?? '',
+    na: labs.na ?? '',
+    age: inputs.age ?? '',
+    female: inputs.sex === 'F',
+    dialysis: /\b(?:hd\b|hemodialysis|renal replacement|crrt)\b/i.test(textLower),
+    chf: /\b(?:chf|heart failure|hfref|hfpef|cardiomyopathy)\b/i.test(textLower),
+    htn: /\b(?:htn|hypertension|hypertensive)\b/i.test(textLower),
+    dm: /\b(?:dm|t2dm|t1dm|diabetes)\b/i.test(textLower),
+    strokeTia: /\b(?:stroke|cva|tia|infarct|cvd)\b/i.test(textLower),
+    vascular: /\b(?:cad|mi\b|pad|aortic plaque|atheroscler)\b/i.test(textLower),
+    htnUncontrolled: Boolean(v.sbp && v.sbp > 160),
+    abnormalRenal: Boolean((labs.cr && labs.cr > 2.26) || /\b(?:ckd|aki|esrd|dialysis)\b/i.test(textLower)),
+    abnormalLiver: Boolean((labs.tbili && labs.tbili > 2) || /\b(?:cirrhosis|liver failure|hepat)\b/i.test(textLower)),
+    bleeding: /\b(?:gib|ugib|lgib|bleed|hemorrhage|anemia)\b/i.test(textLower),
+    labileInr: false,
+    drugs: inputs.medLines.some((m) => /\b(?:aspirin|asa|clopidogrel|ticagrelor|prasugrel|nsaid|ibuprofen|ketorolac|naproxen)\b/i.test(m)),
+    alcohol: /\b(?:etoh|alcohol|alcoholic)\b/i.test(textLower),
+    dvtSigns: false,
+    peMostLikely: /\b(?:pe\b|pulmonary embolism)\b/i.test(textLower),
+    hrOver100: Boolean(v.hr && v.hr > 100),
+    immobSurgery: /\b(?:post-?op|surgery|immobil|bedbound)\b/i.test(textLower),
+    prevDvtPe: /\b(?:prior\s+(?:dvt|pe)|history\s+of\s+(?:dvt|pe))\b/i.test(textLower),
+    hemoptysis: /\bhemoptysis\b/i.test(textLower),
+    malignancy: /\b(?:cancer|malignancy|carcinoma|adenocarcinoma|lymphoma|leukemia|metasta)\b/i.test(textLower),
+    paralysisImmob: /\b(?:paralysis|paresis|hemiplegia|cast)\b/i.test(textLower),
+    bedriddenSurgery: /\b(?:bedridden|surgery)\b/i.test(textLower),
+    localizedTenderness: false,
+    entireLegSwollen: false,
+    calfSwelling3cm: false,
+    pittingEdema: /\b(?:pitting\s+edema|leg\s+edema)\b/i.test(textLower),
+    collateralVeins: false,
+    prevDvt: /\b(?:prior\s+dvt|dvt)\b/i.test(textLower),
+    altDxLikely: false,
+  };
+}
+
+function renderScoresPane() {
+  const inputsEl = $('scoreInputsBox');
+  const resEl = $('scoreResultBox');
+  if (!inputsEl || !resEl) return;
+
+  const tool = $('scorePickerSelect')?.value || calcSelectedScore || 'news2';
+  calcSelectedScore = tool;
+
+  const numField = (key, label, step = '1') =>
+    `<div class="field"><label for="sc_${key}">${esc(label)}</label><input id="sc_${key}" data-score-key="${key}" data-score-type="num" type="number" inputmode="decimal" step="${step}" value="${esc(calcScoreState[key] ?? '')}"></div>`;
+  const checkField = (key, label) =>
+    `<label class="tpl-id-chip score-check"><input id="sc_${key}" data-score-key="${key}" data-score-type="bool" type="checkbox" ${calcScoreState[key] ? 'checked' : ''}><span>${esc(label)}</span></label>`;
+
+  let controlsHtml = '';
+  let result = null;
+  const numVal = (k) => (calcScoreState[k] === '' || calcScoreState[k] === null || calcScoreState[k] === undefined ? null : Number(calcScoreState[k]));
+
+  if (tool === 'news2') {
+    controlsHtml = `
+      <div class="score-inputs-grid">
+        ${numField('rr', 'RR (bpm)')}
+        ${numField('spo2', 'SpO2 (%)')}
+        ${numField('sbp', 'SBP (mmHg)')}
+        ${numField('hr', 'HR (bpm)')}
+        ${numField('tempC', 'Temp (°C)', '0.1')}
+        <div class="field">
+          <label for="sc_consciousness">ACVPU</label>
+          <select id="sc_consciousness" data-score-key="consciousness" data-score-type="str">
+            ${['A', 'C', 'V', 'P', 'U'].map((c) => `<option value="${c}" ${calcScoreState.consciousness === c ? 'selected' : ''}>${c === 'A' ? 'A (Alert)' : c === 'C' ? 'C (Confusion)' : c === 'V' ? 'V (Voice)' : c === 'P' ? 'P (Pain)' : 'U (Unresp)'}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="profile-flags mt-8">
+        ${checkField('onO2', 'On Supplemental O2 (+2)')}
+        ${checkField('scale2', 'Hypercapnic Resp Failure (Scale 2)')}
+      </div>`;
+    result = calculateNEWS2({
+      rr: numVal('rr'),
+      spo2: numVal('spo2'),
+      onO2: Boolean(calcScoreState.onO2),
+      scale2: Boolean(calcScoreState.scale2),
+      sbp: numVal('sbp'),
+      hr: numVal('hr'),
+      tempC: numVal('tempC'),
+      consciousness: calcScoreState.consciousness || 'A',
+    });
+  } else if (tool === 'qsofa') {
+    controlsHtml = `
+      <div class="score-inputs-grid">
+        ${numField('rr', 'RR (bpm)')}
+        ${numField('sbp', 'SBP (mmHg)')}
+      </div>
+      <div class="profile-flags mt-8">${checkField('alteredMentalStatus', 'Altered mentation / GCS < 15 (+1)')}</div>`;
+    result = calculateQSOFA({ rr: numVal('rr'), sbp: numVal('sbp'), alteredMentalStatus: Boolean(calcScoreState.alteredMentalStatus) });
+  } else if (tool === 'curb65') {
+    controlsHtml = `
+      <div class="score-inputs-grid">
+        ${numField('bunMgDl', 'BUN (mg/dL)', '0.1')}
+        ${numField('rr', 'RR (bpm)')}
+        ${numField('sbp', 'SBP (mmHg)')}
+        ${numField('dbp', 'DBP (mmHg)')}
+        ${numField('age', 'Age (yr)')}
+      </div>
+      <div class="profile-flags mt-8">${checkField('confusion', 'New-onset confusion (+1)')}</div>`;
+    result = calculateCURB65({
+      confusion: Boolean(calcScoreState.confusion),
+      bunMgDl: numVal('bunMgDl'),
+      rr: numVal('rr'),
+      sbp: numVal('sbp'),
+      dbp: numVal('dbp'),
+      age: numVal('age'),
+    });
+  } else if (tool === 'meldna') {
+    controlsHtml = `
+      <div class="score-inputs-grid">
+        ${numField('crMgDl', 'SCr (mg/dL)', '0.01')}
+        ${numField('tbiliMgDl', 'Total Bili (mg/dL)', '0.1')}
+        ${numField('inr', 'INR', '0.01')}
+        ${numField('na', 'Sodium (mEq/L)', '0.1')}
+      </div>
+      <div class="profile-flags mt-8">${checkField('dialysis', 'Dialysis >= 2x in past week (clamps Cr to 4.0)')}</div>`;
+    result = calculateMELDNa({
+      crMgDl: numVal('crMgDl'),
+      tbiliMgDl: numVal('tbiliMgDl'),
+      inr: numVal('inr'),
+      na: numVal('na'),
+      dialysis: Boolean(calcScoreState.dialysis),
+    });
+  } else if (tool === 'cha2ds2vasc') {
+    controlsHtml = `
+      <div class="score-inputs-grid">${numField('age', 'Age (yr)')}</div>
+      <div class="profile-flags mt-8">
+        ${checkField('chf', 'CHF / LV dysfunction (+1)')}
+        ${checkField('htn', 'Hypertension (+1)')}
+        ${checkField('dm', 'Diabetes mellitus (+1)')}
+        ${checkField('strokeTia', 'Stroke / TIA / TE (+2)')}
+        ${checkField('vascular', 'Vascular disease (+1)')}
+        ${checkField('female', 'Female sex (+1)')}
+      </div>`;
+    result = calculateCHA2DS2VASc({
+      chf: Boolean(calcScoreState.chf),
+      htn: Boolean(calcScoreState.htn),
+      age: numVal('age'),
+      dm: Boolean(calcScoreState.dm),
+      strokeTia: Boolean(calcScoreState.strokeTia),
+      vascular: Boolean(calcScoreState.vascular),
+      female: Boolean(calcScoreState.female),
+    });
+  } else if (tool === 'hasbled') {
+    controlsHtml = `
+      <div class="profile-flags">
+        ${checkField('htnUncontrolled', 'Uncontrolled HTN SBP >160 (+1)')}
+        ${checkField('abnormalRenal', 'Abnormal renal fn (+1)')}
+        ${checkField('abnormalLiver', 'Abnormal liver fn (+1)')}
+        ${checkField('stroke', 'Stroke history (+1)')}
+        ${checkField('bleeding', 'Prior major bleeding (+1)')}
+        ${checkField('labileInr', 'Labile INR (+1)')}
+        ${checkField('ageOver65', 'Age > 65 (+1)')}
+        ${checkField('drugs', 'Antiplatelet / NSAIDs (+1)')}
+        ${checkField('alcohol', 'Alcohol >= 8/wk (+1)')}
+      </div>`;
+    result = calculateHASBLED({
+      htnUncontrolled: Boolean(calcScoreState.htnUncontrolled),
+      abnormalRenal: Boolean(calcScoreState.abnormalRenal),
+      abnormalLiver: Boolean(calcScoreState.abnormalLiver),
+      stroke: Boolean(calcScoreState.stroke),
+      bleeding: Boolean(calcScoreState.bleeding),
+      labileInr: Boolean(calcScoreState.labileInr),
+      ageOver65: Boolean(calcScoreState.ageOver65 || (numVal('age') && numVal('age') > 65)),
+      drugs: Boolean(calcScoreState.drugs),
+      alcohol: Boolean(calcScoreState.alcohol),
+    });
+  } else if (tool === 'wellspe') {
+    controlsHtml = `
+      <div class="profile-flags">
+        ${checkField('dvtSigns', 'Clinical signs of DVT (+3)')}
+        ${checkField('peMostLikely', 'PE is #1 / equally likely (+3)')}
+        ${checkField('hrOver100', 'HR > 100 bpm (+1.5)')}
+        ${checkField('immobSurgery', 'Immobilization / surgery <=4w (+1.5)')}
+        ${checkField('prevDvtPe', 'Previous DVT / PE (+1.5)')}
+        ${checkField('hemoptysis', 'Hemoptysis (+1)')}
+        ${checkField('malignancy', 'Active malignancy (+1)')}
+      </div>`;
+    result = calculateWellsPE({
+      dvtSigns: Boolean(calcScoreState.dvtSigns),
+      peMostLikely: Boolean(calcScoreState.peMostLikely),
+      hrOver100: Boolean(calcScoreState.hrOver100),
+      immobSurgery: Boolean(calcScoreState.immobSurgery),
+      prevDvtPe: Boolean(calcScoreState.prevDvtPe),
+      hemoptysis: Boolean(calcScoreState.hemoptysis),
+      malignancy: Boolean(calcScoreState.malignancy),
+    });
+  } else if (tool === 'wellsdvt') {
+    controlsHtml = `
+      <div class="profile-flags">
+        ${checkField('activeCancer', 'Active cancer (+1)')}
+        ${checkField('paralysisImmob', 'Paralysis / cast (+1)')}
+        ${checkField('bedriddenSurgery', 'Bedridden >3d / surgery <=12w (+1)')}
+        ${checkField('localizedTenderness', 'Deep venous tenderness (+1)')}
+        ${checkField('entireLegSwollen', 'Entire leg swollen (+1)')}
+        ${checkField('calfSwelling3cm', 'Calf swelling >3cm (+1)')}
+        ${checkField('pittingEdema', 'Pitting edema (+1)')}
+        ${checkField('collateralVeins', 'Collateral superficial veins (+1)')}
+        ${checkField('prevDvt', 'Previous DVT (+1)')}
+        ${checkField('altDxLikely', 'Alternative dx as likely (-2)')}
+      </div>`;
+    result = calculateWellsDVT({
+      activeCancer: Boolean(calcScoreState.malignancy || calcScoreState.activeCancer),
+      paralysisImmob: Boolean(calcScoreState.paralysisImmob),
+      bedriddenSurgery: Boolean(calcScoreState.bedriddenSurgery),
+      localizedTenderness: Boolean(calcScoreState.localizedTenderness),
+      entireLegSwollen: Boolean(calcScoreState.entireLegSwollen),
+      calfSwelling3cm: Boolean(calcScoreState.calfSwelling3cm),
+      pittingEdema: Boolean(calcScoreState.pittingEdema),
+      collateralVeins: Boolean(calcScoreState.collateralVeins),
+      prevDvt: Boolean(calcScoreState.prevDvt),
+      altDxLikely: Boolean(calcScoreState.altDxLikely),
+    });
+  }
+
+  lastScoreResult = result;
+  inputsEl.innerHTML = controlsHtml;
+  inputsEl.querySelectorAll('[data-score-key]').forEach((el) => {
+    const key = el.dataset.scoreKey;
+    const type = el.dataset.scoreType;
+    const handler = () => {
+      calcScoreState[key] = type === 'bool' ? el.checked : el.value;
+      renderScoresPane();
+    };
+    el.addEventListener(type === 'num' ? 'input' : 'change', handler);
+  });
+
+  if (result) {
+    const scoreDisp =
+      result.score !== null && result.score !== undefined
+        ? String(result.score)
+        : result.partialScore !== null && result.partialScore !== undefined
+          ? `~${result.partialScore}`
+          : '—';
+    resEl.innerHTML = `
+      <div class="score-result-card">
+        <div class="score-result-head">
+          <div>
+            <div class="score-result-name">${esc(result.name)}</div>
+            <div class="score-result-risk">${esc(result.risk)}</div>
+          </div>
+          <div class="score-result-val">${esc(scoreDisp)}</div>
+        </div>
+        ${result.breakdown?.length ? `<ul class="score-breakdown-list">${result.breakdown.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
+      </div>`;
+  } else {
+    resEl.innerHTML = '';
+  }
+}
+
 function buildDeidCalcSummaryText() {
   const note = notes.find((n) => n.id === calcNoteId) || null;
   const audit = lastAuditResult;
@@ -4144,6 +4887,26 @@ function buildDeidCalcSummaryText() {
   const roomLbl = note ? audit?.inputs?.parsed?.room || note.room || 'Unassigned Bed' : 'Standalone Check';
 
   const lines = [`Clinical Calculation Summary (De-identified · ${roomLbl})`];
+  if (calcActiveTab === 'physiology' && lastPhysiologyResult) {
+    const p = lastPhysiologyResult;
+    if (p.anionGap.status === 'OK') {
+      lines.push(`Anion Gap: ${p.anionGap.value}${p.anionGap.correctedAg !== null ? ` (Alb-Corr ${p.anionGap.correctedAg})` : ''} — ${p.anionGap.note}`);
+    }
+    if (p.correctedNa.status === 'OK') lines.push(`Corrected Na (Katz): ${p.correctedNa.value} mEq/L (${p.correctedNa.note})`);
+    if (p.correctedCa.status === 'OK') lines.push(`Corrected Ca: ${p.correctedCa.value} mg/dL (${p.correctedCa.note})`);
+    if (p.pfRatio.status === 'OK') lines.push(`P/F Ratio: ${p.pfRatio.value} (${p.pfRatio.note})`);
+    if (p.aaGradient.status === 'OK') lines.push(`A-a Gradient: ${p.aaGradient.value} mmHg (${p.aaGradient.note})`);
+    if (p.pbwArds.status === 'OK') lines.push(`Devine PBW: ${p.pbwArds.pbwKg} kg (${p.pbwArds.note})`);
+    return lines.join('\n');
+  }
+  if (calcActiveTab === 'scores' && lastScoreResult) {
+    lines.push(lastScoreResult.summary);
+    if (lastScoreResult.breakdown?.length) {
+      lines.push('', 'Components:');
+      for (const b of lastScoreResult.breakdown) lines.push(`- ${b}`);
+    }
+    return lines.join('\n');
+  }
   if (audit) {
     const { inputs, renal, flags } = audit;
     const wtTxt = inputs.weight?.valueKg ? `${inputs.weight.valueKg} kg` : 'Wt missing';
@@ -4195,9 +4958,13 @@ function openCalcModal(noteId = null, initialTab = 'audit', triggerEl = null) {
   calcUserTouchedDrip = initialTab === 'drip';
   const note = notes.find((n) => n.id === calcNoteId) || null;
   syncDripFromChart(note);
+  syncPhysiologyFromChart(note);
+  syncScoresFromChart(note);
 
   renderAuditPane();
   renderDripCalculator();
+  renderPhysiologyPane();
+  renderScoresPane();
   setCalcTab(initialTab);
   openModalEl($('calcModal'), triggerEl);
 }
@@ -5221,8 +5988,61 @@ function renderAdmittingHistoryCard(content) {
     .join('')}</div>`;
 }
 
+let currentProfileLines = [];
+let currentProfileAbx = [];
+
+function renderProfileLinesList() {
+  const container = $('profileLinesList');
+  if (!container) return;
+  const items = parseTrackedLines(formatTrackedLines(currentProfileLines));
+  currentProfileLines = items.map((it) => ({ name: it.name, startDate: it.startDate }));
+  if (!items.length) {
+    container.innerHTML = '<div class="cf-meta">No lines/drains logged</div>';
+    return;
+  }
+  container.innerHTML = items
+    .map(
+      (it, idx) => `
+      <div class="tracked-row ${it.overdue ? 'is-overdue' : ''}">
+        <span class="tracked-row-lbl">${esc(it.label)}${it.overdue ? ' · Review' : ''}</span>
+        <button type="button" class="ghost-action sm-btn tracked-del-line-btn" data-idx="${idx}" aria-label="Remove ${esc(it.name)}">${uiIcon('x')}</button>
+      </div>`
+    )
+    .join('');
+}
+
+let currentProfileCompletedAbx = [];
+
+function renderProfileAbxList() {
+  const container = $('profileAbxList');
+  if (!container) return;
+  const items = parseTrackedAntibiotics(formatTrackedAntibiotics(currentProfileAbx), new Date());
+  currentProfileAbx = items.map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+  }));
+  if (!items.length) {
+    container.innerHTML = '<div class="cf-meta">No tracked antibiotics</div>';
+    return;
+  }
+  container.innerHTML = items
+    .map(
+      (it, idx) => `
+      <div class="tracked-row ${it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : ''}">
+        <span class="tracked-row-lbl">${esc(it.label)}${it.freq ? ` <span class="cf-meta">· ${esc(it.freq)}${it.startTime ? ` @ ${esc(it.startTime)}` : ''}</span>` : ''}</span>
+        <button type="button" class="ghost-action sm-btn tracked-del-abx-btn" data-idx="${idx}" aria-label="Remove ${esc(it.drug)}">${uiIcon('x')}</button>
+      </div>`
+    )
+    .join('');
+}
+
 function populateProfileInputs(note = {}, content = '', preserveAliases = false) {
   const m = metaOf(content);
+  const parsed = parseChart(content, note);
   $('nameInput').value = m.name || m.patient || note.name || '';
   if (!preserveAliases) {
     const parsedAliases = String(m.aliases || '')
@@ -5237,13 +6057,38 @@ function populateProfileInputs(note = {}, content = '', preserveAliases = false)
   $('sexInput').value = (m.sex || m.gender || '').toUpperCase();
   const rawWt = m.weight || m.wt || m.weight_kg || m['weight (kg)'] || '';
   $('weightInput').value = String(rawWt).replace(/\s*kg$/i, '').trim();
+  if ($('heightCmInput')) $('heightCmInput').value = m.height_cm || m.height || '';
   $('serviceInput').value = m.service || m.dept || m.specialty || '';
   $('apInput').value = m.ap || m.attending || '';
   $('admittedInput').value = m.admitted || m['date admitted'] || '';
+  if ($('icuAdmittedInput')) $('icuAdmittedInput').value = m.icu_admitted || '';
   $('assessmentInput').value = m.assessment || m.impression || m.dx || '';
+  if ($('codeStatusSelect')) $('codeStatusSelect').value = parsed.codeStatus || 'Full Code';
+  if ($('severitySelect')) $('severitySelect').value = parsed.severity || 'Stable';
+  if ($('allergiesInput')) $('allergiesInput').value = m.allergies || m.allergy || '';
+  if ($('contingenciesInput')) $('contingenciesInput').value = m.contingencies || '';
+  const isoSet = new Set((parsed.isolation || []).map((v) => v.toLowerCase()));
+  document.querySelectorAll('#isolationChecks input[type="checkbox"]').forEach((cb) => {
+    cb.checked = isoSet.has(cb.value.toLowerCase());
+  });
+  currentProfileLines = (parsed.trackedLines || []).map((it) => ({ name: it.name, startDate: it.startDate }));
+  currentProfileAbx = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+  }));
+  currentProfileCompletedAbx = (parsed.completedAntibiotics || []).map((it) => ({ ...it }));
+  if ($('addAbxTimeInput') && !$('addAbxTimeInput').value) {
+    $('addAbxTimeInput').value = nowHhMm();
+  }
+  renderProfileLinesList();
+  renderProfileAbxList();
   $('censusToggle').checked =
     m.census !== undefined ? String(m.census).toLowerCase() === 'true' : true;
-  currentChartCategories = [...(parseChart(content, note).categories || [])];
+  currentChartCategories = [...(parsed.categories || [])];
   renderProfileCategoryFlags();
   updateProfileSummary();
 }
@@ -5281,6 +6126,9 @@ function renderEditorNoteTitle(name, room, fallback = 'Untitled note') {
 }
 
 function syncProfileInputsToMarkdown() {
+  const isolationVals = Array.from(document.querySelectorAll('#isolationChecks input[type="checkbox"]:checked'))
+    .map((cb) => cb.value)
+    .filter(Boolean);
   const fields = {
     name: $('nameInput').value.trim(),
     room: $('roomInput').value.trim(),
@@ -5291,9 +6139,19 @@ function syncProfileInputsToMarkdown() {
     age: $('ageInput').value.trim(),
     sex: $('sexInput').value.trim(),
     weight: $('weightInput').value.trim(),
+    height_cm: $('heightCmInput')?.value.trim() || '',
     service: $('serviceInput').value.trim(),
     ap: $('apInput').value.trim(),
     admitted: $('admittedInput').value.trim(),
+    icu_admitted: $('icuAdmittedInput')?.value.trim() || '',
+    code_status: $('codeStatusSelect')?.value || '',
+    severity: $('severitySelect')?.value || '',
+    allergies: $('allergiesInput')?.value.trim() || '',
+    isolation: isolationVals,
+    contingencies: $('contingenciesInput')?.value.trim() || '',
+    lines: formatTrackedLines(currentProfileLines),
+    antibiotics: formatTrackedAntibiotics(currentProfileAbx),
+    antibiotics_completed: formatCompletedAntibiotics(currentProfileCompletedAbx),
     assessment: $('assessmentInput').value.trim(),
     census: $('censusToggle').checked,
     categories: dedupeCategoryList(currentChartCategories),
@@ -5348,13 +6206,76 @@ function buildLabExportSlug(patient = {}) {
 function getCurrentChartLabSummary() {
   const note = notes.find((n) => n.id === currentId) || {};
   const content = $('noteText').value || '';
-  return extractChartLabSummary(content, note);
+  return extractChartLabSummary(content, note, { unitSystem: currentUnitSystem });
+}
+
+function renderFishboneCell(slot, extraCls = '') {
+  if (!slot) {
+    return `<div class="fb-cell is-empty ${extraCls}"><span class="fb-val">—</span></div>`;
+  }
+  const flagCls = slot.flag === 'H' ? 'flag-h' : slot.flag === 'L' ? 'flag-l' : '';
+  return `<div class="fb-cell ${extraCls} ${flagCls}" title="${esc(slot.label)} ${esc(slot.value)} ${esc(slot.unit)}"><span class="fb-val">${esc(slot.value)}</span><span class="fb-lbl">${esc(slot.label)}</span></div>`;
+}
+
+function renderFishbonesSectionHtml(summary) {
+  const fb = buildFishboneData(summary);
+  if (!fb.cbc.present && !fb.bmp.present) return '';
+  const unitLabel = fb.unitSystem === 'si' ? 'SI (mmol/L · µmol/L · g/L)' : 'Conventional (US)';
+
+  const cbcHtml = fb.cbc.present
+    ? `
+      <div class="fishbone-card">
+        <div class="fishbone-card-head">
+          <span>CBC</span>
+          <span class="fishbone-unit-tag">${esc(fb.cbc.slots.hb?.unit || 'g/dL')}</span>
+        </div>
+        <div class="fishbone-cbc" role="img" aria-label="CBC fishbone diagram">
+          <div class="fb-cbc-left">${renderFishboneCell(fb.cbc.slots.wbc)}</div>
+          <div class="fb-cbc-mid">
+            <div class="fb-cbc-top">${renderFishboneCell(fb.cbc.slots.hb)}</div>
+            <div class="fb-cbc-bot">${renderFishboneCell(fb.cbc.slots.hct)}</div>
+          </div>
+          <div class="fb-cbc-right">${renderFishboneCell(fb.cbc.slots.plt)}</div>
+        </div>
+      </div>`
+    : '';
+
+  const bmpHtml = fb.bmp.present
+    ? `
+      <div class="fishbone-card">
+        <div class="fishbone-card-head">
+          <span>BMP / Chem-7</span>
+          <span class="fishbone-unit-tag">${esc(fb.bmp.slots.cr?.unit || 'mg/dL')}</span>
+        </div>
+        <div class="fishbone-bmp" role="img" aria-label="BMP fishbone diagram">
+          <div class="fb-bmp-col">${renderFishboneCell(fb.bmp.slots.na)}${renderFishboneCell(fb.bmp.slots.k)}</div>
+          <div class="fb-bmp-col">${renderFishboneCell(fb.bmp.slots.cl)}${renderFishboneCell(fb.bmp.slots.hco3)}</div>
+          <div class="fb-bmp-col">${renderFishboneCell(fb.bmp.slots.bun)}${renderFishboneCell(fb.bmp.slots.cr)}</div>
+          <div class="fb-bmp-glu">${renderFishboneCell(fb.bmp.slots.glu)}</div>
+        </div>
+      </div>`
+    : '';
+
+  return `
+    <div class="labs-section">
+      <div class="labs-section-title">Bedside Fishbones · ${esc(unitLabel)}</div>
+      <div class="fishbone-grid">${cbcHtml}${bmpHtml}</div>
+    </div>
+  `;
 }
 
 function renderChartLabsSummary() {
   const chipsEl = $('labsPanelChips');
   const contentEl = $('chartLabsContent');
   if (!chipsEl || !contentEl) return;
+
+  if ($('labsUnitToggle')) {
+    $('labsUnitToggle').querySelectorAll('[data-unit-sys]').forEach((btn) => {
+      const active = btn.dataset.unitSys === currentUnitSystem;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+  }
 
   const summary = getCurrentChartLabSummary();
   const hasAny = Boolean(summary.hasLabs);
@@ -5547,7 +6468,11 @@ function renderChartLabsSummary() {
     `;
   }
 
-  contentEl.innerHTML = `${metaHtml}${latestSectionHtml}${flowsheetHtml}${diagnosticsHtml}`;
+  const fishboneHtml = labsPanelFilter === 'all' || labsPanelFilter === 'Chemistry' || labsPanelFilter === 'CBC'
+    ? renderFishbonesSectionHtml(summary)
+    : '';
+
+  contentEl.innerHTML = `${metaHtml}${fishboneHtml}${latestSectionHtml}${flowsheetHtml}${diagnosticsHtml}`;
 }
 
 function formatTimelineEventHtml(line) {
@@ -6322,6 +7247,7 @@ async function runFullWorkspaceBackup() {
     customCategories,
     shiftSchedule,
     appearance: { theme: currentThemeId, accent: currentAccentHex },
+    clinicalPrefs: { planMode: currentPlanMode, unitSystem: currentUnitSystem, handoverFormat: currentHandoverFormat },
     templateConfig,
     rawUpdateTemplate: getSavedUpdateTemplate(),
   };
@@ -6371,6 +7297,14 @@ function parseBackupPayload(rawJson) {
           ? {
               theme: normalizeThemeId(rawJson.appearance.theme),
               accent: normalizeHexColor(rawJson.appearance.accent),
+            }
+          : null,
+      clinicalPrefs:
+        rawJson.clinicalPrefs && typeof rawJson.clinicalPrefs === 'object'
+          ? {
+              planMode: rawJson.clinicalPrefs.planMode,
+              unitSystem: rawJson.clinicalPrefs.unitSystem,
+              handoverFormat: rawJson.clinicalPrefs.handoverFormat,
             }
           : null,
       templateConfig: rawJson.templateConfig || null,
@@ -6448,6 +7382,11 @@ async function applyRestorePayload() {
   }
   if (pendingRestorePayload.appearance) {
     applyAppearance(pendingRestorePayload.appearance.theme, pendingRestorePayload.appearance.accent, { persist: true });
+  }
+  if (pendingRestorePayload.clinicalPrefs) {
+    if (pendingRestorePayload.clinicalPrefs.planMode) setPlanMode(pendingRestorePayload.clinicalPrefs.planMode, { persist: true });
+    if (pendingRestorePayload.clinicalPrefs.unitSystem) setUnitSystem(pendingRestorePayload.clinicalPrefs.unitSystem, { persist: true });
+    if (pendingRestorePayload.clinicalPrefs.handoverFormat) setHandoverFormat(pendingRestorePayload.clinicalPrefs.handoverFormat, { persist: true });
   }
 
   if (pendingRestorePayload.templateConfig && Array.isArray(pendingRestorePayload.templateConfig.sections)) {
@@ -6828,6 +7767,12 @@ $('handoverBtn').onclick = () => {
   closeAllMenus();
   openHandoverModal($('handoverBtn'));
 };
+if ($('roundsPrintScutsheetBtn')) {
+  $('roundsPrintScutsheetBtn').onclick = () => {
+    closeAllMenus();
+    printScutsheet();
+  };
+}
 $('inboxBtn').onclick = () => {
   closeAllMenus();
   openInboxModal(null, $('inboxBtn'));
@@ -6918,11 +7863,18 @@ $('timelineSearchInput').oninput = (e) => {
   'ageInput',
   'sexInput',
   'weightInput',
+  'heightCmInput',
   'serviceInput',
   'apInput',
   'admittedInput',
+  'icuAdmittedInput',
+  'codeStatusSelect',
+  'severitySelect',
+  'allergiesInput',
+  'contingenciesInput',
   'assessmentInput',
 ].forEach((id) => {
+  if (!$(id)) return;
   $(id).oninput = () => {
     syncProfileInputsToMarkdown();
     markChartDirty();
@@ -6931,6 +7883,62 @@ $('timelineSearchInput').oninput = (e) => {
     syncProfileInputsToMarkdown();
     markChartDirty();
   };
+});
+$('isolationChecks')?.addEventListener('change', () => {
+  syncProfileInputsToMarkdown();
+  markChartDirty();
+});
+$('addLineBtn')?.addEventListener('click', () => {
+  const name = $('addLineNameInput')?.value.trim();
+  if (!name) return toast('Enter line or drain name first');
+  const startDate = $('addLineDateInput')?.value.trim() || getTodayDateStrings().mmddyyyy;
+  currentProfileLines.push({ name, startDate });
+  if ($('addLineNameInput')) $('addLineNameInput').value = '';
+  if ($('addLineDateInput')) $('addLineDateInput').value = '';
+  renderProfileLinesList();
+  syncProfileInputsToMarkdown();
+  markChartDirty();
+});
+$('profileLinesList')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.tracked-del-line-btn[data-idx]');
+  if (!btn) return;
+  const idx = parseInt(btn.dataset.idx, 10);
+  if (Number.isNaN(idx)) return;
+  currentProfileLines.splice(idx, 1);
+  renderProfileLinesList();
+  syncProfileInputsToMarkdown();
+  markChartDirty();
+});
+$('profileManageAbxBtn')?.addEventListener('click', () => {
+  if (!currentId) return toast('Select or create a patient chart first');
+  syncProfileInputsToMarkdown();
+  openAbxModal(currentId, $('profileManageAbxBtn'));
+});
+$('addAbxBtn')?.addEventListener('click', () => {
+  const drug = $('addAbxDrugInput')?.value.trim();
+  if (!drug) return toast('Enter antibiotic name first');
+  const freq = $('addAbxFreqSelect')?.value || 'q8h';
+  const startDate = $('addAbxDateInput')?.value.trim() || getTodayDateStrings().mmddyyyy;
+  const startTime = $('addAbxTimeInput')?.value.trim() || nowHhMm();
+  const plannedNum = parseInt($('addAbxDaysInput')?.value || '', 10);
+  const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+  currentProfileAbx.push({ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 });
+  if ($('addAbxDrugInput')) $('addAbxDrugInput').value = '';
+  if ($('addAbxDateInput')) $('addAbxDateInput').value = '';
+  if ($('addAbxDaysInput')) $('addAbxDaysInput').value = '';
+  renderProfileAbxList();
+  syncProfileInputsToMarkdown();
+  markChartDirty();
+});
+$('profileAbxList')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.tracked-del-abx-btn[data-idx]');
+  if (!btn) return;
+  const idx = parseInt(btn.dataset.idx, 10);
+  if (Number.isNaN(idx)) return;
+  currentProfileAbx.splice(idx, 1);
+  renderProfileAbxList();
+  syncProfileInputsToMarkdown();
+  markChartDirty();
 });
 if ($('censusToggle')) {
   $('censusToggle').onchange = () => {
@@ -7663,7 +8671,7 @@ if ($('shiftDateInput')) {
     if (!shiftRawEdited) syncShiftPreviewFromForm({ forceRawUpdate: true });
   };
 }
-['cfPending', 'cfServicePlans', 'cfStanding', 'cfFeeding', 'cfPe'].forEach((id) => {
+['cfPending', 'cfServicePlans', 'cfStanding', 'cfFeeding', 'cfPe', 'cfContingencies'].forEach((id) => {
   if ($(id)) $(id).onchange = () => applyCarryForwardToggleToShiftForm(id);
 });
 
@@ -7683,6 +8691,8 @@ if ($('handoverYesterdayBtn')) {
   };
 }
 if ($('handoverScopeSelect')) $('handoverScopeSelect').onchange = rebuildHandoverReport;
+if ($('handoverFormatSelect')) $('handoverFormatSelect').onchange = rebuildHandoverReport;
+if ($('printScutsheetBtn')) $('printScutsheetBtn').onclick = printScutsheet;
 if ($('hoShowVitalsLabs')) $('hoShowVitalsLabs').onchange = rebuildHandoverReport;
 if ($('hoShowResolved')) $('hoShowResolved').onchange = rebuildHandoverReport;
 
@@ -8002,10 +9012,294 @@ $('inboxFileBtn').onclick = async () => {
   toast(`Filed to ${targetNote.room || targetNote.title} (${dateStr})`);
 };
 
+// Quick Antibiotics Tracker modal (Rounds pop-up)
+let abxModalNoteId = null;
+
+function getActiveAbxNoteContent(note) {
+  if (!note) return '';
+  if (currentMode === 'editor' && currentId === note.id && $('noteText')) {
+    return $('noteText').value;
+  }
+  return note.content || '';
+}
+
+function updateAbxModalLivePreview() {
+  const el = $('abxModalLivePreview');
+  if (!el) return;
+  const drug = $('abxModalDrugInput')?.value.trim() || 'Antibiotic';
+  const freq = $('abxModalFreqSelect')?.value || 'q8h';
+  const isoDate = $('abxModalDateInput')?.value || getTodayDateStrings().yyyymmdd;
+  const startDate = isoToMmDdYyyy(isoDate) || getTodayDateStrings().mmddyyyy;
+  const startTime = $('abxModalTimeInput')?.value || '08:00';
+  const plannedNum = parseInt($('abxModalDaysInput')?.value || '', 10);
+  const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+
+  const [item] = parseTrackedAntibiotics(
+    formatTrackedAntibiotics([{ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 }]),
+    new Date()
+  );
+  if (!item) {
+    el.textContent = '';
+    return;
+  }
+  const freqMeta = ABX_FREQUENCIES.find((f) => f.id === freq);
+  const flipHint =
+    freqMeta && freqMeta.dosesPerDay > 1
+      ? `Day 1 flips after ${freqMeta.dosesPerDay} doses`
+      : 'Day 1 starts on 1st dose (24h coverage)';
+  el.textContent = `Preview: ${item.label} · ${flipHint}`;
+}
+
+async function saveAbxStateToChart(note, activeList, completedList, { logFinishLine = '' } = {}) {
+  if (!note) return;
+  let nextContent = syncFrontmatter(getActiveAbxNoteContent(note), {
+    antibiotics: formatTrackedAntibiotics(activeList),
+    antibiotics_completed: formatCompletedAntibiotics(completedList),
+  });
+
+  if (logFinishLine) {
+    const parsedAfter = parseChart(nextContent, note);
+    const shift =
+      parsedAfter.isUpdatedToday && parsedAfter.latestShift
+        ? parsedAfter.latestShift
+        : defaultShiftForHour();
+    const targetDate = parsedAfter.isUpdatedToday
+      ? parsedAfter.latestDate
+      : getDutyDateStrings().mmddyyyy;
+    nextContent = appendShiftBlock(nextContent, shift, targetDate, logFinishLine, null, {
+      mergeExistingShift: true,
+    });
+  }
+
+  note.content = nextContent;
+  note.updated = Date.now();
+  await put(note);
+  await refresh();
+
+  if (currentId === note.id) {
+    if ($('noteText')) $('noteText').value = note.content;
+    lastSavedChartContent = note.content;
+    dirtyChart = false;
+    updateSaveStatusPill('saved');
+    populateProfileInputs(note, note.content, true);
+    refreshActiveEditorView();
+  }
+  renderAbxModal();
+}
+
+function renderAbxModal() {
+  const note = notes.find((n) => n.id === abxModalNoteId);
+  const activeEl = $('abxModalActiveList');
+  const compEl = $('abxModalCompletedList');
+  const compCountEl = $('abxModalCompletedCount');
+  if (!note || !activeEl || !compEl) return;
+
+  const content = getActiveAbxNoteContent(note);
+  const parsed = parseChart(content, note);
+  const active = parsed.trackedAntibiotics || [];
+  const completed = parsed.completedAntibiotics || [];
+
+  if (!active.length) {
+    activeEl.innerHTML = '<div class="abx-empty-note">No active antibiotics tracked. Add one below.</div>';
+  } else {
+    activeEl.innerHTML = active
+      .map((it, idx) => {
+        const statusCls = it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : '';
+        const scheduleDesc = [
+          it.freq || 'date-only',
+          it.startDate ? `Started ${it.startDate}${it.startTime ? ` ${it.startTime}` : ''}` : '',
+          it.dosesGiven !== null && it.dosesGiven !== undefined ? `${it.dosesGiven} dose(s) counted` : '',
+          it.nextDoseTime ? `Next ~${it.nextDoseTime}` : '',
+          it.doseOffset ? `Adj ${it.doseOffset > 0 ? `+${it.doseOffset}` : it.doseOffset}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+
+        return `
+          <div class="abx-modal-row ${statusCls}">
+            <div class="abx-modal-row-main">
+              <div class="abx-modal-row-title">${esc(it.label)}</div>
+              <div class="abx-modal-row-meta">${esc(scheduleDesc)}</div>
+            </div>
+            <div class="abx-modal-row-actions">
+              ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="-1" title="Mark 1 dose held / missed">-1 Held</button>` : ''}
+              ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="1" title="Count 1 additional dose given">+1 Dose</button>` : ''}
+              <button type="button" class="btn-secondary sm-btn abx-finish-btn" data-idx="${idx}" title="Complete course and log into today's shift">Finish</button>
+              <button type="button" class="ghost-action danger-ghost sm-btn abx-remove-btn" data-idx="${idx}" title="Delete antibiotic entry">Remove</button>
+            </div>
+          </div>`;
+      })
+      .join('');
+  }
+
+  if (compCountEl) compCountEl.textContent = String(completed.length);
+  if (!completed.length) {
+    compEl.innerHTML = '<div class="cf-meta">No completed courses archived yet.</div>';
+  } else {
+    compEl.innerHTML = completed
+      .map(
+        (c, idx) => `
+        <div class="abx-completed-row">
+          <span class="abx-completed-lbl">${esc(c.label)}</span>
+          <button type="button" class="ghost-action danger-ghost sm-btn abx-del-completed-btn" data-idx="${idx}" aria-label="Remove ${esc(c.drug)} from history">${uiIcon('x')}</button>
+        </div>`
+      )
+      .join('');
+  }
+}
+
+function openAbxModal(noteId, triggerEl = null) {
+  const note = notes.find((n) => n.id === noteId);
+  if (!note) return;
+  abxModalNoteId = noteId;
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  if ($('abxModalSubtitle')) {
+    $('abxModalSubtitle').textContent = `${parsed.room || 'Unassigned'} · ${parsed.name || 'Patient'}`;
+  }
+  if ($('abxModalDrugInput')) $('abxModalDrugInput').value = '';
+  if ($('abxModalFreqSelect')) $('abxModalFreqSelect').value = 'q8h';
+  if ($('abxModalDaysInput')) $('abxModalDaysInput').value = '';
+  if ($('abxModalDateInput')) $('abxModalDateInput').value = getTodayDateStrings().yyyymmdd;
+  if ($('abxModalTimeInput')) $('abxModalTimeInput').value = nowHhMm();
+  if ($('abxModalCompletedDetails')) $('abxModalCompletedDetails').open = false;
+
+  renderAbxModal();
+  updateAbxModalLivePreview();
+  openModalEl($('abxModal'), triggerEl, $('abxModalDrugInput'));
+}
+
+function closeAbxModal() {
+  abxModalNoteId = null;
+  closeModalEl($('abxModal'));
+}
+
+$('abxModalClose')?.addEventListener('click', closeAbxModal);
+$('abxModalDoneBtn')?.addEventListener('click', closeAbxModal);
+
+['abxModalDrugInput', 'abxModalFreqSelect', 'abxModalDaysInput', 'abxModalDateInput', 'abxModalTimeInput'].forEach((id) => {
+  if (!$(id)) return;
+  $(id).addEventListener($(id).tagName === 'SELECT' || id === 'abxModalDateInput' || id === 'abxModalTimeInput' ? 'change' : 'input', updateAbxModalLivePreview);
+});
+
+$('abxModalForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const note = notes.find((n) => n.id === abxModalNoteId);
+  if (!note) return;
+  const drug = $('abxModalDrugInput')?.value.trim();
+  if (!drug) return toast('Enter antibiotic name & dose first');
+  const freq = $('abxModalFreqSelect')?.value || 'q8h';
+  const startDate = isoToMmDdYyyy($('abxModalDateInput')?.value || '') || getTodayDateStrings().mmddyyyy;
+  const startTime = $('abxModalTimeInput')?.value.trim() || nowHhMm();
+  const plannedNum = parseInt($('abxModalDaysInput')?.value || '', 10);
+  const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  const nextActive = [
+    ...(parsed.trackedAntibiotics || []).map((it) => ({
+      drug: it.drug,
+      startDate: it.startDate,
+      plannedDays: it.plannedDays,
+      freq: it.freq,
+      startTime: it.startTime,
+      doseOffset: it.doseOffset || 0,
+    })),
+    { drug, startDate, plannedDays, freq, startTime, doseOffset: 0 },
+  ];
+  await saveAbxStateToChart(note, nextActive, parsed.completedAntibiotics || []);
+  if ($('abxModalDrugInput')) $('abxModalDrugInput').value = '';
+  if ($('abxModalDaysInput')) $('abxModalDaysInput').value = '';
+  updateAbxModalLivePreview();
+  toast(`Added ${drug}`);
+});
+
+$('abxModalActiveList')?.addEventListener('click', async (e) => {
+  const note = notes.find((n) => n.id === abxModalNoteId);
+  if (!note) return;
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  const active = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+    dayCount: it.dayCount,
+  }));
+  const completed = (parsed.completedAntibiotics || []).map((c) => ({ ...c }));
+
+  const offsetBtn = e.target.closest('.abx-offset-btn[data-idx]');
+  if (offsetBtn) {
+    const idx = parseInt(offsetBtn.dataset.idx, 10);
+    const delta = parseInt(offsetBtn.dataset.delta || '0', 10);
+    if (!Number.isNaN(idx) && active[idx] && delta) {
+      active[idx].doseOffset = (active[idx].doseOffset || 0) + delta;
+      await saveAbxStateToChart(note, active, completed);
+      toast(delta > 0 ? `Added +1 dose to ${active[idx].drug}` : `Marked 1 dose held for ${active[idx].drug}`);
+    }
+    return;
+  }
+
+  const finishBtn = e.target.closest('.abx-finish-btn[data-idx]');
+  if (finishBtn) {
+    const idx = parseInt(finishBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    active.splice(idx, 1);
+    const todayStr = getTodayDateStrings().mmddyyyy;
+    const doneDays = target.dayCount !== null && target.dayCount !== undefined ? target.dayCount : 0;
+    completed.unshift({
+      drug: target.drug,
+      startDate: target.startDate || todayStr,
+      completedDate: todayStr,
+      completedDays: doneDays,
+      plannedDays: target.plannedDays || null,
+      freq: target.freq || '',
+    });
+    const finishLine = `Completed antibiotic: ${target.drug} (D${doneDays}${target.plannedDays ? `/${target.plannedDays}` : ''} · started ${target.startDate || todayStr})`;
+    await saveAbxStateToChart(note, active, completed, { logFinishLine: finishLine });
+    toast(`Finished ${target.drug} — archived & logged`);
+    return;
+  }
+
+  const removeBtn = e.target.closest('.abx-remove-btn[data-idx]');
+  if (removeBtn) {
+    const idx = parseInt(removeBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    active.splice(idx, 1);
+    await saveAbxStateToChart(note, active, completed);
+    toast(`Removed ${target.drug}`);
+  }
+});
+
+$('abxModalCompletedList')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.abx-del-completed-btn[data-idx]');
+  if (!btn) return;
+  const note = notes.find((n) => n.id === abxModalNoteId);
+  if (!note) return;
+  const idx = parseInt(btn.dataset.idx, 10);
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  const completed = (parsed.completedAntibiotics || []).map((c) => ({ ...c }));
+  if (Number.isNaN(idx) || !completed[idx]) return;
+  const removed = completed.splice(idx, 1)[0];
+  const active = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+  }));
+  await saveAbxStateToChart(note, active, completed);
+  toast(`Deleted ${removed.drug} from history`);
+});
+
 // Clinical Calculators & Safety Audit modal actions
 $('calcModalClose').onclick = closeCalcModal;
 $('calcTabAudit').onclick = () => setCalcTab('audit');
 $('calcTabDrip').onclick = () => setCalcTab('drip');
+if ($('calcTabPhysiology')) $('calcTabPhysiology').onclick = () => setCalcTab('physiology');
+if ($('calcTabScores')) $('calcTabScores').onclick = () => setCalcTab('scores');
 
 $('calcPatientSelect').onchange = () => {
   calcNoteId = $('calcPatientSelect').value;
@@ -8016,9 +9310,29 @@ $('calcPatientSelect').onchange = () => {
   $('calcQuickWeightInput').value = '';
   const note = notes.find((n) => n.id === calcNoteId) || null;
   syncDripFromChart(note);
+  syncPhysiologyFromChart(note);
+  syncScoresFromChart(note);
   renderAuditPane();
   renderDripCalculator();
+  renderPhysiologyPane();
+  renderScoresPane();
 };
+
+['physNa', 'physCl', 'physHco3', 'physAlb', 'physGlu', 'physCa', 'physPao2', 'physPaco2', 'physFio2', 'physHeight', 'physSex', 'physAge'].forEach((id) => {
+  if (!$(id)) return;
+  $(id).addEventListener($(id).tagName === 'SELECT' ? 'change' : 'input', renderPhysiologyPane);
+});
+$('physResetBtn')?.addEventListener('click', () => {
+  const note = notes.find((n) => n.id === calcNoteId) || null;
+  syncPhysiologyFromChart(note);
+  renderPhysiologyPane();
+});
+$('scorePickerSelect')?.addEventListener('change', renderScoresPane);
+$('scoreResetBtn')?.addEventListener('click', () => {
+  const note = notes.find((n) => n.id === calcNoteId) || null;
+  syncScoresFromChart(note);
+  renderScoresPane();
+});
 
 $('calcQuickWeightSaveBtn').onclick = async () => {
   const note = notes.find((n) => n.id === calcNoteId);
@@ -8186,6 +9500,20 @@ if ($('calcInsertChartBtn')) {
             : `${drip.dosePerHour} ${drip.drugUnit}/hr`;
       lines.push(`Drips: ${drip.drugName} @ ${doseTxt} (${drip.rateMlPerHr} mL/hr · ${drip.totalDrugAmount}${drip.drugUnit}/${drip.bagVolumeMl}mL)`);
       if (drip.shortfallMessage) lines.push(`Drip Bag Check: ${drip.shortfallMessage}`);
+    } else if (calcActiveTab === 'physiology') {
+      const p = lastPhysiologyResult;
+      if (!p) return toast('No physiology results available');
+      if (p.anionGap.status === 'OK') lines.push(`Anion Gap: ${p.anionGap.value} mEq/L${p.anionGap.correctedAg !== null ? ` (Alb-Corr ${p.anionGap.correctedAg})` : ''} [${p.anionGap.note}]`);
+      if (p.correctedNa.status === 'OK') lines.push(`Corrected Na: ${p.correctedNa.value} mEq/L`);
+      if (p.correctedCa.status === 'OK') lines.push(`Corrected Ca: ${p.correctedCa.value} mg/dL`);
+      if (p.pfRatio.status === 'OK') lines.push(`P/F Ratio: ${p.pfRatio.value} (${p.pfRatio.band})`);
+      if (p.aaGradient.status === 'OK') lines.push(`A-a Gradient: ${p.aaGradient.value} mmHg`);
+      if (p.pbwArds.status === 'OK') lines.push(`PBW: ${p.pbwArds.pbwKg} kg (${p.pbwArds.note})`);
+      if (!lines.length) return toast('Enter electrolytes, ABG, or height first');
+    } else if (calcActiveTab === 'scores') {
+      const s = lastScoreResult;
+      if (!s) return toast('No score available');
+      lines.push(`Clinical Score: ${s.summary}`);
     } else {
       const audit = lastAuditResult;
       if (!audit) return toast('No audit results available');
@@ -9055,6 +10383,7 @@ setInterval(updateDutyClockUi, 60000);
 (async () => {
   syncVisualViewportVars();
   initAppearanceSettings();
+  initClinicalSettings();
   renderAllShiftPillGroups();
   renderShiftScheduleSettings();
   setSettingsTab(activeSettingsTab, { persist: false });

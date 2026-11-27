@@ -534,6 +534,59 @@ const LAB_UNITS_BY_KEY = {
   FT4: 'pmol/L',
 };
 
+export const LAB_UNIT_SYSTEMS = {
+  conventional: { id: 'conventional', label: 'Conventional (US)' },
+  si: { id: 'si', label: 'SI (International)' },
+};
+
+const SI_CONVERSIONS = {
+  Cr: { unit: 'µmol/L', factor: 88.4, decimals: 0, alreadySiMin: 30 },
+  BUN: { unit: 'mmol/L', factor: 0.357, decimals: 1 },
+  Glu: { unit: 'mmol/L', factor: 0.0555, decimals: 1 },
+  Ca: { unit: 'mmol/L', factor: 0.25, decimals: 2 },
+  Mg: { unit: 'mmol/L', factor: 0.4114, decimals: 2 },
+  Phos: { unit: 'mmol/L', factor: 0.3229, decimals: 2 },
+  Alb: { unit: 'g/L', factor: 10, decimals: 0, alreadySiMin: 15 },
+  TBili: { unit: 'µmol/L', factor: 17.1, decimals: 0 },
+  Hb: { unit: 'g/L', factor: 10, decimals: 0, alreadySiMin: 30 },
+  pCO2: { unit: 'kPa', factor: 0.1333, decimals: 1 },
+  pO2: { unit: 'kPa', factor: 0.1333, decimals: 1 },
+};
+
+function roundDecimal(num, decimals = 1) {
+  const factor = 10 ** decimals;
+  return Math.round(num * factor) / factor;
+}
+
+export function getLabUnitMeta(key, unitSystem = 'conventional') {
+  const sys = unitSystem === 'si' ? 'si' : 'conventional';
+  if (sys === 'si' && Object.hasOwn(SI_CONVERSIONS, key)) {
+    return SI_CONVERSIONS[key];
+  }
+  return { unit: LAB_UNITS_BY_KEY[key] ?? '', factor: 1, decimals: null };
+}
+
+export function convertLabValue(key, num, unitSystem = 'conventional') {
+  if (!Number.isFinite(num)) return null;
+  const sys = unitSystem === 'si' ? 'si' : 'conventional';
+  if (sys !== 'si' || !Object.hasOwn(SI_CONVERSIONS, key)) {
+    return num;
+  }
+  const conv = SI_CONVERSIONS[key];
+  if (Number.isFinite(conv.alreadySiMin) && num >= conv.alreadySiMin) {
+    return roundDecimal(num, conv.decimals);
+  }
+  return roundDecimal(num * conv.factor, conv.decimals);
+}
+
+function formatConvertedNum(num, convMeta) {
+  if (!Number.isFinite(num)) return '';
+  if (convMeta && Number.isInteger(convMeta.decimals)) {
+    return num.toFixed(convMeta.decimals);
+  }
+  return String(num);
+}
+
 const PANEL_PREFIX_RE = /^(?:ABG\/VBG|VBG|ABG|CBC|Chemistry|Chem|BMP|CMP|Electrolytes?|Lytes|Renal|LFTs?|Liver|Coags?|Coagulation|Cardiac|Inflammatory|Thyroid|iSTAT|Labs?)(?:\s+(?:w\/?\s*lactate|post[\s-]*HD|pre[\s-]*HD|repeat|\([^)]+\)))?\s*[:=-]\s*/i;
 
 const DIAGNOSTIC_PREFIX_RE = /^(?:CXR(?:\s+[^:=-]{1,40})?|Chest\s*X-?ray(?:\s+[^:=-]{1,40})?|12-?L(?:ead)?\s*ECG|ECG|EKG|2D\s*Echo(?:\s+w\/\s*Doppler)?|T?TE|CT(?:\s+[^:=-]{1,40})?|MRI(?:\s+[^:=-]{1,40})?|UTZ|Ultrasound(?:\s+[^:=-]{1,40})?|KUB|Abdominal\s*X-?ray|Blood\s*C\/?S(?:\s*x\s*\d+)?|Urine\s*C\/?S|Sputum\s*C\/?S|Wound\s*C\/?S|Endotracheal\s*Aspirate|ETA\s*C\/?S|C\/?S|GS\/?CS|Culture(?:\s+[^:=-]{1,30})?|FOBT|Urinalysis|UA|Stool\s*Exam|RPR|HBsAg|Anti-?HCV|HIV|COVID(?:-19)?|Swab|Biopsy)\b/i;
@@ -576,13 +629,19 @@ function formatLabShortDate(dateStr) {
   return String(dateStr || 'Undated').trim();
 }
 
-function formatRefRange(spec) {
+function formatRefRange(spec, unitSystem = 'conventional') {
   if (!spec) return '';
+  const conv = unitSystem === 'si' && Object.hasOwn(SI_CONVERSIONS, spec.key) ? SI_CONVERSIONS[spec.key] : null;
+  const fmtBound = (val) => {
+    if (!conv) return val;
+    const converted = roundDecimal(val * conv.factor, conv.decimals);
+    return conv.decimals === 0 ? Math.round(converted) : converted;
+  };
   const hasLow = Number.isFinite(spec.low);
   const hasHigh = Number.isFinite(spec.high);
-  if (hasLow && hasHigh) return `${spec.low}-${spec.high}`;
-  if (hasLow) return `>=${spec.low}`;
-  if (hasHigh) return `<=${spec.high}`;
+  if (hasLow && hasHigh) return `${fmtBound(spec.low)}-${fmtBound(spec.high)}`;
+  if (hasLow) return `>=${fmtBound(spec.low)}`;
+  if (hasHigh) return `<=${fmtBound(spec.high)}`;
   return '';
 }
 
@@ -697,7 +756,8 @@ function csvCell(val) {
  * Extract structured panel-grouped lab results, chronological trend matrix,
  * and imaging/diagnostics list from a patient chart markdown document.
  */
-export function extractChartLabSummary(content, note = {}) {
+export function extractChartLabSummary(content, note = {}, options = {}) {
+  const unitSystem = options?.unitSystem === 'si' ? 'si' : 'conventional';
   const parsed = parseChart(content || '', note || {});
   const timeline = parseChartTimeline(content || '');
 
@@ -764,14 +824,15 @@ export function extractChartLabSummary(content, note = {}) {
       });
 
       for (const item of entry.items) {
+        const spec = SPEC_BY_KEY.get(item.key);
+        const convMeta = unitSystem === 'si' && Object.hasOwn(SI_CONVERSIONS, item.key) ? SI_CONVERSIONS[item.key] : null;
         let row = rowMap.get(item.key);
         if (!row) {
-          const spec = SPEC_BY_KEY.get(item.key);
           row = {
             key: item.key,
             panel: item.panel || spec?.panel || 'Cardiac/Other',
-            unit: LAB_UNITS_BY_KEY[item.key] ?? '',
-            refRange: formatRefRange(spec),
+            unit: convMeta ? convMeta.unit : (LAB_UNITS_BY_KEY[item.key] ?? ''),
+            refRange: formatRefRange(spec, unitSystem),
             valuesByCol: {},
             latest: null,
             prevNum: null,
@@ -780,24 +841,28 @@ export function extractChartLabSummary(content, note = {}) {
         }
 
         const flag = computeLabFlag(item.key, item.num, item.explicitFlag || '');
-        const delta = row.prevNum !== null && Number.isFinite(item.num)
-          ? item.num - row.prevNum
+        const displayNum = convMeta ? convertLabValue(item.key, item.num, 'si') : item.num;
+        const displayValue = convMeta && Number.isFinite(displayNum)
+          ? formatConvertedNum(displayNum, convMeta)
+          : item.value;
+        const delta = row.prevNum !== null && Number.isFinite(displayNum)
+          ? displayNum - row.prevNum
           : null;
         const cell = {
           colKey,
           date: entry.date,
           shift: entry.shift,
           label: entry.fullLabel,
-          value: item.value,
-          num: item.num,
+          value: displayValue,
+          num: displayNum,
           flag,
           delta,
           deltaText: formatDeltaText(delta),
         };
         row.valuesByCol[colKey] = cell;
         row.latest = cell;
-        if (Number.isFinite(item.num)) {
-          row.prevNum = item.num;
+        if (Number.isFinite(displayNum)) {
+          row.prevNum = displayNum;
         }
       }
     }
@@ -861,6 +926,56 @@ export function extractChartLabSummary(content, note = {}) {
     rows,
     latestByPanel,
     diagnostics,
+    unitSystem,
+  };
+}
+
+export function buildFishboneData(summary) {
+  const byKey = new Map((summary?.rows || []).map((r) => [r.key, r]));
+  const slotOf = (key, label = key) => {
+    const row = byKey.get(key);
+    if (!row || !row.latest) return null;
+    return {
+      key,
+      label,
+      value: String(row.latest.value ?? ''),
+      flag: row.latest.flag || '',
+      unit: row.unit || '',
+      when: row.latest.shortLabel || row.latest.label || '',
+    };
+  };
+
+  const cbcSlots = {
+    wbc: slotOf('WBC', 'WBC'),
+    hb: slotOf('Hb', 'Hb'),
+    hct: slotOf('Hct', 'Hct'),
+    plt: slotOf('Plt', 'Plt'),
+  };
+  const cbcCount = Object.values(cbcSlots).filter(Boolean).length;
+
+  const bmpSlots = {
+    na: slotOf('Na', 'Na'),
+    k: slotOf('K', 'K'),
+    cl: slotOf('Cl', 'Cl'),
+    hco3: slotOf('HCO3', 'CO2'),
+    bun: slotOf('BUN', 'BUN'),
+    cr: slotOf('Cr', 'Cr'),
+    glu: slotOf('Glu', 'Glu'),
+  };
+  const bmpCount = Object.values(bmpSlots).filter(Boolean).length;
+
+  return {
+    unitSystem: summary?.unitSystem === 'si' ? 'si' : 'conventional',
+    cbc: {
+      present: cbcCount >= 2,
+      count: cbcCount,
+      slots: cbcSlots,
+    },
+    bmp: {
+      present: bmpCount >= 3,
+      count: bmpCount,
+      slots: bmpSlots,
+    },
   };
 }
 
@@ -908,6 +1023,7 @@ export function filterLabSummary(summary, panelFilter = 'all') {
     panels,
     latestByPanel,
     diagnostics,
+    unitSystem: summary?.unitSystem === 'si' ? 'si' : 'conventional',
   };
 }
 

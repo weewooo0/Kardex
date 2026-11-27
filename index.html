@@ -326,6 +326,7 @@
           <button type="button" id="roundsToggleExpandAllBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-chevron-down"></use></svg><span>Expand All</span></button>
           <button type="button" id="copyCensusBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg><span>Copy Census</span></button>
           <button type="button" id="handoverBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-handover"></use></svg><span>Handover Report</span></button>
+          <button type="button" id="roundsPrintScutsheetBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg><span>Print Scutsheet</span></button>
           <button type="button" id="roundsBackupMenuBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg><span>Backup Workspace</span></button>
           <button type="button" id="loadSyntheticBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg><span>Load Sample Census</span></button>
         </div>
@@ -482,13 +483,94 @@
               </select>
             </div>
             <div class="field"><label for="weightInput">Weight (kg)</label><input id="weightInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.1" min="1" max="400" placeholder="e.g. 68"></div>
+            <div class="field"><label for="heightCmInput">Height (cm)</label><input id="heightCmInput" type="number" inputmode="decimal" enterkeyhint="next" step="0.5" min="80" max="250" placeholder="e.g. 170"></div>
             <div class="field"><label for="serviceInput">Service / Dept</label><input id="serviceInput" autocapitalize="words" placeholder="e.g. Internal Medicine"></div>
             <div class="field"><label for="apInput">Attending (AP)</label><input id="apInput" autocapitalize="words" placeholder="e.g. Dr. A. Santos"></div>
           </div>
 
           <div class="grid-profile-extra">
             <div class="field"><label for="assessmentInput">Working Assessment / Diagnosis</label><input id="assessmentInput" placeholder="e.g. Community-Acquired Pneumonia; T2DM"></div>
-            <div class="field"><label for="admittedInput">Date Admitted</label><input id="admittedInput" inputmode="numeric" enterkeyhint="done" placeholder="MM-DD-YYYY"></div>
+            <div class="field"><label for="admittedInput">Date Admitted</label><input id="admittedInput" inputmode="numeric" enterkeyhint="next" placeholder="MM-DD-YYYY"></div>
+            <div class="field"><label for="icuAdmittedInput">ICU Admitted</label><input id="icuAdmittedInput" inputmode="numeric" enterkeyhint="done" placeholder="MM-DD-YYYY"></div>
+          </div>
+
+          <div class="profile-clinical-grid">
+            <div class="field">
+              <label for="codeStatusSelect">Code Status</label>
+              <select id="codeStatusSelect">
+                <option value="Full Code">Full Code</option>
+                <option value="DNR">DNR</option>
+                <option value="DNI">DNI</option>
+                <option value="DNR / DNI">DNR / DNI</option>
+                <option value="Comfort Care">Comfort Care</option>
+                <option value="DNACPR">DNACPR</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="severitySelect">Severity / Stability</label>
+              <select id="severitySelect">
+                <option value="Stable">Stable</option>
+                <option value="Watcher">Watcher</option>
+                <option value="Unstable">Unstable</option>
+              </select>
+            </div>
+            <div class="field profile-field-span2">
+              <label for="allergiesInput">Allergies (checked against meds)</label>
+              <input id="allergiesInput" placeholder="e.g. NKDA, Penicillin (anaphylaxis), Sulfa (rash)">
+            </div>
+          </div>
+
+          <div class="profile-clinical-extras">
+            <div class="field">
+              <span class="lbl">Isolation Precautions</span>
+              <div id="isolationChecks" class="profile-flags">
+                <label class="tpl-id-chip"><input type="checkbox" value="Contact"><span>Contact</span></label>
+                <label class="tpl-id-chip"><input type="checkbox" value="Droplet"><span>Droplet</span></label>
+                <label class="tpl-id-chip"><input type="checkbox" value="Airborne"><span>Airborne</span></label>
+                <label class="tpl-id-chip"><input type="checkbox" value="Neutropenic"><span>Neutropenic</span></label>
+              </div>
+            </div>
+            <div class="field">
+              <label for="contingenciesInput">If / Then Contingencies (carried across shifts &amp; I-PASS)</label>
+              <textarea id="contingenciesInput" rows="2" placeholder="If MAP < 65 -> titrate Norepi; If SpO2 < 90 -> ABG &amp; CXR"></textarea>
+            </div>
+          </div>
+
+          <div class="profile-tracked-grid">
+            <div class="tracked-block">
+              <div class="tracked-block-hdr">Lines / Drains / Airways (LDA)</div>
+              <div id="profileLinesList" class="tracked-list"></div>
+              <div class="tracked-add-row">
+                <input id="addLineNameInput" type="text" placeholder="Line (e.g. R-IJ CVC, Foley, PIV)">
+                <input id="addLineDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
+                <button type="button" id="addLineBtn" class="btn-secondary sm-btn">Add Line</button>
+              </div>
+            </div>
+            <div class="tracked-block">
+              <div class="tracked-block-head">
+                <div class="tracked-block-hdr">Antibiotic Day Tracker</div>
+                <button type="button" id="profileManageAbxBtn" class="ghost-action sm-btn">Open Tracker →</button>
+              </div>
+              <div id="profileAbxList" class="tracked-list"></div>
+              <div class="tracked-add-row tracked-abx-add-row">
+                <input id="addAbxDrugInput" type="text" placeholder="Antibiotic (e.g. Meropenem 1g)">
+                <select id="addAbxFreqSelect" aria-label="Antibiotic frequency">
+                  <option value="q8h">q8h</option>
+                  <option value="q12h">q12h</option>
+                  <option value="q24h">q24h / OD</option>
+                  <option value="q6h">q6h</option>
+                  <option value="q4h">q4h</option>
+                  <option value="q48h">q48h</option>
+                </select>
+                <input id="addAbxDateInput" type="text" inputmode="numeric" placeholder="MM-DD-YYYY">
+                <input id="addAbxTimeInput" type="time" aria-label="First dose time">
+                <input id="addAbxDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="Days">
+                <button type="button" id="addAbxBtn" class="btn-secondary sm-btn">Add Abx</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="profile-categories-bar">
             <div class="profile-flags">
               <label class="tpl-id-chip"><input type="checkbox" id="censusToggle" checked><span>Active Census</span></label>
               <span id="profileCustomCategories" class="profile-custom-cats"></span>
@@ -548,6 +630,10 @@
             <div id="labsPanelChips" class="filter-chips" role="group" aria-label="Filter lab panels"></div>
           </div>
           <div class="labs-export-actions">
+            <div id="labsUnitToggle" class="labs-unit-toggle" role="group" aria-label="Lab units">
+              <button type="button" class="mode-btn active" data-unit-sys="conventional" aria-pressed="true">Conv</button>
+              <button type="button" class="mode-btn" data-unit-sys="si" aria-pressed="false">SI</button>
+            </div>
             <button type="button" id="labsCopyBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg> Copy Summary</button>
             <button type="button" id="labsExportMdBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
             <button type="button" id="labsExportCsvBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .csv</button>
@@ -718,6 +804,13 @@
             <span class="settings-nav-sub">True Obsidian &amp; Ink &amp; Paper</span>
           </span>
         </button>
+        <button type="button" id="settingsTabClinical" class="settings-nav-btn" role="tab" data-settings-tab="clinical" aria-controls="settingsPanelClinical" aria-selected="false">
+          <span class="settings-nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-stethoscope"></use></svg></span>
+          <span class="settings-nav-text">
+            <span class="settings-nav-title">Clinical</span>
+            <span class="settings-nav-sub">Plans, units &amp; handover</span>
+          </span>
+        </button>
         <button type="button" id="settingsTabShifts" class="settings-nav-btn" role="tab" data-settings-tab="shifts" aria-controls="settingsPanelShifts" aria-selected="false">
           <span class="settings-nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-clock"></use></svg></span>
           <span class="settings-nav-text">
@@ -765,6 +858,37 @@
             <div id="themePaletteGrid" class="theme-palette-grid" role="radiogroup" aria-label="Theme selection"></div>
             <p class="fine">High-contrast Swiss monochrome surface modes reserve color strictly for clinical status signals.</p>
           </section>
+        </div>
+
+        <div id="settingsPanelClinical" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabClinical" hidden>
+          <div class="settings-stack">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Plan Organization Mode</h2>
+                <span id="clinicalPlanModePill" class="status-meta" role="status" aria-live="polite">Service Plans</span>
+              </div>
+              <div id="clinicalPlanModeGrid" class="clinical-option-grid" role="radiogroup" aria-label="Plan organization mode"></div>
+              <p class="fine">Controls how assessment plans are titled, parsed, and prompted in Rounds &amp; Guided Shift Updates (including FASTHUG-BID ICU checklist insertion).</p>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Lab &amp; Calculator Units</h2>
+                <span id="clinicalUnitSystemPill" class="status-meta" role="status" aria-live="polite">Conventional (US)</span>
+              </div>
+              <div id="clinicalUnitSystemGrid" class="clinical-option-grid" role="radiogroup" aria-label="Lab unit system"></div>
+              <p class="fine">Switch between US Conventional (mg/dL, mEq/L, g/dL) and SI International (µmol/L, mmol/L, g/L, kPa) across fishbone views and flowsheet.</p>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>Default Handover Format</h2>
+                <span id="clinicalHandoverFormatPill" class="status-meta" role="status" aria-live="polite">Standard Shift Relay</span>
+              </div>
+              <div id="clinicalHandoverFormatGrid" class="clinical-option-grid" role="radiogroup" aria-label="Default handover format"></div>
+              <p class="fine">Sets the default template when opening End-of-Shift Handover (always switchable per report).</p>
+            </section>
+          </div>
         </div>
 
         <div id="settingsPanelShifts" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabShifts" hidden>
@@ -967,6 +1091,8 @@
   </section>
 </main>
 
+<section id="printScutsheetRoot" class="print-scutsheet-root" aria-hidden="true"></section>
+
 <!-- Voice Dictation / SOAP Modal (Telegram Style) -->
 <div id="voiceModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="voiceModalTitle" hidden>
   <div class="modal-box telegram-modal">
@@ -1146,6 +1272,10 @@
           <span>Carry forward Physical Exam <span id="cfPeMeta" class="cf-meta"></span></span>
         </label>
         <label class="cf-option">
+          <input type="checkbox" id="cfContingencies" checked>
+          <span>Carry forward If/Then Contingencies <span id="cfContingenciesMeta" class="cf-meta"></span></span>
+        </label>
+        <label class="cf-option">
           <input type="checkbox" id="shiftMergeExisting">
           <span>Merge into existing shift heading if present today (STE §7.9)</span>
         </label>
@@ -1200,6 +1330,14 @@
             <option value="gaps">Gaps &amp; Open Tasks Only</option>
           </select>
         </div>
+        <div class="date-inline-field">
+          <label for="handoverFormatSelect" class="lbl-inline">Format:</label>
+          <select id="handoverFormatSelect" aria-label="Handover format">
+            <option value="standard">Standard Shift Relay</option>
+            <option value="ipass">I-PASS Sign-out</option>
+            <option value="sbar">SBAR Handover</option>
+          </select>
+        </div>
         <label class="tpl-id-chip"><input type="checkbox" id="hoShowVitalsLabs" checked><span>VS &amp; Labs</span></label>
         <label class="tpl-id-chip"><input type="checkbox" id="hoShowResolved" checked><span>Resolved Tasks</span></label>
       </div>
@@ -1215,6 +1353,7 @@
     </div>
 
     <div class="modal-foot">
+      <button type="button" id="printScutsheetBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Print Scutsheet</button>
       <button type="button" id="copyHandoverBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> Copy Raw PHI</button>
       <button type="button" id="copyHandoverDeidBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy De-identified</button>
       <button type="button" id="exportHandoverBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-download"></use></svg> Export .md</button>
@@ -1332,6 +1471,8 @@
       <div class="editor-tabs mb-12">
         <button type="button" id="calcTabAudit" class="mode-btn active" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-stethoscope"></use></svg> Renal &amp; Safety Audit</button>
         <button type="button" id="calcTabDrip" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-droplet"></use></svg> Drip Rate Helper</button>
+        <button type="button" id="calcTabPhysiology" class="mode-btn" aria-pressed="false">Physiology</button>
+        <button type="button" id="calcTabScores" class="mode-btn" aria-pressed="false">Scores</button>
       </div>
 
       <!-- PANE 1: Renal & Guideline Safety Audit -->
@@ -1454,12 +1595,136 @@
         <div id="dripResultsBox" class="drip-results-box"></div>
         <div id="dripInteractionsBox" class="calc-section mt-10"></div>
       </div>
+
+      <!-- PANE 3: Bedside Physiology Calculators -->
+      <div id="calcPhysiologyPane" hidden>
+        <div class="calc-section-hdr mb-8">
+          <span class="cf-meta">Auto-filled from latest chart labs, ABG, vent &amp; height (conventional units)</span>
+          <button type="button" id="physResetBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Reset</button>
+        </div>
+        <div class="phys-input-grid">
+          <div class="field"><label for="physNa">Na (mEq/L)</label><input id="physNa" type="number" inputmode="decimal" step="0.1" placeholder="140"></div>
+          <div class="field"><label for="physCl">Cl (mEq/L)</label><input id="physCl" type="number" inputmode="decimal" step="0.1" placeholder="104"></div>
+          <div class="field"><label for="physHco3">HCO3 (mEq/L)</label><input id="physHco3" type="number" inputmode="decimal" step="0.1" placeholder="24"></div>
+          <div class="field"><label for="physAlb">Albumin (g/dL)</label><input id="physAlb" type="number" inputmode="decimal" step="0.1" placeholder="4.0"></div>
+          <div class="field"><label for="physGlu">Glucose (mg/dL)</label><input id="physGlu" type="number" inputmode="decimal" step="1" placeholder="100"></div>
+          <div class="field"><label for="physCa">Calcium (mg/dL)</label><input id="physCa" type="number" inputmode="decimal" step="0.1" placeholder="9.2"></div>
+          <div class="field"><label for="physPao2">PaO2 (mmHg)</label><input id="physPao2" type="number" inputmode="decimal" step="1" placeholder="90"></div>
+          <div class="field"><label for="physPaco2">PaCO2 (mmHg)</label><input id="physPaco2" type="number" inputmode="decimal" step="1" placeholder="40"></div>
+          <div class="field"><label for="physFio2">FiO2 (%)</label><input id="physFio2" type="number" inputmode="decimal" step="1" min="21" max="100" placeholder="21"></div>
+          <div class="field"><label for="physHeight">Height (cm)</label><input id="physHeight" type="number" inputmode="decimal" step="0.5" placeholder="170"></div>
+          <div class="field">
+            <label for="physSex">Sex</label>
+            <select id="physSex">
+              <option value="">—</option>
+              <option value="M">M</option>
+              <option value="F">F</option>
+            </select>
+          </div>
+          <div class="field"><label for="physAge">Age</label><input id="physAge" type="number" inputmode="numeric" step="1" placeholder="yr"></div>
+        </div>
+        <div id="physResultsGrid" class="phys-results-grid mt-10"></div>
+      </div>
+
+      <!-- PANE 4: Validated Clinical Scores -->
+      <div id="calcScoresPane" hidden>
+        <div class="score-picker-bar">
+          <div class="field">
+            <label for="scorePickerSelect">Clinical Score / Risk Tool</label>
+            <select id="scorePickerSelect">
+              <option value="news2">NEWS2 (National Early Warning Score 2)</option>
+              <option value="qsofa">qSOFA (Sepsis Screen)</option>
+              <option value="curb65">CURB-65 (Pneumonia Severity)</option>
+              <option value="meldna">MELD-Na (Liver Disease)</option>
+              <option value="cha2ds2vasc">CHA2DS2-VASc (AF Stroke Risk)</option>
+              <option value="hasbled">HAS-BLED (Anticoagulation Bleed Risk)</option>
+              <option value="wellspe">Wells Criteria for PE</option>
+              <option value="wellsdvt">Wells Criteria for DVT</option>
+            </select>
+          </div>
+          <button type="button" id="scoreResetBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-rotate-ccw"></use></svg> Re-sync Chart</button>
+        </div>
+        <div id="scoreInputsBox" class="score-inputs-box mt-10"></div>
+        <div id="scoreResultBox" class="score-result-box mt-10"></div>
+      </div>
     </div>
 
     <div class="modal-foot">
       <button type="button" id="calcCopySummaryBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-shield"></use></svg> Copy De-id Summary</button>
       <button type="button" id="calcInsertChartBtn" class="btn-secondary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-inbox"></use></svg> Insert to Chart</button>
       <button type="button" id="calcSaveNoteBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg> Save Drip to Notes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick Antibiotics Tracker Modal (Rounds Pop-up) -->
+<div id="abxModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="abxModalHeading" hidden>
+  <div class="modal-box abx-modal">
+    <div class="modal-head">
+      <div>
+        <h3 id="abxModalHeading" class="ico-inline"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pill"></use></svg> Antibiotic Tracker</h3>
+        <div id="abxModalSubtitle" class="modal-sub">Room · Patient</div>
+      </div>
+      <button type="button" id="abxModalClose" class="close-btn" title="Close" aria-label="Close antibiotic tracker"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+    </div>
+
+    <div class="modal-body">
+      <div class="abx-section">
+        <div class="abx-section-hdr">
+          <span class="abx-section-title">Active Courses</span>
+          <span class="cf-meta">Day 1 flips after full 24h doses given (q8h = 3 doses, q12h = 2 doses)</span>
+        </div>
+        <div id="abxModalActiveList" class="abx-modal-list"></div>
+      </div>
+
+      <form id="abxModalForm" class="abx-form-card">
+        <div class="abx-section-title mb-8">Start / Add Antibiotic</div>
+        <div class="abx-form-grid">
+          <div class="field abx-field-span2">
+            <label for="abxModalDrugInput">Antibiotic &amp; Dose</label>
+            <input id="abxModalDrugInput" type="text" placeholder="e.g. Meropenem 1g IV, Vancomycin 1g IV" required>
+          </div>
+          <div class="field">
+            <label for="abxModalFreqSelect">Schedule</label>
+            <select id="abxModalFreqSelect">
+              <option value="q8h">q8h (3×/day)</option>
+              <option value="q12h">q12h (2×/day)</option>
+              <option value="q24h">q24h / OD (1×/day)</option>
+              <option value="q6h">q6h (4×/day)</option>
+              <option value="q4h">q4h (6×/day)</option>
+              <option value="q48h">q48h (renal)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="abxModalDaysInput">Planned Days (opt.)</label>
+            <input id="abxModalDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="e.g. 7">
+          </div>
+          <div class="field">
+            <label for="abxModalDateInput">First-Dose Date</label>
+            <input id="abxModalDateInput" type="date">
+          </div>
+          <div class="field">
+            <label for="abxModalTimeInput">First-Dose Time</label>
+            <input id="abxModalTimeInput" type="time">
+          </div>
+        </div>
+        <div id="abxModalLivePreview" class="abx-live-preview"></div>
+        <div class="abx-form-actions">
+          <button type="submit" id="abxModalAddBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Antibiotic</button>
+        </div>
+      </form>
+
+      <details id="abxModalCompletedDetails" class="abx-completed-details">
+        <summary class="abx-completed-summary">
+          <span>Completed Courses (<span id="abxModalCompletedCount">0</span>)</span>
+          <span class="profile-summary-badge">View ▾</span>
+        </summary>
+        <div id="abxModalCompletedList" class="abx-completed-list"></div>
+      </details>
+    </div>
+
+    <div class="modal-foot">
+      <button type="button" id="abxModalDoneBtn" class="btn-secondary">Done</button>
     </div>
   </div>
 </div>

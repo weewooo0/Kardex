@@ -707,6 +707,10 @@ main {
   padding: 4px 9px;
   font-size: 13px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 .cat-flag-del:hover,
 .cat-flag-del:focus-visible {
@@ -1049,7 +1053,8 @@ main {
   padding: 10px 0;
   border-bottom: 1px solid var(--line-soft);
 }
-.ledger-kv.is-labs {
+.ledger-kv.is-labs,
+.ledger-kv.is-abx {
   grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }
@@ -1851,7 +1856,7 @@ button.ghost:hover:not(:disabled), .ghost:hover {
   margin-bottom: 10px;
 }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.field label, .lbl { font-size: 12px; color: var(--mut); margin: 6px 0 4px; display: block; }
+.field > label, .lbl { font-size: 12px; color: var(--mut); margin: 6px 0 4px; display: block; }
 :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select) {
   width: 100%;
   background: var(--surface-2);
@@ -2961,9 +2966,15 @@ html.kb-open .modal-overlay {
   border: none;
   border-radius: 8px;
   padding: 6px 12px;
+  margin: 0;
   font-size: 12.5px;
+  line-height: 1.2;
   color: var(--txt);
   cursor: pointer;
+  vertical-align: middle;
+}
+.tpl-id-chip > span {
+  line-height: 1.2;
 }
 .tpl-sections-list {
   display: flex;
@@ -3062,23 +3073,31 @@ html.kb-open .modal-overlay {
 /* ==================== STRUCTURED PROFILE & CHART TIMELINE ==================== */
 .grid-5 {
   display: grid;
-  grid-template-columns: 0.65fr 0.55fr 0.75fr 1.15fr 1.15fr;
+  grid-template-columns: 0.55fr 0.5fr 0.72fr 0.72fr 1.1fr 1.1fr;
   gap: 8px;
   margin-bottom: 8px;
 }
 .grid-profile-extra {
   display: grid;
-  grid-template-columns: 2fr 1fr auto;
+  grid-template-columns: 2fr 1fr 1fr;
   gap: 8px;
   align-items: end;
   margin-bottom: 12px;
 }
 .profile-flags {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  padding-bottom: 2px;
+  padding-bottom: 0;
+}
+.profile-categories-bar {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .editor-view-bar {
   display: flex;
@@ -4839,18 +4858,29 @@ html.kb-open .modal-overlay {
 }
 
 @media (max-width: 520px) {
+  .editor-tabs {
+    gap: 10px;
+  }
   .editor-tabs .mode-btn {
     flex: 0 0 auto;
     white-space: nowrap;
     text-align: left;
     line-height: 1.2;
-    padding: 8px 2px;
+    font-size: 12px;
+    padding: 8px 1px;
+  }
+  .editor-tabs .mode-btn .ui-ico {
+    width: 13px;
+    height: 13px;
   }
 }
 
 @media (max-width: 420px) {
-  .grid-5 > .field:nth-child(n+4) {
-    grid-column: span 6;
+  .grid-5 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid-5 > .field:nth-child(n+5) {
+    grid-column: 1 / -1;
   }
 }
 
@@ -4992,5 +5022,641 @@ html.kb-open .modal-overlay {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==================== KARDEX v74: WESTERN / INTERNATIONAL CLINICAL EXPANSION ==================== */
+
+.ledger-row.severity-unstable {
+  border-left: 3px solid var(--danger);
+  padding-left: calc(var(--row-pad-x, 14px) - 3px);
+}
+
+.ledger-safety-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  line-height: 1.3;
+}
+.safety-tag {
+  display: inline-flex;
+  align-items: center;
+  color: var(--mut);
+}
+.safety-tag.is-code {
+  color: var(--txt);
+  font-weight: 700;
+}
+.safety-tag.is-warn {
+  color: var(--warn-txt);
+  font-weight: 600;
+}
+.safety-tag.is-crit {
+  color: var(--danger-txt);
+  font-weight: 700;
+}
+.safety-tag.is-iso {
+  color: var(--txt-2);
+  font-weight: 600;
+}
+
+.ledger-inline-warn {
+  color: var(--warn-txt);
+}
+.ledger-inline-crit {
+  color: var(--danger-txt);
+}
+
+/* Profile Details: Clinical Safety, Lines & Antibiotics */
+.profile-clinical-grid,
+.profile-clinical-extras,
+.profile-tracked-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+.profile-clinical-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.profile-field-span2 {
+  grid-column: span 2;
+}
+.profile-clinical-extras,
+.profile-tracked-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.tracked-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tracked-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tracked-block-hdr {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+.tracked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tracked-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.tracked-row.is-overdue {
+  color: var(--warn-txt);
+}
+.tracked-row.is-crit {
+  color: var(--danger-txt);
+}
+.tracked-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.tracked-add-row .btn-secondary {
+  height: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.profile-tracked-grid .tracked-block:last-child .tracked-add-row,
+.tracked-add-row.tracked-abx-add-row {
+  grid-template-columns: minmax(0, 1.4fr) 92px minmax(0, 1fr) 96px 64px auto;
+}
+
+/* Quick Antibiotics Tracker Modal (Rounds Pop-up) */
+.abx-modal {
+  max-width: 600px;
+}
+.abx-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.abx-section-hdr {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.abx-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--txt-2);
+}
+.abx-modal-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line-soft);
+}
+.abx-modal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.abx-modal-row.is-overdue .abx-modal-row-title {
+  color: var(--warn-txt);
+}
+.abx-modal-row.is-crit .abx-modal-row-title {
+  color: var(--danger-txt);
+}
+.abx-modal-row-main {
+  min-width: 0;
+}
+.abx-modal-row-title {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.abx-modal-row-meta {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--mut);
+  margin-top: 2px;
+  word-break: break-word;
+}
+.abx-modal-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.abx-empty-note {
+  padding: 10px 0;
+  font-size: 12.5px;
+  color: var(--mut);
+  border-bottom: 1px solid var(--line-soft);
+}
+.abx-form-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-deep);
+}
+.abx-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.abx-field-span2 {
+  grid-column: span 2;
+}
+.abx-live-preview {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--txt-2);
+}
+.abx-form-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+.abx-completed-details {
+  margin-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+.abx-completed-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--mut);
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 0;
+}
+.abx-completed-summary::-webkit-details-marker {
+  display: none;
+}
+.abx-completed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.abx-completed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--txt-2);
+}
+
+/* Settings: Clinical Options */
+.clinical-option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.clinical-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--txt);
+  cursor: pointer;
+}
+.clinical-option-card[aria-checked="true"] {
+  border-color: var(--txt);
+  background: var(--surface-hover);
+}
+.clinical-option-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+.clinical-option-desc {
+  font-size: 11.5px;
+  color: var(--mut);
+  line-height: 1.35;
+}
+
+/* Lab Unit Toggle & Fishbone Diagrams */
+.labs-unit-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface-2);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.labs-unit-toggle .mode-btn {
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  border: none;
+  border-radius: 4px;
+  color: var(--mut);
+  background: transparent;
+}
+.labs-unit-toggle .mode-btn.active {
+  background: var(--txt);
+  color: var(--accent-on-solid);
+  font-weight: 700;
+}
+
+.fishbone-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.fishbone-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+.fishbone-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--txt-2);
+  margin-bottom: 8px;
+}
+.fishbone-unit-tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--mut);
+  font-weight: 500;
+}
+.fb-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 5px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+.fb-val {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--txt);
+  line-height: 1.15;
+}
+.fb-lbl {
+  font-size: 9.5px;
+  color: var(--mut);
+  line-height: 1.1;
+}
+.fb-cell.flag-h .fb-val {
+  color: var(--danger-txt);
+}
+.fb-cell.flag-l .fb-val {
+  color: var(--warn-txt);
+}
+.fb-cell.is-empty .fb-val {
+  color: var(--mut-2);
+  font-weight: 400;
+}
+
+.fishbone-cbc {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  min-height: 76px;
+}
+.fb-cbc-mid {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-ctrl);
+  border-right: 1px solid var(--border-ctrl);
+  padding: 0 8px;
+}
+.fb-cbc-top {
+  border-bottom: 1px solid var(--border-ctrl);
+  padding-bottom: 4px;
+}
+.fb-cbc-bot {
+  padding-top: 4px;
+}
+
+.fishbone-bmp {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 0.9fr);
+  align-items: center;
+  min-height: 76px;
+}
+.fb-bmp-col {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-ctrl);
+}
+.fb-bmp-col > .fb-cell:first-child {
+  border-bottom: 1px solid var(--border-ctrl);
+  padding-bottom: 4px;
+}
+.fb-bmp-col > .fb-cell:last-child {
+  padding-top: 4px;
+}
+.fb-bmp-glu {
+  padding-left: 4px;
+}
+
+/* Calc Modal: Physiology & Scores */
+.phys-input-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.phys-results-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.phys-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+}
+.phys-card.is-missing {
+  opacity: 0.72;
+}
+.phys-card-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--mut);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.phys-card-val {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--txt);
+  margin: 4px 0 2px;
+}
+.phys-card-sub {
+  font-size: 11.5px;
+  color: var(--txt-2);
+  line-height: 1.35;
+}
+
+.score-picker-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+.score-picker-bar > .field {
+  flex: 1 1 auto;
+}
+.score-inputs-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.score-result-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-2);
+}
+.score-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.score-result-name {
+  font-size: 14px;
+  font-weight: 700;
+}
+.score-result-risk {
+  font-size: 12px;
+  color: var(--txt-2);
+  margin-top: 2px;
+}
+.score-result-val {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 24px;
+  font-weight: 700;
+}
+.score-breakdown-list {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--mut);
+  line-height: 1.45;
+}
+
+/* Printable Scutsheet */
+.print-scutsheet-root {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .profile-clinical-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .profile-clinical-extras,
+  .profile-tracked-grid,
+  .clinical-option-grid,
+  .fishbone-grid,
+  .phys-results-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .phys-input-grid,
+  .score-inputs-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tracked-add-row,
+  .profile-tracked-grid .tracked-block:last-child .tracked-add-row,
+  .tracked-add-row.tracked-abx-add-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tracked-add-row .btn-secondary {
+    margin-top: 2px;
+    width: 100%;
+  }
+  .abx-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .abx-form-actions button {
+    width: 100%;
+  }
+}
+
+@media print {
+  .app-header,
+  main,
+  .modal-overlay,
+  #swUpdateBanner,
+  #toast {
+    display: none !important;
+  }
+  body {
+    background: #FFFFFF !important;
+    color: #111111 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  #printScutsheetRoot {
+    display: block !important;
+    color: #111111;
+    background: #FFFFFF;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+    font-size: 9.5pt;
+    line-height: 1.25;
+  }
+  .ps-sheet-header {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1.5px solid #111111;
+    padding-bottom: 4px;
+    margin-bottom: 8px;
+    font-size: 10pt;
+  }
+  .ps-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .ps-card {
+    border: 1px solid #111111;
+    padding: 6px 8px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .ps-card-head {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1px solid #CCCCCC;
+    padding-bottom: 2px;
+    margin-bottom: 3px;
+  }
+  .ps-bed,
+  .ps-code,
+  .ps-meta,
+  .ps-row span {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .ps-meta,
+  .ps-allergy {
+    font-size: 8.5pt;
+    color: #333333;
+    margin-bottom: 2px;
+  }
+  .ps-dx,
+  .ps-row,
+  .ps-plans {
+    font-size: 8.5pt;
+    margin-top: 2px;
+  }
+  .ps-row span {
+    display: inline-block;
+    min-width: 44px;
+    font-weight: 700;
+  }
+  .ps-tasks {
+    margin-top: 4px;
+    padding-top: 3px;
+    border-top: 1px dashed #999999;
+    font-size: 8.5pt;
+  }
+  .ps-task {
+    margin-top: 1px;
+  }
+  .ps-box {
+    font-family: ui-monospace, monospace;
   }
 }

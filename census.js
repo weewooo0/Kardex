@@ -1,6 +1,44 @@
 // Census and Rounds (Digital Scutsheet) logic for Companion MD
 // Follows CLINICAL-WORKFLOW-STE.md specifications
 
+export const PLAN_MODES = {
+  service: { id: 'service', label: 'Service Plans', heading: 'Service Plans:' },
+  problem: { id: 'problem', label: 'Problem-Based A&P', heading: 'Problem-Based Plan:' },
+  systems: { id: 'systems', label: 'Systems-Based ICU', heading: 'Systems-Based ICU Plan:' },
+};
+
+export const HANDOVER_FORMATS = {
+  standard: { id: 'standard', label: 'Standard Shift Relay' },
+  ipass: { id: 'ipass', label: 'I-PASS Sign-out' },
+  sbar: { id: 'sbar', label: 'SBAR Handover' },
+};
+
+export const CODE_STATUS_OPTIONS = ['Full Code', 'DNR', 'DNI', 'DNR / DNI', 'Comfort Care', 'DNACPR'];
+
+export const SEVERITY_LEVELS = ['Stable', 'Watcher', 'Unstable'];
+
+export const ABX_FREQUENCIES = [
+  { id: 'q8h', label: 'q8h (3×/day)', intervalHrs: 8, dosesPerDay: 3 },
+  { id: 'q12h', label: 'q12h (2×/day)', intervalHrs: 12, dosesPerDay: 2 },
+  { id: 'q24h', label: 'q24h / OD (1×/day)', intervalHrs: 24, dosesPerDay: 1 },
+  { id: 'q6h', label: 'q6h (4×/day)', intervalHrs: 6, dosesPerDay: 4 },
+  { id: 'q4h', label: 'q4h (6×/day)', intervalHrs: 4, dosesPerDay: 6 },
+  { id: 'q48h', label: 'q48h (renal)', intervalHrs: 48, dosesPerDay: 0.5 },
+];
+
+export const FASTHUG_BID_ITEMS = [
+  'Feeding: target nutrition / GI tolerance',
+  'Analgesia: pain controlled',
+  'Sedation: RASS target / daily sedation vacation',
+  'Thromboembolism: DVT prophylaxis active',
+  'Head of Bed: 30-45 deg elevation',
+  'Ulcer: stress ulcer prophylaxis if indicated',
+  'Glucose: glycemic target 140-180 mg/dL',
+  'Bowel: bowel regimen / last BM tracked',
+  'Indwelling Catheter: CVC & Foley need reviewed',
+  'De-escalation: daily abx & culture review',
+];
+
 export const DEFAULT_MORNING_TEMPLATE = `Good day <% tp.frontmatter.AP %>
 
 Update on your patient
@@ -470,6 +508,319 @@ export function dateStringToIso(str) {
   const p = parseDateParts(str);
   if (!p) return '';
   return `${String(p.year).padStart(4, '0')}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+
+export function computeDayCount(startDateStr, refDateStr = null) {
+  const start = parseDateParts(startDateStr);
+  if (!start) return null;
+  const ref = parseDateParts(refDateStr || getTodayDateStrings().mmddyyyy);
+  if (!ref) return null;
+  const startMs = Date.UTC(start.year, start.month - 1, start.day);
+  const refMs = Date.UTC(ref.year, ref.month - 1, ref.day);
+  const diffDays = Math.floor((refMs - startMs) / 86400000);
+  if (diffDays < 0) return null;
+  return diffDays + 1;
+}
+
+function getLineReviewThresholdDays(name) {
+  const clean = String(name || '').toLowerCase();
+  if (/\b(?:foley|urinary|indwelling\s*catheter|ifc|uc)\b/.test(clean)) return 3;
+  if (/\b(?:piv|peripheral|iv\s*line|heplock)\b/.test(clean)) return 4;
+  if (/\b(?:art(?:erial)?\s*line|a-?line)\b/.test(clean)) return 5;
+  if (/\b(?:cvc|central|ij|subclavian|femoral|picc|cordis|ett|trach|vent|intubat)\b/.test(clean)) return 7;
+  return 7;
+}
+
+export function parseTrackedLines(raw, refDateStr = null) {
+  const text = String(raw || '').trim();
+  if (!text || /^(?:none|nil|n\/a|-)$/i.test(text)) return [];
+  const entries = text.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const out = [];
+  for (const entry of entries) {
+    const parts = entry.split('|').map((s) => s.trim());
+    const name = parts[0] || '';
+    if (!name) continue;
+    const startDate = parts[1] || '';
+    const dayCount = startDate ? computeDayCount(startDate, refDateStr) : null;
+    const thresholdDays = getLineReviewThresholdDays(name);
+    const overdue = Boolean(dayCount !== null && dayCount >= thresholdDays);
+    out.push({
+      name,
+      startDate,
+      dayCount,
+      thresholdDays,
+      overdue,
+      label: dayCount !== null ? `${name} (Day ${dayCount})` : name,
+    });
+  }
+  return out;
+}
+
+export function formatTrackedLines(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .filter((it) => it && String(it.name || '').trim())
+    .map((it) => {
+      const name = String(it.name).trim();
+      const start = String(it.startDate || '').trim();
+      return start ? `${name} | ${start}` : name;
+    })
+    .join('; ');
+}
+
+const ABX_FREQ_MAP = new Map(ABX_FREQUENCIES.map((f) => [f.id, f]));
+
+function normalizeAbxFreq(rawFreq) {
+  const s = String(rawFreq || '').trim().toLowerCase().replace(/\s+/g, '');
+  if (!s) return '';
+  if (s === 'od' || s === 'qd' || s === 'daily' || s === 'qday') return 'q24h';
+  if (s === 'bid') return 'q12h';
+  if (s === 'tid') return 'q8h';
+  if (s === 'qid') return 'q6h';
+  return ABX_FREQ_MAP.has(s) ? s : '';
+}
+
+function parseTimeParts(timeStr) {
+  const m = String(timeStr || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hour = parseInt(m[1], 10);
+  const minute = parseInt(m[2], 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+function resolveRefTimestampMs(refNow) {
+  if (refNow instanceof Date && !Number.isNaN(refNow.getTime())) {
+    return {
+      ms: refNow.getTime(),
+      dateOnlyStr: getTodayDateStrings(refNow).mmddyyyy,
+      hasTime: true,
+    };
+  }
+  const str = String(refNow || '').trim();
+  if (!str) {
+    const now = new Date();
+    return {
+      ms: now.getTime(),
+      dateOnlyStr: getTodayDateStrings(now).mmddyyyy,
+      hasTime: true,
+    };
+  }
+  const dtMatch = str.match(/^(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})[T\s]+(\d{1,2}:\d{2})$/);
+  if (dtMatch) {
+    const dp = parseDateParts(dtMatch[1]);
+    const tp = parseTimeParts(dtMatch[2]);
+    if (dp && tp) {
+      const ms = Date.UTC(dp.year, dp.month - 1, dp.day, tp.hour, tp.minute, 0);
+      return {
+        ms,
+        dateOnlyStr: `${String(dp.month).padStart(2, '0')}-${String(dp.day).padStart(2, '0')}-${String(dp.year).padStart(4, '0')}`,
+        hasTime: true,
+      };
+    }
+  }
+  const dp = parseDateParts(str);
+  if (dp) {
+    const ms = Date.UTC(dp.year, dp.month - 1, dp.day, 23, 59, 0);
+    return {
+      ms,
+      dateOnlyStr: `${String(dp.month).padStart(2, '0')}-${String(dp.day).padStart(2, '0')}-${String(dp.year).padStart(4, '0')}`,
+      hasTime: false,
+    };
+  }
+  const now = new Date();
+  return { ms: now.getTime(), dateOnlyStr: getTodayDateStrings(now).mmddyyyy, hasTime: true };
+}
+
+export function parseTrackedAntibiotics(raw, refNow = new Date()) {
+  const text = String(raw || '').trim();
+  if (!text || /^(?:none|nil|n\/a|-)$/i.test(text)) return [];
+  const ref = resolveRefTimestampMs(refNow);
+  const entries = text.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const out = [];
+
+  for (const entry of entries) {
+    const parts = entry.split('|').map((s) => s.trim());
+    const drug = parts[0] || '';
+    if (!drug) continue;
+
+    const startDate = parts[1] || '';
+    const plannedRaw = parts[2] || '';
+    const plannedNum = parseInt(plannedRaw.replace(/[^\d]/g, ''), 10);
+    const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+    const freq = normalizeAbxFreq(parts[3] || '');
+    const freqSpec = freq ? ABX_FREQ_MAP.get(freq) : null;
+    const rawTime = parseTimeParts(parts[4] || '');
+    const startTime = rawTime
+      ? `${String(rawTime.hour).padStart(2, '0')}:${String(rawTime.minute).padStart(2, '0')}`
+      : '';
+    const parsedOffset = parseInt(parts[5] || '', 10);
+    const doseOffset = Number.isFinite(parsedOffset) ? parsedOffset : 0;
+
+    let scheduledDoses = null;
+    let dosesGiven = null;
+    let dayCount = null;
+    let partialDoses = null;
+    let nextDoseTime = '';
+
+    const startDp = startDate ? parseDateParts(startDate) : null;
+    if (startDp && freqSpec) {
+      // Compare in floating UTC-style local calendar clock when refNow is Date (avoid TZ drift vs ref string)
+      const tp = rawTime || { hour: 8, minute: 0 };
+      const startClockMs = Date.UTC(startDp.year, startDp.month - 1, startDp.day, tp.hour, tp.minute, 0);
+      let refClockMs = ref.ms;
+      if (refNow instanceof Date && !Number.isNaN(refNow.getTime())) {
+        refClockMs = Date.UTC(
+          refNow.getFullYear(),
+          refNow.getMonth(),
+          refNow.getDate(),
+          refNow.getHours(),
+          refNow.getMinutes(),
+          0
+        );
+      } else if (!ref.hasTime && ref.dateOnlyStr) {
+        const refDp = parseDateParts(ref.dateOnlyStr);
+        if (refDp) {
+          refClockMs = Date.UTC(refDp.year, refDp.month - 1, refDp.day, tp.hour, tp.minute, 0);
+        }
+      }
+
+      const elapsedHrs = (refClockMs - startClockMs) / 3600000;
+      if (elapsedHrs < 0 && doseOffset <= 0) {
+        scheduledDoses = 0;
+        dosesGiven = 0;
+        dayCount = 0;
+        partialDoses = 0;
+      } else {
+        scheduledDoses = elapsedHrs < 0 ? 0 : 1 + Math.floor(elapsedHrs / freqSpec.intervalHrs);
+        dosesGiven = Math.max(0, scheduledDoses + doseOffset);
+        if (freqSpec.intervalHrs === 48) {
+          const daysElapsedFloor = elapsedHrs < 0 ? 0 : Math.floor(elapsedHrs / 24);
+          dayCount = dosesGiven <= 0 ? 0 : Math.min(dosesGiven * 2, Math.max(1, daysElapsedFloor + 1));
+          partialDoses = 0;
+        } else {
+          dayCount = Math.floor(dosesGiven / freqSpec.dosesPerDay);
+          partialDoses = dosesGiven % freqSpec.dosesPerDay;
+        }
+      }
+      const nextStep = Math.max(1, (scheduledDoses || 0) + (elapsedHrs >= 0 ? 1 : 0));
+      const nextMs = startClockMs + (elapsedHrs < 0 ? 0 : (nextStep - 1) * freqSpec.intervalHrs * 3600000);
+      const nextDt = new Date(nextMs);
+      nextDoseTime = `${String(nextDt.getUTCHours()).padStart(2, '0')}:${String(nextDt.getUTCMinutes()).padStart(2, '0')}`;
+    } else if (startDp) {
+      // Legacy date-only entry: calendar elapsed days starting at Day 0 on start date
+      const rawDayOneBased = computeDayCount(startDate, ref.dateOnlyStr);
+      dayCount = rawDayOneBased !== null ? Math.max(0, rawDayOneBased - 1) : null;
+    }
+
+    const dueSoon = Boolean(dayCount !== null && plannedDays && dayCount === plannedDays);
+    const overdue = Boolean(
+      dayCount !== null && ((plannedDays && dayCount > plannedDays) || (!plannedDays && dayCount >= 7))
+    );
+
+    let label = drug;
+    if (dayCount !== null) {
+      const plannedSuffix = plannedDays ? `/${plannedDays}` : '';
+      const fracSuffix =
+        dayCount === 0 && freqSpec && freqSpec.dosesPerDay > 1 && partialDoses !== null
+          ? ` (${partialDoses}/${freqSpec.dosesPerDay})`
+          : '';
+      label = `${drug} D${dayCount}${plannedSuffix}${fracSuffix}`;
+    } else if (plannedDays) {
+      label = `${drug} (/${plannedDays}d)`;
+    }
+
+    out.push({
+      drug,
+      startDate,
+      plannedDays,
+      freq: freqSpec ? freqSpec.id : '',
+      intervalHrs: freqSpec ? freqSpec.intervalHrs : null,
+      dosesPerDay: freqSpec ? freqSpec.dosesPerDay : null,
+      startTime,
+      doseOffset,
+      scheduledDoses,
+      dosesGiven,
+      partialDoses,
+      nextDoseTime,
+      dayCount,
+      dueSoon,
+      overdue,
+      label,
+    });
+  }
+  return out;
+}
+
+export function formatTrackedAntibiotics(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .filter((it) => it && String(it.drug || '').trim())
+    .map((it) => {
+      const drug = String(it.drug).trim();
+      const start = String(it.startDate || '').trim();
+      const planned = it.plannedDays ? String(it.plannedDays).trim() : '';
+      const freq = normalizeAbxFreq(it.freq || '');
+      const time = parseTimeParts(it.startTime || '') ? String(it.startTime).trim() : '';
+      const offset = Number.isFinite(Number(it.doseOffset)) ? Math.trunc(Number(it.doseOffset)) : 0;
+
+      const cols = [drug, start, planned, freq, time, offset !== 0 ? String(offset) : ''];
+      while (cols.length > 1 && !cols[cols.length - 1]) cols.pop();
+      return cols.join(' | ');
+    })
+    .join('; ');
+}
+
+export function parseCompletedAntibiotics(raw) {
+  const text = String(raw || '').trim();
+  if (!text || /^(?:none|nil|n\/a|-)$/i.test(text)) return [];
+  const entries = text.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const out = [];
+  for (const entry of entries) {
+    const parts = entry.split('|').map((s) => s.trim());
+    const drug = parts[0] || '';
+    if (!drug) continue;
+    const startDate = parts[1] || '';
+    const completedDate = parts[2] || '';
+    const daysNum = parseInt((parts[3] || '').replace(/[^\d]/g, ''), 10);
+    const completedDays = Number.isFinite(daysNum) ? daysNum : null;
+    const plannedNum = parseInt((parts[4] || '').replace(/[^\d]/g, ''), 10);
+    const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+    const freq = normalizeAbxFreq(parts[5] || '');
+    const dayBadge =
+      completedDays !== null
+        ? ` D${completedDays}${plannedDays ? `/${plannedDays}` : ''}`
+        : plannedDays
+          ? ` (/${plannedDays}d)`
+          : '';
+    const dateSpan = [startDate, completedDate].filter(Boolean).join(' -> ');
+    out.push({
+      drug,
+      startDate,
+      completedDate,
+      completedDays,
+      plannedDays,
+      freq,
+      label: `${drug}${dayBadge}${dateSpan ? ` (${dateSpan})` : ''}`,
+    });
+  }
+  return out;
+}
+
+export function formatCompletedAntibiotics(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .filter((it) => it && String(it.drug || '').trim())
+    .map((it) => {
+      const cols = [
+        String(it.drug).trim(),
+        String(it.startDate || '').trim(),
+        String(it.completedDate || '').trim(),
+        it.completedDays !== null && it.completedDays !== undefined ? String(it.completedDays) : '',
+        it.plannedDays ? String(it.plannedDays).trim() : '',
+        normalizeAbxFreq(it.freq || ''),
+      ];
+      while (cols.length > 1 && !cols[cols.length - 1]) cols.pop();
+      return cols.join(' | ');
+    })
+    .join('; ');
 }
 
 export function formatRoomLabel(room) {
@@ -1370,6 +1721,23 @@ export function parseChart(content, note = {}) {
   const service = meta.service || meta.dept || meta.specialty || '';
   const ap = meta.ap || meta.attending || '';
   const admitted = meta.admitted || meta['date admitted'] || '';
+  const heightCm = meta.height_cm || meta.height || '';
+  const icuAdmitted = meta.icu_admitted || meta['icu admitted'] || '';
+  const codeStatus = meta.code_status || meta['code status'] || meta.code || '';
+  const severity = meta.severity || meta.illness_severity || '';
+  const allergies = meta.allergies || meta.allergy || '';
+  const isolation = String(meta.isolation || meta.precautions || '')
+    .trim()
+    .replace(/^\[|\]$/g, '')
+    .split(/[;,]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !/^(?:none|nil|n\/a|-)$/i.test(s));
+  const rawContingencies = meta.contingencies || meta.contingency || meta.if_then || '';
+  const hospitalDay = admitted ? computeDayCount(admitted, today.mmddyyyy) : null;
+  const icuDay = icuAdmitted ? computeDayCount(icuAdmitted, today.mmddyyyy) : null;
+  const trackedLines = parseTrackedLines(meta.lines || meta.lda || '', today.mmddyyyy);
+  const trackedAntibiotics = parseTrackedAntibiotics(meta.antibiotics || meta.abx || '', new Date());
+  const completedAntibiotics = parseCompletedAntibiotics(meta.antibiotics_completed || '');
   const rawMetaAliases = String(meta.aliases || '')
     .split(/[;,]/)
     .map((s) => s.trim())
@@ -1482,15 +1850,38 @@ export function parseChart(content, note = {}) {
     latestDate
   );
 
+  let contingencies = rawContingencies;
+  if (!contingencies) {
+    for (const blk of searchBlocks) {
+      const m = String(blk || '').match(/^(?:[-*]\s*)?(?:Contingenc(?:y|ies)|If\s*\/\s*Then):\s*(.+)$/im);
+      if (m && m[1].trim() && !/^(?:none|nil|n\/a|-)$/i.test(m[1].trim())) {
+        contingencies = m[1].trim();
+        break;
+      }
+    }
+  }
+
   return {
     name,
     room,
     age,
     sex,
     weight,
+    heightCm,
     service,
     ap,
     admitted,
+    icuAdmitted,
+    hospitalDay,
+    icuDay,
+    codeStatus,
+    severity,
+    allergies,
+    isolation,
+    contingencies,
+    trackedLines,
+    trackedAntibiotics,
+    completedAntibiotics,
     aliases,
     categories,
     isCharity,
@@ -1686,11 +2077,13 @@ function extractServicePlansFromBlock(blockText) {
     }
 
     const planHeaderMatch = trimmed.match(
-      /^(?:\*{0,2})(?:Service|([A-Za-z][A-Za-z\s/&+-]{1,30}))\s+Plans?(?:\*{0,2})\s*:\s*(.*)$/i
+      /^(?:\*{0,2})(?:Service|Problem-?Based|Systems-?Based(?:\s+ICU)?|([A-Za-z][A-Za-z\s/&+-]{1,30}))\s+Plans?(?:\*{0,2})\s*:\s*(.*)$/i
     );
     if (planHeaderMatch && !/^#{2,3}\s+/.test(trimmed)) {
-      // Exclude generic/discharge/contingency headers if accidentally matched
-      const prefix = (planHeaderMatch[1] || 'Service').trim();
+      const fullHdrLower = trimmed.toLowerCase();
+      const prefix = fullHdrLower.startsWith('problem') || fullHdrLower.startsWith('systems')
+        ? 'Service'
+        : (planHeaderMatch[1] || 'Service').trim();
       if (!/^(?:generic|general|routine)$/i.test(prefix)) {
         inServicePlans = true;
         const inlineItem = (planHeaderMatch[2] || '').trim();
@@ -1709,7 +2102,7 @@ function extractServicePlansFromBlock(blockText) {
       if (
         !trimmed ||
         /^#{2,3}\s+/.test(trimmed) ||
-        /^(?:\*{0,2})(?:If\s+ok|Pending|Vitals|VS|Vent|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Meds?|Footer)\b/i.test(
+        /^(?:\*{0,2})(?:If\s+ok|Pending|Contingenc(?:y|ies)|If\s*\/\s*Then|Vitals|VS|Vent|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Meds?|Footer)\b/i.test(
           trimmed
         )
       ) {
@@ -1749,6 +2142,7 @@ export function extractServicePlanGroupsFromBlock(blockText) {
   const groups = [];
   let curTag = '';
   let curItems = [];
+  let inPlanContainer = false;
 
   const flushGroup = () => {
     if (!curTag || !curItems.length) {
@@ -1757,7 +2151,12 @@ export function extractServicePlanGroupsFromBlock(blockText) {
     }
     if (curTag === 'SERVICE') {
       for (const item of curItems) {
-        groups.push({ tag: 'SERVICE', text: item });
+        const inlineTagged = item.match(/^((?:#\d+\s+[^:]{1,28}|Neuro|CV|Cardiovascular|Resp|Respiratory|Renal\/FEN|Renal|FEN|GI\/Nutrition|GI|ID|Heme|Prophylaxis|FASTHUG-?BID|[A-Za-z][A-Za-z/&+-]{1,18})):\s*(.+)$/i);
+        if (inlineTagged) {
+          groups.push({ tag: normalizeServicePlanTag(inlineTagged[1]), text: inlineTagged[2].trim() });
+        } else {
+          groups.push({ tag: 'SERVICE', text: item });
+        }
       }
     } else {
       const existing = groups.find((g) => g.tag === curTag);
@@ -1774,17 +2173,21 @@ export function extractServicePlanGroupsFromBlock(blockText) {
     if (/^(?:\*{0,2})(?:Generic|General|Routine)\s+Plans?(?:\*{0,2})\s*:/i.test(trimmed)) {
       flushGroup();
       curTag = '';
+      inPlanContainer = false;
       continue;
     }
 
     const planHeaderMatch = trimmed.match(
-      /^(?:\*{0,2})(?:Service|([A-Za-z][A-Za-z\s/&+-]{1,30}))\s+Plans?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i
+      /^(?:\*{0,2})(?:Service|Problem-?Based|Systems-?Based(?:\s+ICU)?|([A-Za-z][A-Za-z\s/&+-]{1,30}))\s+Plans?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i
     );
     if (planHeaderMatch && !/^#{2,3}\s+/.test(trimmed)) {
-      const prefix = (planHeaderMatch[1] || 'Service').trim();
+      const fullHeader = trimmed.toLowerCase();
+      const isContainerHeader = fullHeader.startsWith('problem') || fullHeader.startsWith('systems');
+      const prefix = isContainerHeader ? 'Service' : (planHeaderMatch[1] || 'Service').trim();
       if (!/^(?:generic|general|routine)$/i.test(prefix)) {
         flushGroup();
         curTag = normalizeServicePlanTag(prefix);
+        inPlanContainer = true;
         const inlineItem = (planHeaderMatch[2] || '').trim();
         if (inlineItem && !/^none$/i.test(inlineItem)) {
           curItems.push(inlineItem.replace(/^(?:[-*]|\d+[.)])\s+/, '').trim());
@@ -1797,12 +2200,13 @@ export function extractServicePlanGroupsFromBlock(blockText) {
       if (
         !trimmed ||
         /^#{2,3}\s+/.test(trimmed) ||
-        /^(?:\*{0,2})(?:If\s+ok|Pending|Vitals|VS|Vent|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Meds?|Thank\s+you|Footer)\b/i.test(
+        /^(?:\*{0,2})(?:If\s+ok|Pending|Contingenc(?:y|ies)|If\s*\/\s*Then|Vitals|VS|Vent|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Meds?|Thank\s+you|Footer)\b/i.test(
           trimmed
         )
       ) {
         flushGroup();
         curTag = '';
+        inPlanContainer = false;
         continue;
       }
 
@@ -2475,6 +2879,17 @@ export function extractCarryForwardData(content) {
   }
 
   const peInfo = extractLatestPeFromChart(text);
+  const fmMeta = metaOf(text);
+  let contingencies = fmMeta.contingencies || fmMeta.contingency || fmMeta.if_then || '';
+  if (!contingencies) {
+    for (const blk of candidateBlocks) {
+      const m = String(blk || '').match(/^(?:[-*]\s*)?(?:Contingenc(?:y|ies)|If\s*\/\s*Then):\s*(.+)$/im);
+      if (m && m[1].trim() && !/^(?:none|nil|n\/a|-)$/i.test(m[1].trim())) {
+        contingencies = m[1].trim();
+        break;
+      }
+    }
+  }
 
   return {
     openPending,
@@ -2485,6 +2900,7 @@ export function extractCarryForwardData(content) {
     feeding,
     pe: peInfo.pe,
     peSource: peInfo.source,
+    contingencies,
     hasPriorBlock: segment.hasShiftHeading,
   };
 }
@@ -2664,9 +3080,12 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
     carryStanding = true,
     carryFeeding = carryStanding,
     carryPe = true,
+    carryContingencies = true,
+    planMode = 'service',
     isMorningShift = false,
   } = options || {};
   const data = extractCarryForwardData(content);
+  const planHeading = (PLAN_MODES[planMode] || PLAN_MODES.service).heading;
 
   if (interim) {
     const lines = [
@@ -2676,6 +3095,7 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
     ];
     if (carryStanding && data.vent) lines.push(`Vent: ${data.vent}`);
     if (carryStanding && data.drips) lines.push(`Drips: ${data.drips}`);
+    if (carryContingencies && data.contingencies) lines.push(`Contingencies: ${data.contingencies}`);
     if (carryPending && data.openPending.length > 0) {
       lines.push('**Pending:');
       for (const item of data.openPending) {
@@ -2683,7 +3103,7 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
       }
     }
     if (carryServicePlans && data.servicePlans.length > 0) {
-      lines.push('Service Plans:');
+      lines.push(planHeading);
       for (const plan of data.servicePlans) {
         lines.push(`- ${plan}`);
       }
@@ -2712,6 +3132,10 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
     lines.push(`Drips: ${data.drips}`);
   }
 
+  if (carryContingencies && data.contingencies) {
+    lines.push(`Contingencies: ${data.contingencies}`);
+  }
+
   if (!data.hasPriorBlock) {
     lines.push('**Pending:');
     lines.push('- [ ] ');
@@ -2723,10 +3147,10 @@ export function buildCarryForwardShiftBlock(content, shift = '6am', options = {}
   }
 
   if (!data.hasPriorBlock) {
-    lines.push('Service Plans:');
+    lines.push(planHeading);
     lines.push('- ');
   } else if (carryServicePlans && data.servicePlans.length > 0) {
-    lines.push('Service Plans:');
+    lines.push(planHeading);
     for (const plan of data.servicePlans) {
       lines.push(`- ${plan}`);
     }
@@ -2822,9 +3246,11 @@ export function buildStructuredShiftUpdate({
   parsed = {},
   isInterim = false,
   dateStr = '',
+  planMode = 'service',
 } = {}) {
   const cleanShift = String(shift || '6am').trim() || '6am';
   const interimMode = Boolean(isInterim) || isInterimShift(cleanShift);
+  const planHeading = (PLAN_MODES[planMode] || PLAN_MODES.service).heading;
 
   if (interimMode) {
     const blocks = [];
@@ -2836,6 +3262,8 @@ export function buildStructuredShiftUpdate({
     if (ventLine) blocks.push(`Vent: ${ventLine}`);
     const dripsLine = String(values.drips || '').trim();
     if (dripsLine) blocks.push(`Drips: ${dripsLine}`);
+    const contLine = String(values.contingencies || '').trim();
+    if (contLine) blocks.push(`Contingencies: ${contLine}`);
     const labsTxt = String(values.labs || '').trim();
     if (labsTxt) blocks.push(`Labs:\n${labsTxt}`);
     const medLines = normalizeStructuredLines(values.meds);
@@ -2843,7 +3271,7 @@ export function buildStructuredShiftUpdate({
     const pendingLines = normalizeStructuredLines(values.pending, { checklist: true });
     if (pendingLines.length) blocks.push(`**Pending:\n${pendingLines.join('\n')}`);
     const planLines = normalizeStructuredLines(values.servicePlans);
-    if (planLines.length) blocks.push(`Service Plans:\n${planLines.join('\n')}`);
+    if (planLines.length) blocks.push(`${planHeading}\n${planLines.join('\n')}`);
     return `### ${cleanShift}\n${blocks.length ? blocks.join('\n\n') : 'Event / Update: '}\n`;
   }
 
@@ -2939,7 +3367,9 @@ export function buildStructuredShiftUpdate({
       case 'plan': {
         const planBlocks = [];
         const spLines = normalizeStructuredLines(values.servicePlans);
-        if (spLines.length) planBlocks.push(`Service Plans:\n${spLines.join('\n')}`);
+        if (spLines.length) planBlocks.push(`${planHeading}\n${spLines.join('\n')}`);
+        const contTxt = String(values.contingencies || '').trim();
+        if (contTxt) planBlocks.push(`Contingencies: ${contTxt}`);
         const pendLines = normalizeStructuredLines(values.pending, { checklist: true });
         if (pendLines.length) planBlocks.push(`**Pending:\n${pendLines.join('\n')}`);
         if (planBlocks.length) blocks.push(planBlocks.join('\n\n'));
@@ -3743,6 +4173,7 @@ export function analyzePatientHandover(note, dateStr = null) {
 export function formatHandoverReport(notes, dateStr = null, options = {}) {
   const targetDate = dateStr || getTodayDateStrings().mmddyyyy;
   const scope = options?.scope || 'all';
+  const format = String(options?.format || 'standard').toLowerCase();
   const includeResolvedPending = options?.includeResolvedPending !== false;
   const includeVitalsLabs = options?.includeVitalsLabs !== false;
 
@@ -3762,7 +4193,8 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
   const openPendingCount = analyses.reduce((sum, a) => sum + a.openPending.length, 0);
   const gapsCount = analyses.reduce((sum, a) => sum + a.gaps.length, 0);
 
-  let out = `# Shift Endorsement / Handover — ${targetDate}\n\n`;
+  const fmtLabel = format === 'ipass' ? 'I-PASS Sign-out' : format === 'sbar' ? 'SBAR Handover' : 'Shift Endorsement / Handover';
+  let out = `# ${fmtLabel} — ${targetDate}\n\n`;
   out += `**Active Census:** ${active.length} | **Updated Today:** ${updatedCount} | **Open Pending:** ${openPendingCount} | **Gaps:** ${gapsCount} | **Charity:** ${charityCount}\n\n`;
 
   const displayAnalyses =
@@ -3780,11 +4212,140 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
   for (const a of displayAnalyses) {
     const pt = a.parsed;
     const roomLbl = formatRoomLabel(pt.room);
-    const demo = [pt.age ? `${pt.age}yo` : '', pt.sex, pt.service].filter(Boolean).join(' · ');
+    const hdPart = pt.hospitalDay ? `HD #${pt.hospitalDay}` : '';
+    const icuPart = pt.icuDay ? `ICU #${pt.icuDay}` : '';
+    const demo = [pt.age ? `${pt.age}yo` : '', pt.sex, pt.service, hdPart, icuPart].filter(Boolean).join(' · ');
 
     out += `## ${roomLbl} — ${pt.name}${demo ? ` (${demo})` : ''}\n`;
 
     const dx = pt.assessment || a.assessmentSummary || '';
+    const m = a.latestMetrics;
+    const activeDrip = cleanActiveDrips(m.drips);
+
+    const vsParts = [];
+    if (m.vitals) vsParts.push(m.vitals);
+    if (m.vent) vsParts.push(`Vent: ${m.vent}`);
+
+    const fluidParts = [];
+    const shiftIoVal = m.shiftIo || (!m.io24h ? m.io : '');
+    if (shiftIoVal) {
+      fluidParts.push(m.ioWindow ? `Shift (${m.ioWindow}): ${shiftIoVal}` : `Shift: ${shiftIoVal}`);
+    }
+    if (m.io24h) fluidParts.push(`24h: ${m.io24h}`);
+    if (pt.cumulativeFb) fluidParts.push(`${pt.cumulativeFb.label}: ${pt.cumulativeFb.totalText}`);
+    if (activeDrip) fluidParts.push(`IVF/Drips: ${activeDrip}`);
+    if (m.hgt) fluidParts.push(`HGT: ${m.hgt}`);
+
+    let courseText = '';
+    if (a.shifts.length === 0) {
+      courseText = `No chart entry today (Last entry: ${pt.latestDate || 'None'})`;
+    } else {
+      const targetEvents =
+        scope === 'latest' && a.eventsByShift.length > 1
+          ? [a.eventsByShift[a.eventsByShift.length - 1]]
+          : a.eventsByShift;
+      const shiftsWithEvents = targetEvents.filter((ev) => ev.lines.length > 0);
+      if (shiftsWithEvents.length === 0) {
+        const shiftList = (scope === 'latest' ? [a.shifts[a.shifts.length - 1]] : a.shifts)
+          .map((s) => s.shift)
+          .join(', ');
+        courseText = `(${shiftList}) Routine shift update; no acute interval events.`;
+      } else if (shiftsWithEvents.length === 1) {
+        const ev = shiftsWithEvents[0];
+        courseText = `(${ev.shift}) ${joinClausesAsProse(ev.lines)}`;
+      } else {
+        courseText = shiftsWithEvents.map((ev) => `${ev.shift}: ${joinClausesAsProse(ev.lines)}`).join(' · ');
+      }
+    }
+
+    const combinedPlans = [];
+    const combinedPlanSeen = new Set();
+    for (const item of [...a.medChanges, ...a.activePlans]) {
+      const k = item.toLowerCase();
+      if (!combinedPlanSeen.has(k)) {
+        combinedPlanSeen.add(k);
+        combinedPlans.push(item);
+      }
+    }
+
+    const safetyParts = [
+      pt.severity || 'Stable',
+      pt.codeStatus || 'Full Code',
+      pt.allergies ? `Allergies: ${pt.allergies}` : 'Allergies: NKDA/Unrecorded',
+      pt.isolation?.length ? `Isolation: ${pt.isolation.join(', ')}` : '',
+    ].filter(Boolean);
+    const devicesParts = [
+      ...(pt.trackedLines || []).map((l) => l.label),
+      ...(pt.trackedAntibiotics || []).map((ab) => ab.label),
+    ];
+    const completedAbxToday = (pt.completedAntibiotics || []).filter((ab) =>
+      ab.completedDate ? datesMatch(ab.completedDate, targetDate) : false
+    );
+    const completedAbxText = completedAbxToday.map((ab) => ab.label).join(', ');
+
+    if (format === 'ipass') {
+      out += `**I — Illness Severity:** ${safetyParts.join(' · ')}\n`;
+      const summaryClauses = [
+        dx ? `Dx: ${dx}` : '',
+        courseText ? `Course: ${courseText}` : '',
+        devicesParts.length ? `Lines/Abx: ${devicesParts.join(', ')}` : '',
+        completedAbxText ? `Completed Abx: ${completedAbxText}` : '',
+      ].filter(Boolean);
+      if (includeVitalsLabs) {
+        if (vsParts.length) summaryClauses.push(`VS: ${vsParts.join(' · ')}`);
+        if (fluidParts.length) summaryClauses.push(`Fluids: ${fluidParts.join(' · ')}`);
+        if (m.labs) summaryClauses.push(`Labs: ${m.labs}`);
+      }
+      out += `**P — Patient Summary:** ${summaryClauses.join(' | ') || 'See chart'}\n`;
+
+      const hasResolved = includeResolvedPending && a.resolvedToday.length > 0;
+      if (a.openPending.length > 0 || hasResolved) {
+        out += `**A — Action List:**\n`;
+        for (const p of a.openPending) out += `- [ ] ${p}\n`;
+        if (hasResolved) {
+          for (const r of a.resolvedToday) out += `- [x] ${r} *(resolved)*\n`;
+        }
+      } else {
+        out += `**A — Action List:** None open\n`;
+      }
+
+      const sitParts = [
+        pt.contingencies ? `If/Then: ${pt.contingencies}` : '',
+        activeDrip ? `Active Drips: ${activeDrip}` : '',
+        combinedPlans.length ? `Plans: ${joinClausesAsProse(combinedPlans)}` : '',
+      ].filter(Boolean);
+      out += `**S — Situation Awareness & Contingencies:** ${sitParts.join(' · ') || 'Monitor routine clinical status'}\n`;
+      out += `**S — Synthesis:** [ ] Receiver read-back confirmed\n\n---\n\n`;
+      continue;
+    }
+
+    if (format === 'sbar') {
+      out += `**S — Situation:** ${safetyParts.join(' · ')}${dx ? ` — ${dx}` : ''}\n`;
+      const bgParts = [
+        courseText ? `Interval: ${courseText}` : '',
+        devicesParts.length ? `Lines/Abx: ${devicesParts.join(', ')}` : '',
+        completedAbxText ? `Completed Abx: ${completedAbxText}` : '',
+        a.feedingItems.length ? `Diet: ${joinClausesAsProse(a.feedingItems)}` : '',
+      ].filter(Boolean);
+      out += `**B — Background:** ${bgParts.join(' · ') || 'Active inpatient follow-up'}\n`;
+      const assessParts = [];
+      if (includeVitalsLabs) {
+        if (vsParts.length) assessParts.push(`Vitals: ${vsParts.join(' · ')}`);
+        if (fluidParts.length) assessParts.push(`I&O: ${fluidParts.join(' · ')}`);
+        if (m.labs) assessParts.push(`Labs: ${m.labs}`);
+      }
+      const examItems = [...a.neuroNotes, ...a.pertinentExam];
+      if (examItems.length) assessParts.push(`Exam: ${joinClausesAsProse(examItems)}`);
+      out += `**A — Assessment:** ${assessParts.join(' | ') || (dx || 'Stable')}\n`;
+      const recParts = [
+        combinedPlans.length ? `Plan: ${joinClausesAsProse(combinedPlans)}` : '',
+        pt.contingencies ? `Contingencies: ${pt.contingencies}` : '',
+        a.openPending.length ? `Pending (${a.openPending.length}): ${a.openPending.join('; ')}` : '',
+      ].filter(Boolean);
+      out += `**R — Recommendation:** ${recParts.join(' · ') || 'Continue current care'}\n\n---\n\n`;
+      continue;
+    }
+
     if (dx) {
       out += `**Assessment:** ${dx}\n`;
     }
@@ -3814,36 +4375,12 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
     }
 
     if (includeVitalsLabs) {
-      const m = a.latestMetrics;
-      const vsParts = [];
-      if (m.vitals) vsParts.push(m.vitals);
-      if (m.vent) vsParts.push(`Vent: ${m.vent}`);
       if (vsParts.length > 0) {
         out += `**${m.vent ? 'Vitals & Vent' : 'Vitals'}:** ${vsParts.join(' · ')}\n`;
-      }
-
-      const fluidParts = [];
-      const shiftIoVal = m.shiftIo || (!m.io24h ? m.io : '');
-      if (shiftIoVal) {
-        fluidParts.push(m.ioWindow ? `Shift (${m.ioWindow}): ${shiftIoVal}` : `Shift: ${shiftIoVal}`);
-      }
-      if (m.io24h) {
-        fluidParts.push(`24h: ${m.io24h}`);
-      }
-      if (pt.cumulativeFb) {
-        fluidParts.push(`${pt.cumulativeFb.label}: ${pt.cumulativeFb.totalText}`);
-      }
-      const activeDrip = cleanActiveDrips(m.drips);
-      if (activeDrip) {
-        fluidParts.push(`IVF/Drips: ${activeDrip}`);
-      }
-      if (m.hgt) {
-        fluidParts.push(`HGT: ${m.hgt}`);
       }
       if (fluidParts.length > 0) {
         out += `**I&O / Fluids:** ${fluidParts.join(' · ')}\n`;
       }
-
       if (m.labs) {
         out += `**Labs:** ${m.labs}\n`;
       }
@@ -3858,17 +4395,15 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
       out += `**Feeding:** ${joinClausesAsProse(a.feedingItems)}\n`;
     }
 
-    const combinedPlans = [];
-    const combinedPlanSeen = new Set();
-    for (const item of [...a.medChanges, ...a.activePlans]) {
-      const k = item.toLowerCase();
-      if (!combinedPlanSeen.has(k)) {
-        combinedPlanSeen.add(k);
-        combinedPlans.push(item);
-      }
-    }
     if (combinedPlans.length > 0) {
       out += `**Med Changes & Plans:** ${joinClausesAsProse(combinedPlans)}\n`;
+    }
+
+    if (pt.contingencies) {
+      out += `**Contingencies (If/Then):** ${pt.contingencies}\n`;
+    }
+    if (completedAbxText) {
+      out += `**Completed Antibiotics:** ${completedAbxText}\n`;
     }
 
     const hasResolved = includeResolvedPending && a.resolvedToday.length > 0;
@@ -3906,6 +4441,7 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
 
   return {
     markdown: out,
+    format,
     stats: {
       activeCount: active.length,
       updatedCount,
@@ -3920,6 +4456,44 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
       headerText: `${formatRoomLabel(a.parsed.room)} — ${a.parsed.name}`,
       gapHeaderText: `${formatRoomLabel(a.parsed.room)} (${a.parsed.name})`,
       gaps: a.gaps,
+    })),
+  };
+}
+
+export function buildPrintableScutsheetData(notes, options = {}) {
+  const includeCharity = Boolean(options.includeCharity);
+  const parsed = (notes || [])
+    .map((n) => ({ note: n, ...parseChart(n.content, n) }))
+    .filter((p) => p.isCensus && (includeCharity || !p.isCharity))
+    .sort((a, b) => naturalBedCompare(a.room, b.room));
+
+  return {
+    generatedDate: getTodayDateStrings().mmddyyyy,
+    patients: parsed.map((p) => ({
+      id: p.note.id,
+      room: formatRoomLabel(p.room),
+      rawRoom: p.room || 'Unassigned',
+      name: p.name,
+      ageSex: [p.age ? `${p.age}${p.sex || ''}` : p.sex || '', p.weight ? `${p.weight}kg` : ''].filter(Boolean).join(' · '),
+      service: p.service || '',
+      ap: p.ap || '',
+      hospitalDay: p.hospitalDay,
+      icuDay: p.icuDay,
+      codeStatus: p.codeStatus || 'Full Code',
+      severity: p.severity || 'Stable',
+      allergies: p.allergies || 'NKDA',
+      isolation: p.isolation || [],
+      assessment: p.assessment || '',
+      vitals: p.vitals || '',
+      vent: p.vent || '',
+      io: p.io || '',
+      labs: p.labs || '',
+      drips: p.drips || '',
+      trackedLines: p.trackedLines || [],
+      trackedAntibiotics: p.trackedAntibiotics || [],
+      contingencies: p.contingencies || '',
+      servicePlans: p.servicePlans || [],
+      openPending: (p.pending || []).filter((it) => !it.checked).map((it) => it.text),
     })),
   };
 }
@@ -3998,6 +4572,9 @@ export function formatDailyCensusReport(notes) {
 
 export function getSyntheticCensusData() {
   const today = getTodayDateStrings().mmddyyyy;
+  const daysAgo = (n) => getTodayDateStrings(new Date(Date.now() - n * 86400000)).mmddyyyy;
+  const d3Ago = daysAgo(3);
+  const d4Ago = daysAgo(4);
   return [
     {
       id: 'syn-pt-1',
@@ -4011,9 +4588,14 @@ room: 412
 age: 58
 sex: M
 weight: 72
+height_cm: 172
 service: Internal Medicine
 admitted: ${today}
 ap: Dr. A. Santos
+code_status: Full Code
+severity: Stable
+allergies: NKDA
+contingencies: If SpO2 < 92%, titrate O2 and recheck ABG
 census: true
 charity: false
 assessment: Community-Acquired Pneumonia (Moderate Risk); Type 2 Diabetes Mellitus
@@ -4057,9 +4639,14 @@ room: 405
 age: 64
 sex: F
 weight: 58
+height_cm: 158
 service: Cardiology
-admitted: ${today}
+admitted: ${d3Ago}
 ap: Dr. E. Gomez
+code_status: Full Code
+severity: Watcher
+allergies: NKDA
+contingencies: If recurrent chest pain or ST change, stat 12L ECG and call Cardiology
 census: true
 charity: false
 assessment: NSTEMI s/p PCI to LAD; Hypertensive Heart Disease; CKD Stage 3a
@@ -4105,9 +4692,18 @@ room: ICU-2
 age: 71
 sex: M
 weight: 70
+height_cm: 170
 service: Pulmonology / Critical Care
-admitted: ${today}
+admitted: ${d4Ago}
+icu_admitted: ${d3Ago}
 ap: Dr. L. Morales
+code_status: Full Code
+severity: Unstable
+allergies: Sulfamethoxazole (rash)
+isolation: Contact
+contingencies: If MAP < 65, uptitrate Norepi by 0.02 mkm (max 0.3); if SpO2 < 90%, obtain stat ABG and CXR
+lines: R-IJ CVC | ${d3Ago}; Foley catheter | ${d3Ago}
+antibiotics: Meropenem 1g IV | ${d3Ago} | 7 | q12h | 08:00
 census: true
 charity: false
 assessment: Septic Shock secondary to Severe Urosepsis; Acute Respiratory Distress Syndrome (ARDS); AKI on CKD
@@ -4120,7 +4716,7 @@ Vitals: BP 100/60 (MAP 73) | HR 92 | RR 22 | T 38.2C | O2sat 94% on Vent
 Vent: AC/VC Vt 420 | PEEP 10 | FiO2 50% | Ppeak 26
 Shift I&O: In: 1400ml | Out: 700ml | Net: +700ml
 Drips: Norepinephrine @ 0.08 mcg/kg/min | Fentanyl @ 50 mcg/hr
-Labs: ABG pH 7.32 / pCO2 38 / pO2 78 / HCO3 19 / BE -5 | Cr 2.4 H (1.8)
+Labs: Na 132 | K 4.8 | Cl 96 | HCO3 19 | BUN 38 | Cr 2.4 H (1.8) | Glu 168 | Alb 2.8 | WBC 18.4 H | Hb 10.4 L | Hct 31.2 L | Plt 138 L | ABG pH 7.32 / pCO2 38 / pO2 78 / HCO3 19 / BE -5 | Lactate 2.8 H
 
 **Pending:
 - [ ] Repeat ABG 2h post PEEP titration
@@ -4155,6 +4751,9 @@ age: 45
 sex: F
 service: Nephrology / Charity
 ap: Dr. J. Tan
+code_status: Full Code
+severity: Stable
+allergies: NKDA
 census: true
 charity: true
 assessment: Systemic Lupus Erythematosus; Lupus Nephritis Class IV for pulse therapy
@@ -4185,9 +4784,19 @@ export function syncFrontmatter(content, fields = {}) {
     'age',
     'sex',
     'weight',
+    'height_cm',
     'service',
     'admitted',
+    'icu_admitted',
     'ap',
+    'code_status',
+    'severity',
+    'allergies',
+    'isolation',
+    'contingencies',
+    'lines',
+    'antibiotics',
+    'antibiotics_completed',
     'census',
     'charity',
     'categories',
@@ -4200,7 +4809,7 @@ export function syncFrontmatter(content, fields = {}) {
     if (fields[k] === undefined) continue;
     if (k === 'census' || k === 'charity') {
       updates[k] = fields[k] ? 'true' : 'false';
-    } else if ((k === 'aliases' || k === 'categories') && Array.isArray(fields[k])) {
+    } else if ((k === 'aliases' || k === 'categories' || k === 'isolation') && Array.isArray(fields[k])) {
       const cleaned = [];
       const seenVals = new Set();
       for (const item of fields[k]) {
