@@ -87,6 +87,8 @@ import {
   appendShiftBlock,
   appendPendingLineToLatestBlock,
   hasShiftHeadingOnDate,
+  hasExistingShiftInChart,
+  extractChartHeaderFooter,
   removeCategoryFromChartContent,
   extractCarryForwardData,
   buildCarryForwardShiftBlock,
@@ -589,6 +591,7 @@ let inboxPinnedNoteId = null;
 let inboxUserSelectedTarget = false;
 let inboxMode = 'labs';
 let inboxShift = '6am';
+let inboxWrapUserOverride = null;
 let lastInboxTrended = null;
 
 /* ---------- resilient storage helpers ---------- */
@@ -2898,6 +2901,15 @@ function renderRoundsLedgerBodyHtml(pt) {
     : '';
 
   return `
+    <div class="ledger-footer">
+      <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
+      <button type="button" class="ledger-btn-subtle dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
+      <button type="button" class="ledger-btn-subtle shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
+      <button type="button" class="ledger-btn-icon copy-update-btn" data-id="${pt.id}" title="Copy update text" aria-label="Copy update">${uiIcon('copy')}</button>
+      <div class="row-more-wrap">
+        <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-controls="rowActionMenu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
+      </div>
+    </div>
     ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
     ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${pt.drips.split(/\s*\|\s*/).map((d) => esc(d)).join('<br>')}</span></div>` : ''}
     <div class="ledger-params">${paramRows.join('')}</div>
@@ -2908,15 +2920,6 @@ function renderRoundsLedgerBodyHtml(pt) {
       ${pendingItemsHtml ? `<div class="pending-items">${pendingItemsHtml}</div>` : ''}
       <div class="pending-add-row">
         <input type="text" class="pending-add-input" enterkeyhint="done" autocapitalize="sentences" data-note-id="${pt.id}" placeholder="+ Quick add pending item..." aria-label="Add pending task for ${esc(pt.name)}">
-      </div>
-    </div>
-    <div class="ledger-footer">
-      <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
-      <button type="button" class="ledger-btn-subtle dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
-      <button type="button" class="ledger-btn-subtle shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
-      <button type="button" class="ledger-btn-icon copy-update-btn" data-id="${pt.id}" title="Copy update text" aria-label="Copy update">${uiIcon('copy')}</button>
-      <div class="row-more-wrap">
-        <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-controls="rowActionMenu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
       </div>
     </div>`;
 }
@@ -5249,6 +5252,7 @@ function renderInboxQueue() {
       inboxSelectedQueueId = row.dataset.id;
       const item = inboxItems.find((x) => x.id === inboxSelectedQueueId);
       inboxUserSelectedTarget = false;
+      inboxWrapUserOverride = null;
       if (item && item.resolvedNoteId && !inboxPinnedNoteId) {
         $('inboxTargetSelect').value = item.resolvedNoteId;
         inboxUserSelectedTarget = true;
@@ -5300,6 +5304,7 @@ function setBannerWithCandidates(banner, cls, msg, candidates = []) {
         inboxPinnedNoteId = null;
         $('inboxTargetSelect').value = cand.note.id;
         inboxUserSelectedTarget = true;
+        inboxWrapUserOverride = null;
         updateInboxDryRun();
       };
       row.appendChild(btn);
@@ -5388,6 +5393,23 @@ function updateInboxDryRun() {
   const chipsEl = $('inboxLabChips');
   const previewEl = $('inboxDryRunPreview');
   const narrativeBar = $('inboxNarrativeBar');
+  const wrapChip = $('inboxWrapHeaderFooterChip');
+  const wrapChk = $('inboxWrapHeaderFooter');
+
+  const dateStr = isoToMmDdYyyy($('inboxDateInput')?.value) || getTodayDateStrings().mmddyyyy;
+  const effectiveShift = resolveModalShiftHeading(inboxShift, 'inboxInterimTimeInput');
+  const mergeChecked = inboxShift !== 'interim' && ($('inboxMergeExisting') ? $('inboxMergeExisting').checked : true);
+  const baseChart = targetNote
+    ? currentMode === 'editor' && currentId === targetNote.id
+      ? $('noteText').value
+      : targetNote.content
+    : '';
+  const willMergeExisting = Boolean(
+    mergeChecked && targetNote && hasExistingShiftInChart(baseChart, effectiveShift, dateStr)
+  );
+  const shouldWrap = inboxWrapUserOverride !== null ? inboxWrapUserOverride : !willMergeExisting;
+  if (wrapChip) wrapChip.hidden = inboxMode !== 'labs';
+  if (wrapChk) wrapChk.checked = shouldWrap;
 
   if (!rawText.trim()) {
     lastInboxTrended = null;
@@ -5398,11 +5420,6 @@ function updateInboxDryRun() {
   }
 
   if (inboxMode === 'labs') {
-    const baseChart = targetNote
-      ? currentMode === 'editor' && currentId === targetNote.id
-        ? $('noteText').value
-        : targetNote.content
-      : '';
     const style = $('inboxLabStyleToggle').checked ? 'inline' : 'line';
     const trended = buildTrendedLabs(cleaned, baseChart, { style });
     lastInboxTrended = trended;
@@ -5428,6 +5445,14 @@ function updateInboxDryRun() {
     if ($('inboxIncludeNarrative')?.checked && ignoredCount > 0) {
       finalPreview = [trended.formattedBlock.trim(), ...trended.ignoredLines].filter(Boolean).join('\n');
     }
+    if (shouldWrap && trended.entries.length > 0 && finalPreview.trim()) {
+      const hf = extractChartHeaderFooter(baseChart, targetNote || {}, {
+        config: templateConfig,
+        shift: effectiveShift,
+        dateStr,
+      });
+      finalPreview = [hf.header, finalPreview.trim(), hf.footer].filter(Boolean).join('\n\n');
+    }
     previewEl.value = finalPreview;
   } else {
     lastInboxTrended = null;
@@ -5441,6 +5466,7 @@ function openInboxModal(preselectedNoteId = null, triggerEl = null) {
   inboxPinnedNoteId = preselectedNoteId || null;
   inboxSelectedQueueId = null;
   inboxUserSelectedTarget = Boolean(preselectedNoteId);
+  inboxWrapUserOverride = null;
   inboxMode = 'labs';
   inboxShift = defaultShiftForHour();
 
@@ -11397,6 +11423,7 @@ $('inboxClearFiledBtn').onclick = () => {
 $('inboxTargetSelect').onchange = () => {
   inboxUserSelectedTarget = Boolean($('inboxTargetSelect').value);
   inboxPinnedNoteId = null;
+  inboxWrapUserOverride = null;
   updateInboxDryRun();
 };
 $('inboxModeLabs').onclick = () => {
@@ -11420,27 +11447,79 @@ if ($('inboxShiftPills')) {
     const pill = e.target.closest('.shift-pill[data-shift]');
     if (!pill) return;
     inboxShift = pill.dataset.shift;
+    inboxWrapUserOverride = null;
     $('inboxShiftPills').querySelectorAll('.shift-pill').forEach((p) => {
       const active = p === pill;
       p.classList.toggle('active', active);
       p.setAttribute('aria-pressed', String(active));
     });
     syncModalInterimTimeUi(inboxShift, 'inboxInterimTimeWrap', 'inboxInterimTimeInput');
+    updateInboxDryRun();
   });
+}
+if ($('inboxInterimTimeInput')) {
+  $('inboxInterimTimeInput').onchange = () => {
+    inboxWrapUserOverride = null;
+    updateInboxDryRun();
+  };
+}
+if ($('inboxDateInput')) {
+  $('inboxDateInput').onchange = () => {
+    inboxWrapUserOverride = null;
+    updateInboxDryRun();
+  };
+}
+if ($('inboxMergeExisting')) {
+  $('inboxMergeExisting').onchange = () => {
+    inboxWrapUserOverride = null;
+    updateInboxDryRun();
+  };
+}
+if ($('inboxWrapHeaderFooter')) {
+  $('inboxWrapHeaderFooter').onchange = () => {
+    inboxWrapUserOverride = Boolean($('inboxWrapHeaderFooter').checked);
+    updateInboxDryRun();
+  };
 }
 $('inboxLabStyleToggle').onchange = updateInboxDryRun;
 if ($('inboxIncludeNarrative')) $('inboxIncludeNarrative').onchange = updateInboxDryRun;
 
 $('inboxCopyRelayBtn').onclick = async () => {
-  const targetNote = notes.find((n) => n.id === $('inboxTargetSelect').value);
+  const targetNote = getNoteById($('inboxTargetSelect').value);
   if (!targetNote) return toast('Select a target patient first');
-  const trended =
-    lastInboxTrended ||
-    buildTrendedLabs(stripChatPrefixes($('inboxDryRunPreview').value), targetNote.content);
-  const footerText = extractRelayFooterText();
-  const relayMsg = trended.entries.length
-    ? buildLabRelayMessage(trended, targetNote, footerText)
-    : $('inboxDryRunPreview').value.trim();
+  const previewText = $('inboxDryRunPreview').value.trim();
+  const baseChart =
+    currentMode === 'editor' && currentId === targetNote.id
+      ? $('noteText').value
+      : targetNote.content;
+
+  let relayMsg = previewText;
+  if (inboxMode === 'labs') {
+    if ($('inboxWrapHeaderFooter')?.checked && previewText) {
+      relayMsg = previewText;
+    } else {
+      const trended =
+        lastInboxTrended ||
+        buildTrendedLabs(stripChatPrefixes(previewText), baseChart);
+      if (trended.entries.length) {
+        const dateStr = isoToMmDdYyyy($('inboxDateInput')?.value) || getTodayDateStrings().mmddyyyy;
+        const effectiveShift = resolveModalShiftHeading(inboxShift, 'inboxInterimTimeInput');
+        const hf = extractChartHeaderFooter(baseChart, targetNote, {
+          config: templateConfig,
+          shift: effectiveShift,
+          dateStr,
+        });
+        if (hf.header || hf.footer) {
+          relayMsg = [hf.header, previewText || trended.formattedBlock.trim(), hf.footer]
+            .filter(Boolean)
+            .join('\n\n');
+        } else {
+          relayMsg = buildLabRelayMessage(trended, targetNote, extractRelayFooterText());
+        }
+      }
+    }
+  }
+
   if (!relayMsg) return toast('Nothing to copy');
   await copyTextWithFallback(relayMsg, 'Lab relay copied to clipboard', 'Copy Lab Relay');
 };
@@ -11481,6 +11560,7 @@ $('inboxFileBtn').onclick = async () => {
     const nextUnfiled = inboxItems.find((x) => x.id !== inboxSelectedQueueId && x.status !== 'filed');
     inboxSelectedQueueId = nextUnfiled ? nextUnfiled.id : null;
     inboxUserSelectedTarget = false;
+    inboxWrapUserOverride = null;
   } else if ($('inboxPasteInput').value.trim()) {
     inboxItems.unshift({
       id: uid(),
@@ -11490,6 +11570,7 @@ $('inboxFileBtn').onclick = async () => {
       createdAt: Date.now(),
     });
     $('inboxPasteInput').value = '';
+    inboxWrapUserOverride = null;
   }
 
   saveInbox();

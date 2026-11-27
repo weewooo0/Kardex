@@ -1403,8 +1403,15 @@ main {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 6px;
+  margin-top: 0;
+  margin-bottom: 10px;
+  padding-top: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ledger-footer + .ledger-drips,
+.ledger-footer + .ledger-params > .ledger-param:first-child {
+  border-top: none;
 }
 .ledger-btn-primary {
   flex: 1.25 1 0;
@@ -5155,12 +5162,15 @@ html.kb-open .modal-overlay {
   label.btn-secondary.file,
   .ledger-btn-primary,
   .ledger-btn-subtle,
-  .ledger-btn-icon,
   .modal-foot button:not(.ghost-action) {
     min-height: 38px;
     height: auto;
     padding: 8px 12px;
     white-space: nowrap;
+  }
+  .ledger-btn-icon {
+    min-height: 38px;
+    padding: 0;
   }
   .ghost-action,
   summary.ghost-action,
@@ -5216,6 +5226,32 @@ html.kb-open .modal-overlay {
   }
   .accent-color-label {
     min-height: 44px;
+  }
+}
+
+@media (max-width: 480px) {
+  .ledger-footer {
+    gap: 5px;
+    max-width: 100%;
+  }
+  .ledger-footer .ledger-btn-primary,
+  .ledger-footer .ledger-btn-subtle {
+    min-width: 0;
+    height: 36px;
+    min-height: 36px;
+    padding: 0 7px;
+    font-size: 12px;
+    gap: 4px;
+  }
+  .ledger-footer .ledger-btn-subtle .ui-ico {
+    width: 14px;
+    height: 14px;
+  }
+  .ledger-footer .ledger-btn-icon {
+    width: 34px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
   }
 }
 

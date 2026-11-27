@@ -4332,6 +4332,234 @@ export function appendShiftBlock(
   }
 }
 
+const HF_GREETING_START_RE = /^(?:Greeting\s*:|Good\s+(?:day|morning|afternoon|evening)|Update\s+on\s+(?:your\s+)?patient|Hi\s+Dr\.?|Hello\s+Dr\.?|Dear\s+Dr\.?)/i;
+const HF_FOOTER_START_RE = /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i;
+const HF_CLINICAL_LINE_RE = /^(?:BP|HR|PR|RR|T|Temp|Tmax|O2(?:\s*sat)?|SpO2|VS|Vent|I&O|Labs?|Laboratory|WBC|Hb|Hgb|Hct|Plt|Na|K|Cl|BUN|Cr|ABG|SGOT|SGPT)\b(?:\s*[:=]|\s+\d)/i;
+
+export function hasExistingShiftInChart(content, shift = '6am', dateStr = null) {
+  const text = String(content || '').replace(/\r\n/g, '\n');
+  const targetDate = dateStr || getTodayDateStrings().mmddyyyy;
+  const cleanShift = String(shift || '6am').trim() || '6am';
+  if (!text.trim() || !targetDate) return false;
+
+  const dateHeadingRe = /^##\s+([^\n]+)$/gim;
+  const allDateMatches = [...text.matchAll(dateHeadingRe)];
+  if (!allDateMatches.length) return false;
+
+  const escapedShift = cleanShift.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const shiftRe = new RegExp(`^###\\s*${escapedShift}\\b[^\\n]*$`, 'im');
+
+  for (let i = allDateMatches.length - 1; i >= 0; i--) {
+    if (!datesMatch(allDateMatches[i][1], targetDate)) continue;
+    const dateStart = allDateMatches[i].index;
+    const dateEnd = i + 1 < allDateMatches.length ? allDateMatches[i + 1].index : text.length;
+    if (shiftRe.test(text.slice(dateStart, dateEnd))) return true;
+  }
+  return false;
+}
+
+function extractLeadingHeaderFromShiftBody(body, patientName = '') {
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  let firstIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim()) {
+      firstIdx = i;
+      break;
+    }
+  }
+  if (firstIdx === -1) return '';
+
+  const firstTrimmed = lines[firstIdx].trim();
+  const cleanName = String(patientName || '').trim();
+  const nameTokens = cleanName && cleanName !== 'Unknown Patient'
+    ? cleanName.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length >= 2)
+    : [];
+  const startsWithGreeting = HF_GREETING_START_RE.test(firstTrimmed);
+  const startsWithPatientName =
+    nameTokens.length > 0 &&
+    firstTrimmed.length <= 60 &&
+    !isShiftEditBoundary(firstTrimmed) &&
+    !HF_CLINICAL_LINE_RE.test(firstTrimmed) &&
+    firstTrimmed.toLowerCase().includes(nameTokens[0].toLowerCase());
+
+  if (!startsWithGreeting && !startsWithPatientName) return '';
+
+  const collected = [];
+  let nonEmptyCount = 0;
+  let sawIdentityOrRoom = startsWithPatientName;
+
+  for (let i = firstIdx; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      if (collected.length > 0 && collected[collected.length - 1] !== '') {
+        collected.push('');
+      }
+      continue;
+    }
+
+    const isGreetingLine = HF_GREETING_START_RE.test(trimmed);
+    const matchesBoundary = isShiftEditBoundary(trimmed);
+    if (
+      (matchesBoundary && !(i === firstIdx && /^Greeting\s*:/i.test(trimmed))) ||
+      /^[-*•]\s+/.test(trimmed) ||
+      /^[-*]?\s*\[[ xX]\]/.test(trimmed) ||
+      HF_CLINICAL_LINE_RE.test(trimmed) ||
+      HF_FOOTER_START_RE.test(trimmed)
+    ) {
+      break;
+    }
+
+    if (i > firstIdx) {
+      const looksLikeRoom = /^(?:Room\s+|ICU|NCCU|MICU|SICU|CCU|NICU|PICU|ER|OPD|Ward|Bed|\d{2,4}[A-Z]?\b)/i.test(trimmed);
+      const looksLikeAgeSex = /^\d{1,3}\s*\/\s*[MF]$/i.test(trimmed);
+      const looksLikeName =
+        nameTokens.length > 0 && trimmed.toLowerCase().includes(nameTokens[0].toLowerCase());
+      const looksLikePersonTitle =
+        !sawIdentityOrRoom && trimmed.length <= 60 && /^(?:Dr\.?\s|Attending|Patient)/i.test(trimmed);
+      const looksLikeContinuationGreeting = !sawIdentityOrRoom && isGreetingLine;
+
+      if (trimmed.length > 80 && !looksLikeContinuationGreeting) break;
+      if (
+        sawIdentityOrRoom &&
+        !looksLikeRoom &&
+        !looksLikeAgeSex &&
+        !looksLikeName &&
+        trimmed.length > 35
+      ) {
+        break;
+      }
+      if (
+        !looksLikeContinuationGreeting &&
+        !looksLikeRoom &&
+        !looksLikeAgeSex &&
+        !looksLikeName &&
+        !looksLikePersonTitle &&
+        trimmed.length > 60
+      ) {
+        break;
+      }
+      if (looksLikeRoom || looksLikeAgeSex || looksLikeName) {
+        sawIdentityOrRoom = true;
+      }
+    }
+
+    const outLine = i === firstIdx ? trimmed.replace(/^Greeting\s*:\s*/i, '').trim() : trimmed;
+    if (outLine) {
+      collected.push(outLine);
+      nonEmptyCount += 1;
+      if (nonEmptyCount >= 8) break;
+    }
+  }
+
+  while (collected.length > 0 && collected[collected.length - 1] === '') {
+    collected.pop();
+  }
+  return collected.join('\n').trim();
+}
+
+function extractTrailingFooterFromShiftBody(body) {
+  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  let nonEmptySeen = 0;
+  let footerIdx = -1;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    nonEmptySeen += 1;
+    if (HF_FOOTER_START_RE.test(trimmed)) {
+      footerIdx = i;
+      break;
+    }
+    if (
+      isShiftEditBoundary(trimmed) ||
+      /^[-*•]\s+/.test(trimmed) ||
+      /^[-*]?\s*\[[ xX]\]/.test(trimmed)
+    ) {
+      return '';
+    }
+    if (nonEmptySeen >= 8) break;
+  }
+
+  if (footerIdx === -1) return '';
+
+  const out = [];
+  for (let i = footerIdx; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+      continue;
+    }
+    out.push(trimmed);
+  }
+  while (out.length > 0 && out[out.length - 1] === '') out.pop();
+  return out.join('\n').trim();
+}
+
+export function extractChartHeaderFooter(content, note = {}, options = {}) {
+  const text = String(content || '');
+  const parsed = parseChartHeader(text, note || {});
+  const timeline = parseChartTimeline(text);
+
+  let fileHeader = '';
+  let fileFooter = '';
+  let inspected = 0;
+
+  for (let d = timeline.length - 1; d >= 0 && inspected < 8; d--) {
+    const shifts = timeline[d]?.shifts || [];
+    for (let s = shifts.length - 1; s >= 0 && inspected < 8; s--) {
+      inspected += 1;
+      const body = shifts[s]?.body || '';
+      if (!fileHeader) {
+        fileHeader = extractLeadingHeaderFromShiftBody(body, parsed.name);
+      }
+      if (!fileFooter) {
+        fileFooter = extractTrailingFooterFromShiftBody(body);
+      }
+      if (fileHeader && fileFooter) break;
+    }
+    if (fileHeader && fileFooter) break;
+  }
+
+  const cfg = (options && options.config) || DEFAULT_TEMPLATE_CONFIG;
+  const cleanShift = String(options?.shift || '6am').trim() || '6am';
+  const dateStr = String(options?.dateStr || '').trim();
+
+  let header = fileHeader;
+  let headerSource = 'file';
+  if (!header) {
+    headerSource = 'template';
+    const rawHeader = resolveSimplePlaceholders(cfg.header || '', parsed, cleanShift, dateStr)
+      .split('\n')
+      .map((l) => l.trimEnd())
+      .join('\n')
+      .trim();
+    const ptLines = [];
+    if (cfg.showName !== false && parsed.name && parsed.name !== 'Unknown Patient') {
+      ptLines.push(parsed.name);
+    }
+    if (cfg.showAgeSex !== false) {
+      const ageSex = [parsed.age, parsed.sex].filter(Boolean).join('/');
+      if (ageSex) ptLines.push(ageSex);
+    }
+    if (cfg.showRoom !== false && parsed.room && parsed.room !== 'Unassigned') {
+      ptLines.push(parsed.room);
+    }
+    const headerParts = [];
+    if (rawHeader) headerParts.push(rawHeader);
+    if (ptLines.length) headerParts.push(ptLines.join('\n'));
+    header = headerParts.join('\n\n').trim();
+  }
+
+  let footer = fileFooter;
+  let footerSource = 'file';
+  if (!footer) {
+    footerSource = 'template';
+    footer = resolveSimplePlaceholders(cfg.footer || '', parsed, cleanShift, dateStr).trim();
+  }
+
+  return { header, footer, headerSource, footerSource };
+}
+
 export function buildClinicalDictationAiPrompt({
   redactedTranscript = '',
   standingContext = {},
