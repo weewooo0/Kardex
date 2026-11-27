@@ -3,6 +3,7 @@
 // user confirms the preview and the guard reports zero leaks.
 
 const NAME_FIELDS = /^(?:name|patient|patient_name|patientname|fullname|subject|client|pt)\s*:/i;
+const NAME_FIELDS_MULTILINE = /^(?:name|patient|patient_name|patientname|fullname|subject|client|pt)\s*:/im;
 const ROOM_KEYS = /^(?:room|rm|bed|ward|location)\s*:/i;
 const ROOM_TOKEN = /\b(?:room|rm\.?|bed|ward)\s*#?\s*\d+[A-Za-z]?(?:\s*[-/]\s*\d+[A-Za-z]?)?/gi;
 const SUFFIXES = /\b(?:jr\.?|sr\.?|ii|iii|iv|md|phd|esq\.?)\b/giu;
@@ -11,6 +12,8 @@ const LB = '(?<![\\p{L}\\p{N}])';
 const RB = '(?![\\p{L}\\p{N}])';
 const SEP = '[\\s,.\'-]*';
 const TOKEN = '[\\p{L}\\p{N}]+';
+const VARIANT_CACHE_MAX = 64;
+const nameVariantsCache = new Map();
 
 export const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -23,12 +26,17 @@ function tokensOf(value) {
     .filter(Boolean);
 }
 
-/** All case/spacing/punctuation variants we will look for. */
-export function buildNameVariants(name, aliases = []) {
-  const out = [];
-  const push = (label, re) => out.push({ label, re });
+function compileNameVariants(name, aliases = []) {
   const names = [name, ...(Array.isArray(aliases) ? aliases : [aliases])]
     .filter((v) => typeof v === 'string' && v.trim());
+  if (!names.length) return [];
+
+  const cacheKey = JSON.stringify(names);
+  const cached = nameVariantsCache.get(cacheKey);
+  if (cached) return cached;
+
+  const out = [];
+  const push = (label, re) => out.push({ label, re });
 
   for (const raw of names) {
     const t = tokensOf(raw);
@@ -45,10 +53,21 @@ export function buildNameVariants(name, aliases = []) {
       if (tok.length >= 3) push(`${raw} (token)`, new RegExp(`${LB}${escapeRe(tok)}${RB}`, 'giu'));
     }
   }
+
+  if (nameVariantsCache.size >= VARIANT_CACHE_MAX) {
+    nameVariantsCache.delete(nameVariantsCache.keys().next().value);
+  }
+  nameVariantsCache.set(cacheKey, out);
   return out;
 }
 
+/** All case/spacing/punctuation variants we will look for. */
+export function buildNameVariants(name, aliases = []) {
+  return compileNameVariants(name, aliases).slice();
+}
+
 function frontmatterValueRanges(text) {
+  if (!NAME_FIELDS_MULTILINE.test(text)) return [];
   const lines = text.split('\n');
   let inFront = false;
   let offset = 0;
@@ -73,11 +92,30 @@ function frontmatterValueRanges(text) {
   return ranges;
 }
 
-function roomRanges(text) {
-  return [...text.matchAll(ROOM_TOKEN)].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+function scanRooms(text) {
+  const ranges = [];
+  const texts = [];
+  ROOM_TOKEN.lastIndex = 0;
+  let m;
+  while ((m = ROOM_TOKEN.exec(text)) !== null) {
+    ranges.push({ start: m.index, end: m.index + m[0].length });
+    texts.push(m[0]);
+  }
+  return { ranges, texts };
 }
 
 const overlaps = (a, b, list) => list.some((r) => a < r.end && b > r.start);
+
+function findLeaksWithVariants(text, variants) {
+  const str = String(text ?? '');
+  const leaks = [];
+  for (const { label, re } of variants) {
+    re.lastIndex = 0;
+    const found = re.exec(str);
+    if (found) leaks.push({ label, value: found[0] });
+  }
+  return leaks;
+}
 
 /**
  * Redact a markdown note. Returns the safe text plus an audit report.
@@ -89,11 +127,13 @@ export function redact(markdown, profile = {}, options = {}) {
   const aliases = profile.aliases || [];
   const replacement = options.replacement || '[PATIENT]';
   const keepRooms = options.keepRooms !== false;
-  const rooms = roomRanges(text);
+  const { ranges: rooms, texts: roomTexts } = scanRooms(text);
   const protectedRanges = keepRooms ? rooms : [];
+  const variants = compileNameVariants(name, aliases);
 
   const candidates = [];
-  for (const { label, re } of buildNameVariants(name, aliases)) {
+  for (const { label, re } of variants) {
+    re.lastIndex = 0;
     for (const m of text.matchAll(re)) {
       candidates.push({ start: m.index, end: m.index + m[0].length, label, original: m[0] });
     }
@@ -125,20 +165,15 @@ export function redact(markdown, profile = {}, options = {}) {
     text: out,
     report: {
       replacements: accepted.map(({ label, original }) => ({ label, original })),
-      rooms: [...text.matchAll(ROOM_TOKEN)].map((m) => m[0]),
-      leaks: findLeaks(out, profile),
+      rooms: roomTexts,
+      leaks: findLeaksWithVariants(out, variants),
     },
   };
 }
 
 /** Patterns that must NOT be present in outgoing text. Empty = safe to send. */
 export function findLeaks(text, profile = {}) {
-  const leaks = [];
-  for (const { label, re } of buildNameVariants(profile.name || '', profile.aliases || [])) {
-    const found = String(text ?? '').match(re);
-    if (found) leaks.push({ label, value: found[0] });
-  }
-  return leaks;
+  return findLeaksWithVariants(text, compileNameVariants(profile.name || '', profile.aliases || []));
 }
 
 /** A safe filename: patient name never appears, room is kept. */

@@ -25,6 +25,9 @@
 })();
 </script>
 <link rel="stylesheet" href="./styles.css">
+<link rel="modulepreload" href="./census.js">
+<link rel="modulepreload" href="./theme.js">
+<link rel="modulepreload" href="./vault.js">
 </head>
 <body>
 <svg class="svg-sprite" aria-hidden="true" focusable="false">
@@ -447,7 +450,6 @@
           <button type="button" id="editorMoreBtn" class="editor-icon-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="editorMorePopover" title="More chart actions" aria-label="More chart actions"><svg class="ui-ico" aria-hidden="true"><use href="#ico-more"></use></svg></button>
           <div id="editorMorePopover" class="popover-menu editor-more-popover" role="menu" hidden>
             <button type="button" id="chartLabsBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg><span>Parse Labs</span></button>
-            <button type="button" id="chartCalcBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg><span>Calc / Audit</span></button>
             <button type="button" id="copyUpdateBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-share"></use></svg><span>Copy Update</span></button>
             <div class="popover-menu-sep" role="separator"></div>
             <button type="button" id="saveBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg><span>Save Chart</span></button>
@@ -481,7 +483,10 @@
 
           <div class="editor-primary-bar">
             <button type="button" id="appendShiftBtn" class="primary editor-cta-btn"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Update</button>
-            <button type="button" id="editorDictateBtn" class="btn-secondary dictate-btn editor-sec-btn" title="Dictate or transcribe voice note into this chart"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Dictate</button>
+            <div class="editor-sec-pair">
+              <button type="button" id="editorDictateBtn" class="btn-secondary dictate-btn editor-sec-btn" title="Dictate or transcribe voice note into this chart"><svg class="ui-ico" aria-hidden="true"><use href="#ico-mic"></use></svg> Dictate</button>
+              <button type="button" id="chartCalcBtn" class="btn-secondary editor-sec-btn" title="Calc / Audit — Renal calculators, drip rates &amp; safety audit" aria-label="Calc / Audit"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg> Calc</button>
+            </div>
           </div>
 
           <div id="editorSidebarCumFb" class="editor-sidebar-cumfb" hidden></div>
@@ -2105,6 +2110,13 @@
   </div>
 </div>
 
+<div id="rowActionMenu" class="popover-menu row-more-menu floating-row-menu" role="menu" aria-label="Patient actions" hidden style="position:fixed;z-index:120;right:auto;bottom:auto;">
+  <button type="button" class="popover-menu-item open-chart-btn" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pencil"></use></svg><span>Open Chart</span></button>
+  <button type="button" class="popover-menu-item open-labs-btn" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg><span>Lab Results</span></button>
+  <button type="button" class="popover-menu-item open-abx-btn" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pill"></use></svg><span>Antibiotics</span></button>
+  <button type="button" class="popover-menu-item calc-btn" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-calc"></use></svg><span>Calculators</span></button>
+  <button type="button" class="popover-menu-item pitch-btn" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-ai-brain"></use></svg><span>Bedside Pitch</span></button>
+</div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script type="module" src="./app.js"></script>
 </body>

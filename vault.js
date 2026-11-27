@@ -239,16 +239,33 @@ export async function queryDirPermission(dirHandle, { request = false } = {}) {
   }
 }
 
-export async function readVaultFile(dirHandle, fileName) {
+export async function readVaultFile(dirHandle, fileName, options = {}) {
   if (!dirHandle || !fileName) return null;
   try {
     const fh = await dirHandle.getFileHandle(fileName, { create: false });
     const file = await fh.getFile();
+    const diskLastMod = Number(file.lastModified || 0);
+    const diskSize = typeof file.size === 'number' ? file.size : -1;
+    const localNote =
+      options && typeof options === 'object' && 'sourceContentHash' in options
+        ? options
+        : options?.localNote || null;
+    if (localNote && isStatUnchanged(localNote, diskLastMod, diskSize)) {
+      return {
+        name: fh.name || fileName,
+        content: null,
+        lastModified: diskLastMod,
+        size: diskSize,
+        hash: localNote.sourceContentHash,
+        statUnchanged: true,
+      };
+    }
     const content = await file.text();
     return {
       name: fh.name || fileName,
       content,
-      lastModified: Number(file.lastModified || 0),
+      lastModified: diskLastMod,
+      size: diskSize,
       hash: hashContent(content),
     };
   } catch (err) {
@@ -264,13 +281,8 @@ export async function writeVaultFile(dirHandle, fileName, content) {
   const payload = String(content ?? '');
   await writable.write(payload);
   await writable.close();
-  let lastModified = Date.now();
-  let size = typeof Blob !== 'undefined' ? new Blob([payload]).size : payload.length;
-  try {
-    const f = await fh.getFile();
-    if (f && Number.isFinite(f.lastModified)) lastModified = f.lastModified;
-    if (f && typeof f.size === 'number') size = f.size;
-  } catch {}
+  const lastModified = Date.now();
+  const size = typeof Blob !== 'undefined' ? new Blob([payload]).size : payload.length;
   return {
     name: fh.name || fileName,
     lastModified,
@@ -450,6 +462,19 @@ function isStatUnchanged(localNote, diskLastMod, diskSize) {
     diskSize < 0 ||
     diskSize === localNote.sourceFileSize
   );
+}
+
+async function runWithConcurrency(items, limit, fn) {
+  if (!items.length) return;
+  const width = Math.max(1, Math.min(limit, items.length));
+  let idx = 0;
+  const workers = Array.from({ length: width }, async () => {
+    while (idx < items.length) {
+      const current = items[idx++];
+      await fn(current);
+    }
+  });
+  await Promise.all(workers);
 }
 
 export async function readFreshNoteFromVault(dirHandle, localNote) {
@@ -657,7 +682,18 @@ export async function syncActiveVaultNotes({
       })
     );
 
-    for (const item of loadedChunk) {
+    let nameReserveChain = Promise.resolve();
+    const reserveUniqueName = (room, name) => {
+      const p = nameReserveChain.then(async () => {
+        const targetName = await resolveUniqueVaultFileName(dirHandle, room, name, knownNames);
+        knownNames.add(targetName);
+        return targetName;
+      });
+      nameReserveChain = p.catch(() => {});
+      return p;
+    };
+
+    await runWithConcurrency(loadedChunk, 5, async (item) => {
       const { localNote, fastUnchanged, missingOnDisk, unlinkedLocal, file, error } = item;
       const label = localNote.sourceFileName || localNote.name || localNote.title || localNote.id;
 
@@ -693,8 +729,7 @@ export async function syncActiveVaultNotes({
             counts.pushed++;
           }
         } else if (unlinkedLocal) {
-          const targetName = await resolveUniqueVaultFileName(dirHandle, localNote.room, localNote.name, knownNames);
-          knownNames.add(targetName);
+          const targetName = await reserveUniqueName(localNote.room, localNote.name);
           const written = await writeVaultFile(dirHandle, targetName, localNote.content);
           await persistNote({
             ...localNote,
@@ -725,7 +760,7 @@ export async function syncActiveVaultNotes({
 
       processed++;
       emitProgress(label);
-    }
+    });
 
     if (Date.now() - lastYield >= 24) {
       await new Promise((r) => setTimeout(r, 0));
@@ -837,8 +872,18 @@ export async function syncVaultDirectory({
           const rawFile = await entry.getFile();
           const diskLastMod = Number(rawFile.lastModified || 0);
           const diskSize = typeof rawFile.size === 'number' ? rawFile.size : -1;
+          const localIsNonCensus = Boolean(
+            localNote && !localNote.localDirtySync && !parseChartHeader(localNote.content, localNote).isCensus
+          );
 
-          if (activeOnly && !localNote) {
+          if (isStatUnchanged(localNote, diskLastMod, diskSize)) {
+            if (localIsNonCensus && diskLastMod > 0) {
+              nextInactiveCache[nameLower] = { lastModified: diskLastMod, size: diskSize };
+            }
+            return { entry, localNote, fastUnchanged: true };
+          }
+
+          if (activeOnly && (!localNote || localIsNonCensus)) {
             const cached = inactiveCache && inactiveCache[nameLower];
             if (
               cached &&
@@ -847,20 +892,22 @@ export async function syncVaultDirectory({
               (diskSize < 0 || cached.size === diskSize)
             ) {
               nextInactiveCache[nameLower] = { lastModified: diskLastMod, size: diskSize };
-              return { entry, localNote: null, skippedInactive: true };
+              return { entry, localNote, skippedInactive: true };
             }
             const usedSlice = typeof rawFile.slice === 'function' && diskSize > 2048;
             const headText = usedSlice
               ? await rawFile.slice(0, 2048).text()
               : await rawFile.text();
             if (!isFrontmatterCensusTrue(headText)) {
-              nextInactiveCache[nameLower] = { lastModified: diskLastMod, size: diskSize };
-              return { entry, localNote: null, skippedInactive: true };
+              if (diskLastMod > 0) {
+                nextInactiveCache[nameLower] = { lastModified: diskLastMod, size: diskSize };
+              }
+              return { entry, localNote, skippedInactive: true };
             }
             const content = usedSlice ? await rawFile.text() : headText;
             return {
               entry,
-              localNote: null,
+              localNote,
               file: {
                 name: entry.name,
                 content,
@@ -871,11 +918,10 @@ export async function syncVaultDirectory({
             };
           }
 
-          if (isStatUnchanged(localNote, diskLastMod, diskSize)) {
-            return { entry, localNote, fastUnchanged: true };
-          }
-
           const content = await rawFile.text();
+          if (!isFrontmatterCensusTrue(content) && diskLastMod > 0) {
+            nextInactiveCache[nameLower] = { lastModified: diskLastMod, size: diskSize };
+          }
           return {
             entry,
             localNote,
@@ -893,7 +939,7 @@ export async function syncVaultDirectory({
       })
     );
 
-    for (const item of loadedChunk) {
+    await runWithConcurrency(loadedChunk, 5, async (item) => {
       const { entry, localNote, fastUnchanged, skippedInactive: isInactive, file, error } = item;
       if (localNote) handledLocalIds.add(localNote.id);
 
@@ -924,7 +970,7 @@ export async function syncVaultDirectory({
 
       processed++;
       emitProgress(entry.name);
-    }
+    });
 
     if (Date.now() - lastYield >= 24) {
       await new Promise((r) => setTimeout(r, 0));
@@ -932,11 +978,11 @@ export async function syncVaultDirectory({
     }
   }
 
-  // 2. Reconcile local-only or missing-on-disk notes
-  for (const { localNote, decision } of pendingLocalNotes) {
+  // 2. Reconcile local-only or missing-on-disk notes (bounded concurrency for disk writes)
+  await runWithConcurrency(pendingLocalNotes, 5, async ({ localNote, decision }) => {
     if (handledLocalIds.has(localNote.id)) {
       processed++;
-      continue;
+      return;
     }
 
     try {
@@ -970,11 +1016,7 @@ export async function syncVaultDirectory({
 
     processed++;
     emitProgress(localNote.sourceFileName || localNote.name || localNote.title || '');
-    if (Date.now() - lastYield >= 24) {
-      await new Promise((r) => setTimeout(r, 0));
-      lastYield = Date.now();
-    }
-  }
+  });
 
   await flushDbBatch();
 
@@ -985,7 +1027,7 @@ export async function syncVaultDirectory({
     unchanged: counts.unchanged,
     unlinked: counts.unlinked,
     skippedInactive,
-    inactiveCache: activeOnly ? nextInactiveCache : undefined,
+    inactiveCache: activeOnly || inactiveCache || Object.keys(nextInactiveCache).length ? nextInactiveCache : undefined,
     conflictFiles,
     errors,
     totalDiskFiles: diskHandles.length,

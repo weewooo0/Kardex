@@ -130,6 +130,87 @@ function isNonLabVitalLine(trimmed) {
   return false;
 }
 
+const CHAT_PREFIX_QUICK_RE = /^\s*(?:\[|\d{1,4}[/-]|\d{1,2}:\d{2})/;
+const LAB_CONTEXT_RE = /\b(?:labs?|lab\s+update|chemistry|cbc|abg|na|k|bun|cr|creatinine|wbc|hb|hct|plt|ph|pco2|po2|hco3|troponin)\b/i;
+
+function scanLabPairsIntoMap(trimmed, targetMap) {
+  if (!trimmed || !/\d/.test(trimmed)) return 0;
+
+  // Strip parenthesized ref ranges like (ref 0.6-1.2) or Ref: 135-145 so bounds aren't parsed as previous values
+  let lineForScan = trimmed;
+  if (/\b(?:ref(?:erence)?|normal|range)\b/i.test(lineForScan)) {
+    lineForScan = lineForScan.replace(
+      /\b(?:ref(?:erence)?|normal|range)\s*[:=]?\s*-?\d+(?:\.\d+)?\s*[-–to]+\s*-?\d+(?:\.\d+)?/gi,
+      ''
+    );
+  }
+  if (lineForScan.includes('(')) {
+    lineForScan = lineForScan.replace(/\(\s*-?\d+(?:\.\d+)?\s*[-–]\s*-?\d+(?:\.\d+)?\s*\)/g, '');
+  }
+
+  let hasLabContext = null;
+  let matched = 0;
+
+  LAB_PAIR_RE.lastIndex = 0;
+  let m;
+  while ((m = LAB_PAIR_RE.exec(lineForScan)) !== null) {
+    const rawAlias = m[1];
+    const aliasLower = rawAlias.toLowerCase();
+    const spec = ALIAS_MAP.get(aliasLower);
+    if (!spec) continue;
+
+    const valueStr = m[2];
+    const num = parseFloat(valueStr);
+    if (Number.isNaN(num)) continue;
+
+    const explicitFlag = m[3] ? m[3].toUpperCase() : '';
+    const dictatedPrevious = m[4] || '';
+
+    const beforeText = lineForScan.slice(0, m.index);
+    const afterText = lineForScan.slice(m.index + m[0].length);
+
+    // Guard: avoid "Vit K 10mg" or "Vitamin K 10"
+    if (aliasLower === 'k' && /\bvit(?:amin)?\s+$/i.test(beforeText)) {
+      continue;
+    }
+
+    // Guard: English "be" vs ABG "BE"
+    if (aliasLower === 'be') {
+      if (hasLabContext === null) hasLabContext = LAB_CONTEXT_RE.test(lineForScan);
+      if (rawAlias !== 'BE' && !hasLabContext) {
+        continue;
+      }
+      if (!hasLabContext && !/^[:=\s+-]/.test(lineForScan.slice(m.index + rawAlias.length))) {
+        continue;
+      }
+    }
+
+    // Guard: "pt 58yo" (patient) vs "PT 12.5" (Protime)
+    if (aliasLower === 'pt') {
+      if (/^(?:yo|y\/o|yrs?|years?|room|bed)\b/i.test(afterText.trim())) continue;
+      if (rawAlias !== 'PT' && !/\b(?:inr|aptt|ptt|coag|protime)\b/i.test(lineForScan)) continue;
+    }
+
+    // Guard: uppercase "CR 78" (Cardiac Rate) vs "Cr 1.1" (Creatinine)
+    if (aliasLower === 'cr' && rawAlias === 'CR' && num >= 25 && !/\b(?:labs?|bun|na|k|egfr|creatinine|renal)\b/i.test(lineForScan)) {
+      continue;
+    }
+
+    // Latest mention wins (STE §6.9 self-correction rule)
+    targetMap.set(spec.key, {
+      key: spec.key,
+      panel: spec.panel,
+      value: valueStr,
+      num,
+      explicitFlag,
+      dictatedPrevious,
+    });
+    matched++;
+  }
+
+  return matched;
+}
+
 export function parseRawLabs(rawText) {
   const text = stripChatPrefixes(rawText);
   const foundMap = new Map();
@@ -138,68 +219,7 @@ export function parseRawLabs(rawText) {
     const trimmed = rawLine.trim();
     if (!trimmed) continue;
     if (isNonLabVitalLine(trimmed)) continue;
-
-    // Strip parenthesized ref ranges like (ref 0.6-1.2) or Ref: 135-145 so bounds aren't parsed as previous values
-    const lineForScan = trimmed
-      .replace(/\b(?:ref(?:erence)?|normal|range)\s*[:=]?\s*-?\d+(?:\.\d+)?\s*[-–to]+\s*-?\d+(?:\.\d+)?/gi, '')
-      .replace(/\(\s*-?\d+(?:\.\d+)?\s*[-–]\s*-?\d+(?:\.\d+)?\s*\)/g, '');
-
-    const hasLabContext = /\b(?:labs?|lab\s+update|chemistry|cbc|abg|na|k|bun|cr|creatinine|wbc|hb|hct|plt|ph|pco2|po2|hco3|troponin)\b/i.test(
-      lineForScan
-    );
-
-    LAB_PAIR_RE.lastIndex = 0;
-    let m;
-    while ((m = LAB_PAIR_RE.exec(lineForScan)) !== null) {
-      const rawAlias = m[1];
-      const aliasLower = rawAlias.toLowerCase();
-      const spec = ALIAS_MAP.get(aliasLower);
-      if (!spec) continue;
-
-      const valueStr = m[2];
-      const num = parseFloat(valueStr);
-      if (Number.isNaN(num)) continue;
-
-      const explicitFlag = m[3] ? m[3].toUpperCase() : '';
-      const dictatedPrevious = m[4] || '';
-
-      const beforeText = lineForScan.slice(0, m.index);
-      const afterText = lineForScan.slice(m.index + m[0].length);
-
-      // Guard: avoid "Vit K 10mg" or "Vitamin K 10"
-      if (aliasLower === 'k' && /\bvit(?:amin)?\s+$/i.test(beforeText)) {
-        continue;
-      }
-
-      // Guard: English "be" vs ABG "BE"
-      if (aliasLower === 'be' && rawAlias !== 'BE' && !hasLabContext) {
-        continue;
-      }
-      if (aliasLower === 'be' && !hasLabContext && !/^[:=\s+-]/.test(lineForScan.slice(m.index + rawAlias.length))) {
-        continue;
-      }
-
-      // Guard: "pt 58yo" (patient) vs "PT 12.5" (Protime)
-      if (aliasLower === 'pt') {
-        if (/^(?:yo|y\/o|yrs?|years?|room|bed)\b/i.test(afterText.trim())) continue;
-        if (rawAlias !== 'PT' && !/\b(?:inr|aptt|ptt|coag|protime)\b/i.test(lineForScan)) continue;
-      }
-
-      // Guard: uppercase "CR 78" (Cardiac Rate) vs "Cr 1.1" (Creatinine)
-      if (aliasLower === 'cr' && rawAlias === 'CR' && num >= 25 && !/\b(?:labs?|bun|na|k|egfr|creatinine|renal)\b/i.test(lineForScan)) {
-        continue;
-      }
-
-      // Latest mention wins (STE §6.9 self-correction rule)
-      foundMap.set(spec.key, {
-        key: spec.key,
-        panel: spec.panel,
-        value: valueStr,
-        num,
-        explicitFlag,
-        dictatedPrevious,
-      });
-    }
+    scanLabPairsIntoMap(trimmed, foundMap);
   }
 
   return [...foundMap.values()].sort(
@@ -215,16 +235,23 @@ export function extractPriorLabs(chartContent, maxLines = 250) {
   const lines = withoutFm.split('\n');
   const tailLines = lines.slice(-maxLines);
   const priorMap = new Map();
+  const lineMap = new Map();
 
   for (const line of tailLines) {
-    const trimmed = line.trim();
+    let trimmed = line.trim();
     if (!trimmed || /^#{2,3}\s+/.test(trimmed)) continue;
+    if (!/\d/.test(trimmed)) continue;
+    if (CHAT_PREFIX_QUICK_RE.test(trimmed)) {
+      trimmed = stripChatPrefixes(trimmed).trim();
+      if (!trimmed) continue;
+    }
     if (isNonLabVitalLine(trimmed)) continue;
 
-    // parseRawLabs returns only the current/latest value from any `value (previous)` pair (STE §7.4)
-    const entries = parseRawLabs(trimmed);
-    for (const e of entries) {
-      priorMap.set(e.key, { value: e.value, num: e.num });
+    lineMap.clear();
+    if (scanLabPairsIntoMap(trimmed, lineMap) > 0) {
+      for (const [key, e] of lineMap) {
+        priorMap.set(key, { value: e.value, num: e.num });
+      }
     }
   }
 
@@ -671,6 +698,7 @@ function parseShiftLabEntries(labLines) {
       ? [String(labLines)]
       : [];
   const numericByKey = new Map();
+  const partMap = new Map();
   const diagnostics = [];
   let lastDiag = null;
 
@@ -700,14 +728,22 @@ function parseShiftLabEntries(labLines) {
         const diagAfterPanel = hasPanelPrefix && DIAGNOSTIC_PREFIX_RE.test(cleanedForLabs);
         const isDiagPrefix = DIAGNOSTIC_PREFIX_RE.test(part) || diagAfterPanel;
         const sourceForDiag = diagAfterPanel ? cleanedForLabs : part;
-        const parsedLabs = !isDiagPrefix ? parseRawLabs(cleanedForLabs) : [];
 
-        if (parsedLabs.length > 0) {
-          lastDiag = null;
-          for (const item of parsedLabs) {
-            numericByKey.set(item.key, item);
+        if (!isDiagPrefix && /\d/.test(cleanedForLabs)) {
+          let scanText = cleanedForLabs;
+          if (CHAT_PREFIX_QUICK_RE.test(scanText)) {
+            scanText = stripChatPrefixes(scanText).trim();
           }
-          continue;
+          if (scanText && !isNonLabVitalLine(scanText)) {
+            partMap.clear();
+            if (scanLabPairsIntoMap(scanText, partMap) > 0) {
+              lastDiag = null;
+              for (const [k, item] of partMap) {
+                numericByKey.set(k, item);
+              }
+              continue;
+            }
+          }
         }
 
         if (isDiagPrefix) {
@@ -769,7 +805,7 @@ function csvCell(val) {
  */
 export function extractChartLabSummary(content, note = {}, options = {}) {
   const unitSystem = options?.unitSystem === 'si' ? 'si' : 'conventional';
-  const parsed = parseChart(content || '', note || {});
+  const parsed = parseChartHeader(content || '', note || {});
   const timeline = parseChartTimeline(content || '');
 
   const rawEntries = [];

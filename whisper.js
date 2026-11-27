@@ -323,6 +323,7 @@ export function createWhisperController({ onStatus, onProgress } = {}) {
   let status = 'idle'; // 'idle' | 'loading' | 'ready' | 'transcribing' | 'error'
   let activeModelId = null;
   const loadedModels = new Set();
+  let unloadingPromise = null;
 
   function setStatus(nextStatus, detail = '') {
     status = nextStatus;
@@ -331,17 +332,33 @@ export function createWhisperController({ onStatus, onProgress } = {}) {
 
   function ensureWorker() {
     if (worker) return worker;
-    worker = new Worker('./whisper.worker.js', { type: 'module' });
-    worker.onmessage = (event) => {
+    const w = new Worker('./whisper.worker.js', { type: 'module' });
+    worker = w;
+    w.onmessage = (event) => {
       const msg = event.data || {};
       if (msg.type === 'progress') {
-        onProgress?.(formatWhisperProgress(msg), msg);
+        if (w === worker) onProgress?.(formatWhisperProgress(msg), msg);
         return;
       }
 
       const entry = pending.get(msg.id);
       if (!entry) return;
       pending.delete(msg.id);
+
+      if (msg.type === 'unloaded') {
+        if (w === worker) {
+          loadedModels.clear();
+          activeModelId = null;
+          setStatus('idle', 'Unloaded');
+        }
+        entry.resolve(true);
+        return;
+      }
+
+      if (w !== worker) {
+        entry.reject(new Error('Cancelled'));
+        return;
+      }
 
       if (msg.type === 'error') {
         setStatus('error', msg.message || 'Offline Whisper error');
@@ -369,27 +386,20 @@ export function createWhisperController({ onStatus, onProgress } = {}) {
           elapsedMs: msg.elapsedMs || 0,
           modelId: msg.modelId,
         });
-        return;
-      }
-
-      if (msg.type === 'unloaded') {
-        loadedModels.clear();
-        activeModelId = null;
-        setStatus('idle', 'Unloaded');
-        entry.resolve(true);
       }
     };
 
-    worker.onerror = (err) => {
+    w.onerror = (err) => {
+      if (w !== worker) return;
       const msg = err?.message || 'Whisper worker failed to initialize';
       setStatus('error', msg);
-      for (const entry of pending.values()) {
+      for (const [id, entry] of pending.entries()) {
         entry.reject(new Error(msg));
+        pending.delete(id);
       }
-      pending.clear();
     };
 
-    return worker;
+    return w;
   }
 
   function callWorker(payload, transferables = []) {
@@ -433,23 +443,68 @@ export function createWhisperController({ onStatus, onProgress } = {}) {
   }
 
   async function unload() {
-    const busy = status === 'loading' || status === 'transcribing';
-    if (worker) {
-      if (!busy) {
-        try {
-          await callWorker({ type: 'unload' });
-        } catch {}
-      }
-      for (const entry of pending.values()) {
-        entry.reject(new Error('Cancelled'));
-      }
-      pending.clear();
-      worker.terminate();
-      worker = null;
+    while (unloadingPromise) {
+      await unloadingPromise;
     }
+    if (!worker && status === 'idle' && loadedModels.size === 0 && activeModelId === null && pending.size === 0) {
+      return;
+    }
+
+    const busy = status === 'loading' || status === 'transcribing';
+    const targetWorker = worker;
+    worker = null;
+
+    const cancelledEntries = Array.from(pending.entries());
+    pending.clear();
+    for (const [, entry] of cancelledEntries) {
+      entry.reject(new Error('Cancelled'));
+    }
+
     loadedModels.clear();
     activeModelId = null;
     setStatus('idle', '');
+
+    if (!targetWorker) return;
+
+    const runUnload = (async () => {
+      if (!busy) {
+        const id = nextId++;
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            resolve();
+          }, 1000);
+          pending.set(id, {
+            resolve: () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            reject: () => {
+              clearTimeout(timer);
+              resolve();
+            },
+          });
+          try {
+            targetWorker.postMessage({ type: 'unload', id });
+          } catch {
+            clearTimeout(timer);
+            pending.delete(id);
+            resolve();
+          }
+        });
+      }
+      try {
+        targetWorker.terminate();
+      } catch {}
+    })();
+
+    const tracked = runUnload.finally(() => {
+      if (unloadingPromise === tracked) {
+        unloadingPromise = null;
+      }
+    });
+    unloadingPromise = tracked;
+    return tracked;
   }
 
   function getState() {

@@ -212,16 +212,43 @@ export function compileTemplateConfig(config = DEFAULT_TEMPLATE_CONFIG) {
 }
 
 export function metaOf(text) {
-  const clean = String(text || '').replace(/^\uFEFF/, '');
+  const str = String(text || '');
+  const clean = str.charCodeAt(0) === 0xFEFF ? str.slice(1) : str;
   const out = {};
   if (!clean.startsWith('---')) return out;
   const firstNl = clean.indexOf('\n');
   if (firstNl === -1) return out;
   if (!/^---[ \t]*\r?$/.test(clean.slice(0, firstNl))) return out;
-  const rest = clean.slice(firstNl + 1);
-  const closeMatch = rest.match(/^([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
-  const frontBlock = closeMatch ? closeMatch[1] : (/^---[ \t]*(?:\r?\n|$)/.test(rest) ? '' : null);
-  if (frontBlock !== null) {
+
+  const fmStart = firstNl + 1;
+  let frontBlock = null;
+  if (clean.startsWith('---', fmStart)) {
+    const lineEnd = clean.indexOf('\n', fmStart);
+    const firstFmLine = clean.slice(fmStart, lineEnd === -1 ? clean.length : lineEnd);
+    if (/^---[ \t]*\r?$/.test(firstFmLine)) {
+      frontBlock = '';
+    }
+  }
+
+  if (frontBlock === null) {
+    let searchFrom = firstNl;
+    while (true) {
+      const idx = clean.indexOf('\n---', searchFrom);
+      if (idx === -1) break;
+      const lineStart = idx + 1;
+      const lineEnd = clean.indexOf('\n', lineStart);
+      const closeLine = clean.slice(lineStart, lineEnd === -1 ? clean.length : lineEnd);
+      if (/^---[ \t]*\r?$/.test(closeLine)) {
+        let blockEnd = idx;
+        if (blockEnd > fmStart && clean.charCodeAt(blockEnd - 1) === 13) blockEnd--;
+        frontBlock = clean.slice(fmStart, blockEnd);
+        break;
+      }
+      searchFrom = idx + 4;
+    }
+  }
+
+  if (frontBlock !== null && frontBlock.length > 0) {
     for (const line of frontBlock.split(/\r?\n/)) {
       const p = line.match(/^([^:]+):\s*(.*)$/);
       if (p) {
@@ -914,7 +941,7 @@ export function getLatestShiftSegment(content) {
     latestShiftBlock = latestDateBlock.slice(lastShift.index);
   }
 
-  const allShiftMatches = [...text.matchAll(shiftHeadingRe)];
+  const hasShiftHeading = shiftMatches.length > 0 || (shiftHeadingRe.lastIndex = 0, shiftHeadingRe.test(text));
 
   return {
     latestDate,
@@ -922,7 +949,7 @@ export function getLatestShiftSegment(content) {
     latestDateBlock,
     latestShiftBlock,
     hasDateHeading: dateMatches.length > 0,
-    hasShiftHeading: allShiftMatches.length > 0,
+    hasShiftHeading,
   };
 }
 
@@ -1125,24 +1152,45 @@ function extractBalanceAmountFromIoText(ioText) {
   return parseFluidAmount(m[1].replace(/\s+/g, ''));
 }
 
+const INLINE_24H_FB_RE = /\(\s*24\s*h(?:rs?|ours?)?\s*(?:Net|FB|Fluid\s+bal(?:ance)?|Balance)\s*[:=-]\s*([^)]+)\)/gi;
+
 export function computeCumulativeFluidBalance(content, maxDays = 3) {
   const windowDays = Math.max(2, Number(maxDays) || 3);
-  const timeline = parseChartTimeline(content);
-  if (!timeline.length) return null;
+  const body = String(content || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^---\s*\n[\s\S]*?\n---\s*/, '')
+    .trim();
+  if (!body) return null;
 
+  const dateHeadingRe = /^##\s+([^\n]+)$/gm;
+  const dateMatches = [...body.matchAll(dateHeadingRe)];
+  if (!dateMatches.length) return null;
+
+  const pad = (n) => String(n).padStart(2, '0');
   const daysMap = new Map();
-  for (const group of timeline) {
-    if (!group || group.date === 'Undated') continue;
-    const parts = parseDateParts(group.date);
+
+  for (let i = 0; i < dateMatches.length; i++) {
+    const rawDate = dateMatches[i][1].trim();
+    if (/^admitting\s+history$/i.test(rawDate)) continue;
+    const start = dateMatches[i].index + dateMatches[i][0].length;
+    const end = i + 1 < dateMatches.length ? dateMatches[i + 1].index : body.length;
+    const chunk = body.slice(start, end).trim();
+    if (!chunk) continue;
+
+    const parts = parseDateParts(rawDate);
     if (!parts) continue;
     const dayMs = Date.UTC(parts.year, parts.month - 1, parts.day);
-    const pad = (n) => String(n).padStart(2, '0');
-    const canonicalDate = `${pad(parts.month)}-${pad(parts.day)}-${parts.year}`;
-    const shortDate = `${pad(parts.month)}-${pad(parts.day)}`;
-    if (!daysMap.has(dayMs)) {
-      daysMap.set(dayMs, { dayMs, canonicalDate, shortDate, shifts: [] });
+    let dayEntry = daysMap.get(dayMs);
+    if (!dayEntry) {
+      dayEntry = {
+        dayMs,
+        canonicalDate: `${pad(parts.month)}-${pad(parts.day)}-${parts.year}`,
+        shortDate: `${pad(parts.month)}-${pad(parts.day)}`,
+        chunks: [],
+      };
+      daysMap.set(dayMs, dayEntry);
     }
-    daysMap.get(dayMs).shifts.push(...group.shifts);
+    dayEntry.chunks.push(chunk);
   }
 
   if (daysMap.size < 2) return null;
@@ -1157,34 +1205,49 @@ export function computeCumulativeFluidBalance(content, maxDays = 3) {
 
   if (recentDays.length < 2) return null;
 
+  const shiftHeadingRe = /^###\s*([^\n]+)$/gm;
   const dailyEntries = [];
   for (const day of recentDays) {
     let explicit24hAmt = null;
     const shiftAmounts = [];
 
-    for (const shift of day.shifts) {
-      const body = String(shift.body || '');
-      const metrics = extractClinicalMetricsFromBlock(body);
-
-      if (metrics.io24h) {
-        const amt24 = extractBalanceAmountFromIoText(metrics.io24h);
-        if (amt24) explicit24hAmt = amt24;
+    for (const chunk of day.chunks) {
+      const shiftMatches = [...chunk.matchAll(shiftHeadingRe)];
+      const shiftBodies = [];
+      if (!shiftMatches.length) {
+        shiftBodies.push(chunk);
+      } else {
+        const preShift = chunk.slice(0, shiftMatches[0].index).trim();
+        if (preShift) shiftBodies.push(preShift);
+        for (let i = 0; i < shiftMatches.length; i++) {
+          const sStart = shiftMatches[i].index + shiftMatches[i][0].length;
+          const sEnd = i + 1 < shiftMatches.length ? shiftMatches[i + 1].index : chunk.length;
+          shiftBodies.push(chunk.slice(sStart, sEnd).trim());
+        }
       }
 
-      const inline24Matches = [
-        ...body.matchAll(/\(\s*24\s*h(?:rs?|ours?)?\s*(?:Net|FB|Fluid\s+bal(?:ance)?|Balance)\s*[:=-]\s*([^)]+)\)/gi),
-      ];
-      for (const m24 of inline24Matches) {
-        const amt24 = parseFluidAmount(m24[1]);
-        if (amt24) explicit24hAmt = amt24;
-      }
+      for (const shiftBody of shiftBodies) {
+        const metrics = extractClinicalMetricsFromBlock(shiftBody);
 
-      const shiftIoText =
-        metrics.shiftIo || String(metrics.io || '').replace(/\s*·?\s*24\s*h:.*$/i, '').trim();
-      if (shiftIoText) {
-        const cleanedShiftIo = shiftIoText.replace(/\([^)]*\)/g, '').trim();
-        const shiftBal = extractBalanceAmountFromIoText(cleanedShiftIo);
-        if (shiftBal) shiftAmounts.push(shiftBal);
+        if (metrics.io24h) {
+          const amt24 = extractBalanceAmountFromIoText(metrics.io24h);
+          if (amt24) explicit24hAmt = amt24;
+        }
+
+        INLINE_24H_FB_RE.lastIndex = 0;
+        let m24;
+        while ((m24 = INLINE_24H_FB_RE.exec(shiftBody)) !== null) {
+          const amt24 = parseFluidAmount(m24[1]);
+          if (amt24) explicit24hAmt = amt24;
+        }
+
+        const shiftIoText =
+          metrics.shiftIo || String(metrics.io || '').replace(/\s*·?\s*24\s*h:.*$/i, '').trim();
+        if (shiftIoText) {
+          const cleanedShiftIo = shiftIoText.replace(/\([^)]*\)/g, '').trim();
+          const shiftBal = extractBalanceAmountFromIoText(cleanedShiftIo);
+          if (shiftBal) shiftAmounts.push(shiftBal);
+        }
       }
     }
 
@@ -1279,6 +1342,31 @@ function finalizeStackedIO(acc) {
   return parts.join(' | ');
 }
 
+const isSectionBoundary = (trimmed, { inLabs = false } = {}) =>
+  /^#{2,3}\s+/.test(trimmed) ||
+  /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
+    trimmed
+  ) ||
+  /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|HGTs?|CBGs?|Contingenc(?:y|ies)|If\s*\/\s*Then|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
+    trimmed
+  ) ||
+  /^(?:BP|HR|PR|RR|Tmax|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
+    trimmed
+  ) ||
+  /^(?:I|O|In|Out|Input|Output|Intake)(?:\s*(?:[:=]|-(?=\s|$|\d))|\s+(?:~|approx\.?\s*)?\d)/i.test(trimmed) ||
+  /^(?:Fluid\s+bal(?:ance)?|Net|Balance)\s*(?:[:=]|-(?=\s|$|\d))/i.test(trimmed) ||
+  /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
+    trimmed
+  ) ||
+  /^(?:Ppeak|Pplat|VTE|VT|TV|MV|EMV|PEEP|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(trimmed) ||
+  (!inLabs && /^FiO2\s*(?:[:=]\s*|\s+)\d/i.test(trimmed)) ||
+  /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\s*:?$/i.test(
+    trimmed
+  );
+
+const STANDALONE_LAB_LINE_RE =
+  /^(?:[-*]\s*)?(?:Serum\s+)?(?:Na\+?|Sodium|K\+?|Potassium|Cl-?|Chloride|CO2|HCO3-?|Bicarb(?:onate)?|iCa|Ionized\s+Ca(?:lcium)?|Ca2?\+?|Calcium|Mg2?\+?|Magnesium|Phos(?:phorus|phate)?|PO4|BUN|Urea|Cr|Crea(?:tinine)?|SCr|eGFR|GFR|Alb(?:umin)?|AST|SGOT|ALT|SGPT|ALP|Alk\.?\s*Phos|TBili|TBil|TBDBIB|DBili|IBili|Bilirubin|LDH|Amylase|Lipase|WBC|Hgb|Hb|Hct|Plt|Platelets?|Neu(?:t(?:rophils?)?)?|Lym(?:ph(?:ocytes?)?)?|Mono?s?|Eo(?:s(?:inophils?)?)?|pH|PaCO2|pCO2|PaO2|pO2|SaO2|sO2|BE|Base\s+Excess|Lactate|Lac|Trop(?:onin)?(?:\s*-?\s*[IT])?|BNP|NT-?proBNP|CK-?MB|CPK|Procal(?:citonin)?|PCT|CRP|ESR|Ferritin|D-?dimer|INR|PT|Protime|aPTT|PTT|TSH|FT3|FT4|HbA1c|Chole(?:sterol)?|Trigly(?:cerides?)?|HDL|LDL|VLDL|Uric\s+Acid|BUA|Ammonia|NH3)(?![\p{L}\p{N}])(?:\s*[:=]\s*|\s+)-?\d/iu;
+
 export function extractClinicalMetricsFromBlock(blockText) {
   const lines = String(blockText || '').split('\n');
   const consumedLineIndices = new Set();
@@ -1318,31 +1406,6 @@ export function extractClinicalMetricsFromBlock(blockText) {
   let inServicePlans = false;
   let inMedsSection = false;
   let inDripsSection = false;
-
-  const isSectionBoundary = (trimmed, { inLabs = false } = {}) =>
-    /^#{2,3}\s+/.test(trimmed) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?|If\s+ok|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|Feeding|Diet|Nutrition|Thank\s+you)(?:\*{0,2})\s*:?\s*$/i.test(
-      trimmed
-    ) ||
-    /^\*{0,2}(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending(?:\s+(?:labs?|items|list))?|Service\s+Plans?|Generic\s+Plans?|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Meds?|Therapeutics|Labs?|Laboratory(?:\s+updates?)?|HGTs?|CBGs?|Contingenc(?:y|ies)|If\s*\/\s*Then|Feeding|Diet|Nutrition|PE|Drains?|Greeting|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?)\b(?:\s*:|\*{0,2}:)/i.test(
-      trimmed
-    ) ||
-    /^(?:BP|HR|PR|RR|Tmax|Temp|O2|O2sat|SpO2|Fb|HGTs?|CBGs?|Awake,|HEENT:|C\/L:|CVS:|ABD:|EXT:)\b/i.test(
-      trimmed
-    ) ||
-    /^(?:I|O|In|Out|Input|Output|Intake)(?:\s*(?:[:=]|-(?=\s|$|\d))|\s+(?:~|approx\.?\s*)?\d)/i.test(trimmed) ||
-    /^(?:Fluid\s+bal(?:ance)?|Net|Balance)\s*(?:[:=]|-(?=\s|$|\d))/i.test(trimmed) ||
-    /^(?:On\s+)?(?:APVCMV|PCMV|AC\/?VC|AC\/?PC|VC-?CMV|PC-?CMV|PRVC|SIMV|SPONT|ASV|PSV|CPAP|BiPAP|NIV|HFNC)\b/i.test(
-      trimmed
-    ) ||
-    /^(?:Ppeak|Pplat|VTE|VT|TV|MV|EMV|PEEP|FT|fTotal|I:E|PIP)\s*(?:[:=]\s*|\s+)\d/i.test(trimmed) ||
-    (!inLabs && /^FiO2\s*(?:[:=]\s*|\s+)\d/i.test(trimmed)) ||
-    /^(?:24\s*-?\s*h(?:r|rs|our|ours)?(?:\s+I&O)?|\d{1,2}\s*-\s*\d{1,2}\s*(?:am|pm|a|p)|\d{1,2}(?:am|pm|a|p)\s*-\s*\d{1,2}(?:am|pm|a|p)|8\s*hrs?)\s*:?$/i.test(
-      trimmed
-    );
-
-  const STANDALONE_LAB_LINE_RE =
-    /^(?:[-*]\s*)?(?:Serum\s+)?(?:Na\+?|Sodium|K\+?|Potassium|Cl-?|Chloride|CO2|HCO3-?|Bicarb(?:onate)?|iCa|Ionized\s+Ca(?:lcium)?|Ca2?\+?|Calcium|Mg2?\+?|Magnesium|Phos(?:phorus|phate)?|PO4|BUN|Urea|Cr|Crea(?:tinine)?|SCr|eGFR|GFR|Alb(?:umin)?|AST|SGOT|ALT|SGPT|ALP|Alk\.?\s*Phos|TBili|TBil|TBDBIB|DBili|IBili|Bilirubin|LDH|Amylase|Lipase|WBC|Hgb|Hb|Hct|Plt|Platelets?|Neu(?:t(?:rophils?)?)?|Lym(?:ph(?:ocytes?)?)?|Mono?s?|Eo(?:s(?:inophils?)?)?|pH|PaCO2|pCO2|PaO2|pO2|SaO2|sO2|BE|Base\s+Excess|Lactate|Lac|Trop(?:onin)?(?:\s*-?\s*[IT])?|BNP|NT-?proBNP|CK-?MB|CPK|Procal(?:citonin)?|PCT|CRP|ESR|Ferritin|D-?dimer|INR|PT|Protime|aPTT|PTT|TSH|FT3|FT4|HbA1c|Chole(?:sterol)?|Trigly(?:cerides?)?|HDL|LDL|VLDL|Uric\s+Acid|BUA|Ammonia|NH3)(?![\p{L}\p{N}])(?:\s*[:=]\s*|\s+)-?\d/iu;
 
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
@@ -1522,6 +1585,7 @@ export function extractClinicalMetricsFromBlock(blockText) {
 
     // Standalone lab analyte lines outside explicit Labs: blocks (e.g. "K: 3.6 (3.2)", "Serum K: 3.4", "Na 140")
     if (
+      /\d/.test(trimmed) &&
       STANDALONE_LAB_LINE_RE.test(trimmed) &&
       !/^[-*\s]*pt\s+\d+\s*(?:yo|y\/o|yrs?|years?|room|bed|\/[mf]\b)/i.test(trimmed) &&
       !/^[-*\s]*pt\s+\d+\s*$/i.test(trimmed) &&
@@ -1784,10 +1848,36 @@ export function extractClinicalMetricsFromBlock(blockText) {
   };
 }
 
+const CHART_HEADER_CACHE_MAX = 128;
+const chartHeaderCache = new Map();
+
+function cloneChartHeader(hdr) {
+  return {
+    ...hdr,
+    meta: { ...hdr.meta },
+    aliases: [...hdr.aliases],
+    categories: [...hdr.categories],
+  };
+}
+
 export function parseChartHeader(content, note = {}) {
   const text = String(content || '');
+  const noteName = note?.name ? String(note.name) : '';
+  const noteRoom = note?.room ? String(note.room) : '';
+  const noteTitle = note?.sourceFileName || note?.title ? String(note.sourceFileName || note.title) : '';
+  const noteAliases = Array.isArray(note?.aliases)
+    ? note.aliases.map((s) => String(s || '').trim()).filter(Boolean)
+    : [];
+  const cacheKey =
+    noteName || noteRoom || noteTitle || noteAliases.length
+      ? `${noteName}\u0001${noteRoom}\u0001${noteTitle}\u0001${noteAliases.join('\u0002')}\u0000${text}`
+      : text;
+
+  const cached = chartHeaderCache.get(cacheKey);
+  if (cached) return cloneChartHeader(cached);
+
   const meta = metaOf(text);
-  const fileDerived = parseRoomAndNameFromTitle(note?.sourceFileName || note?.title || '');
+  const fileDerived = parseRoomAndNameFromTitle(noteTitle);
 
   const name =
     String(note?.name || meta.name || meta.patient || fileDerived.name || '').trim() ||
@@ -1806,9 +1896,6 @@ export function parseChartHeader(content, note = {}) {
     .split(/[;,]/)
     .map((s) => s.trim())
     .filter(Boolean);
-  const noteAliases = Array.isArray(note?.aliases)
-    ? note.aliases.map((s) => String(s || '').trim()).filter(Boolean)
-    : [];
   const aliases = [...new Set([...noteAliases, ...rawMetaAliases])];
 
   const rawCats = String(meta.categories || meta.tags || '')
@@ -1832,7 +1919,7 @@ export function parseChartHeader(content, note = {}) {
   }
   const isCensus = /^true(?:\s+#.*)?$/i.test(String(meta.census || '').trim());
 
-  return {
+  const result = {
     meta,
     name,
     room,
@@ -1847,6 +1934,11 @@ export function parseChartHeader(content, note = {}) {
     isCharity,
     isCensus,
   };
+  if (chartHeaderCache.size >= CHART_HEADER_CACHE_MAX) {
+    chartHeaderCache.delete(chartHeaderCache.keys().next().value);
+  }
+  chartHeaderCache.set(cacheKey, result);
+  return cloneChartHeader(result);
 }
 
 export function parseChart(content, note = {}) {
@@ -1966,7 +2058,8 @@ export function parseChart(content, note = {}) {
     text,
     latestDateBlock,
     latestShiftBlock,
-    latestDate
+    latestDate,
+    shiftBlocksDesc
   );
 
   let contingencies = rawContingencies;
@@ -2355,6 +2448,17 @@ function isMedPlaceholder(text) {
   return !clean || /^(?:none|n\/a|na|nil|-+|\{\{(?:drips|meds)\}\})$/i.test(clean);
 }
 
+const isMedStopBoundary = (trimmed) =>
+  /^#{2,3}\s+/.test(trimmed) ||
+  /^---+$/.test(trimmed) ||
+  /^(?:\*{0,2})(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?(?:\*{0,2})\s*:/i.test(
+    trimmed
+  ) ||
+  /^(?:\*{0,2})(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Feeding|Diet|Nutrition|Greeting|Footer)\b(?:\*{0,2})(?:\s*:|$)/i.test(
+    trimmed
+  ) ||
+  /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed);
+
 export function extractMedicationsFromBlock(blockText) {
   const lines = String(blockText || '').split('\n');
   const meds = [];
@@ -2374,17 +2478,6 @@ export function extractMedicationsFromBlock(blockText) {
       meds.push(clean);
     }
   };
-
-  const isMedStopBoundary = (trimmed) =>
-    /^#{2,3}\s+/.test(trimmed) ||
-    /^---+$/.test(trimmed) ||
-    /^(?:\*{0,2})(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?(?:\*{0,2})\s*:/i.test(
-      trimmed
-    ) ||
-    /^(?:\*{0,2})(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Feeding|Diet|Nutrition|Greeting|Footer)\b(?:\*{0,2})(?:\s*:|$)/i.test(
-      trimmed
-    ) ||
-    /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed);
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -2469,40 +2562,88 @@ function splitDateBlocks(content) {
   return out;
 }
 
-function extractLatestMedicationsFromChart(content, latestDateBlock, latestShiftBlock, latestDate) {
+function extractLatestMedicationsFromChart(
+  content,
+  latestDateBlock,
+  latestShiftBlock,
+  latestDate,
+  preSplitLatestShiftsDesc = null
+) {
+  const text = String(content || '');
+  if (!/(?:meds?|medications?|therapeutics)/i.test(text)) {
+    return { medications: [], medicationsDate: '' };
+  }
+
   const fromLatestShift = extractMedicationsFromBlock(latestShiftBlock);
   if (fromLatestShift.length > 0) {
     return { medications: fromLatestShift, medicationsDate: latestDate || '' };
   }
 
-  const latestShiftsDesc = splitAnyShiftBlocks(latestDateBlock).reverse();
+  const latestShiftsDesc = Array.isArray(preSplitLatestShiftsDesc)
+    ? preSplitLatestShiftsDesc
+    : splitAnyShiftBlocks(latestDateBlock).reverse();
   for (const s of latestShiftsDesc) {
+    if (s.block === latestShiftBlock) continue;
     const meds = extractMedicationsFromBlock(s.block);
     if (meds.length > 0) {
       return { medications: meds, medicationsDate: latestDate || '' };
     }
   }
 
-  const dateBlocksDesc = splitDateBlocks(content).reverse();
-  if (dateBlocksDesc.length > 0) {
-    for (let i = 1; i < dateBlocksDesc.length; i++) {
-      const d = dateBlocksDesc[i];
-      const shiftsDesc = splitAnyShiftBlocks(d.block).reverse();
-      for (const s of shiftsDesc) {
-        const meds = extractMedicationsFromBlock(s.block);
-        if (meds.length > 0) {
-          return { medications: meds, medicationsDate: d.date || '' };
-        }
-      }
-      const meds = extractMedicationsFromBlock(d.block);
-      if (meds.length > 0) {
-        return { medications: meds, medicationsDate: d.date || '' };
+  if (latestShiftsDesc.length > 0) {
+    const firstShiftPos = String(latestDateBlock || '').indexOf(latestShiftsDesc[latestShiftsDesc.length - 1].block);
+    if (firstShiftPos > 0) {
+      const preShiftMeds = extractMedicationsFromBlock(String(latestDateBlock || '').slice(0, firstShiftPos));
+      if (preShiftMeds.length > 0) {
+        return { medications: preShiftMeds, medicationsDate: latestDate || '' };
       }
     }
   }
 
-  const fallbackMeds = extractMedicationsFromBlock(content);
-  return { medications: fallbackMeds, medicationsDate: fallbackMeds.length ? latestDate || '' : '' };
+  const dateBlocksDesc = splitDateBlocks(text).reverse();
+  if (dateBlocksDesc.length > 0) {
+    for (let i = 1; i < dateBlocksDesc.length; i++) {
+      const d = dateBlocksDesc[i];
+      const shiftsDesc = splitAnyShiftBlocks(d.block).reverse();
+      if (shiftsDesc.length > 0) {
+        for (const s of shiftsDesc) {
+          const meds = extractMedicationsFromBlock(s.block);
+          if (meds.length > 0) {
+            return { medications: meds, medicationsDate: d.date || '' };
+          }
+        }
+        const firstShiftPos = d.block.indexOf(shiftsDesc[shiftsDesc.length - 1].block);
+        if (firstShiftPos > 0) {
+          const preMeds = extractMedicationsFromBlock(d.block.slice(0, firstShiftPos));
+          if (preMeds.length > 0) {
+            return { medications: preMeds, medicationsDate: d.date || '' };
+          }
+        }
+      } else {
+        const meds = extractMedicationsFromBlock(d.block);
+        if (meds.length > 0) {
+          return { medications: meds, medicationsDate: d.date || '' };
+        }
+      }
+    }
+
+    const firstDateBlock = dateBlocksDesc[dateBlocksDesc.length - 1].block;
+    const firstDatePos = text.indexOf(firstDateBlock);
+    if (firstDatePos > 0) {
+      const preDateMeds = extractMedicationsFromBlock(text.slice(0, firstDatePos));
+      return { medications: preDateMeds, medicationsDate: preDateMeds.length ? latestDate || '' : '' };
+    }
+    return { medications: [], medicationsDate: '' };
+  }
+
+  if (latestShiftsDesc.length > 0) {
+    const firstShiftPos = text.indexOf(latestShiftsDesc[latestShiftsDesc.length - 1].block);
+    if (firstShiftPos > 0) {
+      const fallbackMeds = extractMedicationsFromBlock(text.slice(0, firstShiftPos));
+      return { medications: fallbackMeds, medicationsDate: fallbackMeds.length ? latestDate || '' : '' };
+    }
+  }
+  return { medications: [], medicationsDate: '' };
 }
 
 function extractLabeledListFromBlock(blockText, headerRegex) {
@@ -5635,13 +5776,38 @@ function extractShiftDetails(shift, rawShiftBody, shiftIndex) {
   };
 }
 
+const TIMELINE_CACHE_MAX = 64;
+const chartTimelineCache = new Map();
+
+function cloneTimeline(timeline) {
+  return timeline.map((day) => ({
+    ...day,
+    shifts: day.shifts.map((s) => ({
+      ...s,
+      events: [...s.events],
+      pending: [...s.pending],
+      servicePlans: [...s.servicePlans],
+    })),
+  }));
+}
+
 export function parseChartTimeline(content) {
-  const body = String(content || '')
+  const raw = String(content || '');
+  const cached = chartTimelineCache.get(raw);
+  if (cached) return cloneTimeline(cached);
+
+  const body = raw
     .replace(/\r\n/g, '\n')
     .replace(/^---\s*\n[\s\S]*?\n---\s*/, '')
     .trim();
 
-  if (!body) return [];
+  if (!body) {
+    if (chartTimelineCache.size >= TIMELINE_CACHE_MAX) {
+      chartTimelineCache.delete(chartTimelineCache.keys().next().value);
+    }
+    chartTimelineCache.set(raw, []);
+    return [];
+  }
 
   const dateHeadingRe = /^##\s+([^\n]+)$/gm;
   const dateMatches = [...body.matchAll(dateHeadingRe)];
@@ -5692,7 +5858,11 @@ export function parseChartTimeline(content) {
     }
   }
 
-  return timeline;
+  if (chartTimelineCache.size >= TIMELINE_CACHE_MAX) {
+    chartTimelineCache.delete(chartTimelineCache.keys().next().value);
+  }
+  chartTimelineCache.set(raw, timeline);
+  return cloneTimeline(timeline);
 }
 
 export function updateShiftBlockBody(content, targetDate, shiftOccurrenceIndex, newBody, dateOccurrenceIndex = 0) {

@@ -193,6 +193,8 @@ export function extractAiChatText(provider, data) {
   throw new Error('No response from model');
 }
 
+const DEFAULT_AI_TIMEOUT_MS = 45000;
+
 async function parseJsonSafe(res) {
   try {
     return await res.json();
@@ -201,11 +203,61 @@ async function parseJsonSafe(res) {
   }
 }
 
-export async function callAiChat({ endpoint, model, apiKey, prompt, temperature, fetchImpl = fetch }) {
+async function fetchJsonWithTimeout(fetchImpl, url, options, timeoutMs = DEFAULT_AI_TIMEOUT_MS) {
+  const hasAbort = typeof AbortController !== 'undefined';
+  const useTimeout = hasAbort && Number.isFinite(timeoutMs) && timeoutMs > 0;
+  const externalSignal = options?.signal || null;
+  const controller = useTimeout || (hasAbort && externalSignal) ? new AbortController() : null;
+  let timedOut = false;
+  let timer = null;
+  let onExternalAbort = null;
+
+  if (controller && externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else if (typeof externalSignal.addEventListener === 'function') {
+      onExternalAbort = () => controller.abort(externalSignal.reason);
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+  if (controller && useTimeout) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+
+  const reqOptions = controller ? { ...options, signal: controller.signal } : options;
+  try {
+    const res = await fetchImpl(url, reqOptions);
+    const data = await parseJsonSafe(res);
+    return { res, data };
+  } catch (err) {
+    if (timedOut) {
+      const sec = Math.max(1, Math.round(timeoutMs / 1000));
+      throw new Error(`AI request timed out after ${sec}s`);
+    }
+    throw err;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    if (externalSignal && onExternalAbort && typeof externalSignal.removeEventListener === 'function') {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
+export async function callAiChat({
+  endpoint,
+  model,
+  apiKey,
+  prompt,
+  temperature,
+  fetchImpl = fetch,
+  timeoutMs = DEFAULT_AI_TIMEOUT_MS,
+}) {
   const { provider, url, options } = buildAiChatRequest({ endpoint, model, apiKey, prompt, temperature });
   try {
-    const res = await fetchImpl(url, options);
-    const data = await parseJsonSafe(res);
+    const { res, data } = await fetchJsonWithTimeout(fetchImpl, url, options, timeoutMs);
     if (!res.ok) {
       const apiMsg = data?.error?.message || `HTTP ${res.status}`;
       throw new Error(apiMsg);
@@ -216,12 +268,17 @@ export async function callAiChat({ endpoint, model, apiKey, prompt, temperature,
   }
 }
 
-export async function testAiConnection({ endpoint, model, apiKey, fetchImpl = fetch }) {
+export async function testAiConnection({
+  endpoint,
+  model,
+  apiKey,
+  fetchImpl = fetch,
+  timeoutMs = DEFAULT_AI_TIMEOUT_MS,
+}) {
   const { provider, url, options } = buildAiTestRequest({ endpoint, model, apiKey });
   const t0 = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   try {
-    const res = await fetchImpl(url, options);
-    const data = await parseJsonSafe(res);
+    const { res, data } = await fetchJsonWithTimeout(fetchImpl, url, options, timeoutMs);
     if (!res.ok) {
       const apiMsg = data?.error?.message || `HTTP ${res.status}`;
       throw new Error(apiMsg);
@@ -336,11 +393,15 @@ export function parseAiModelsResponse(provider, data) {
   return out;
 }
 
-export async function listAiModels({ endpoint, apiKey, fetchImpl = fetch }) {
+export async function listAiModels({
+  endpoint,
+  apiKey,
+  fetchImpl = fetch,
+  timeoutMs = DEFAULT_AI_TIMEOUT_MS,
+}) {
   const { provider, url, options } = buildAiModelsRequest({ endpoint, apiKey });
   try {
-    const res = await fetchImpl(url, options);
-    const data = await parseJsonSafe(res);
+    const { res, data } = await fetchJsonWithTimeout(fetchImpl, url, options, timeoutMs);
     if (!res.ok) {
       const apiMsg = data?.error?.message || `HTTP ${res.status}`;
       throw new Error(apiMsg);

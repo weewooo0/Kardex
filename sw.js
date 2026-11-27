@@ -1,4 +1,4 @@
-const CACHE = 'kardex-v84b';
+const CACHE = 'kardex-v86';
 const WHISPER_RUNTIME_CACHE = 'companion-md-whisper-runtime';
 const SHELL = [
   './',
@@ -61,7 +61,9 @@ self.addEventListener('fetch', (e) => {
         const cached = await cache.match(e.request);
         if (cached) return cached;
         const res = await fetch(e.request);
-        if (res && res.ok) cache.put(e.request, res.clone());
+        if (res && res.ok) {
+          e.waitUntil(cache.put(e.request, res.clone()).catch(() => {}));
+        }
         return res;
       })
     );
@@ -70,28 +72,25 @@ self.addEventListener('fetch', (e) => {
 
   if (e.request.cache === 'only-if-cached' && e.request.mode !== 'same-origin') return;
 
-  // Network-first with timeout only for top-level navigation ("lie-fi"); Cache-first for static shell assets
+  // Stale-While-Revalidate for top-level navigation (instant boot on lie-fi; background refresh updates cache)
   if (e.request.mode === 'navigate') {
-    e.respondWith(
-      (async () => {
-        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = controller ? setTimeout(() => controller.abort(), 3500) : null;
-        try {
-          const res = await fetch(
-            e.request,
-            controller ? { cache: 'no-cache', signal: controller.signal } : { cache: 'no-cache' }
-          );
-          if (timer) clearTimeout(timer);
-          if (res && res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, copy));
-          }
-          return res;
-        } catch {
-          if (timer) clearTimeout(timer);
-          return caches.match(e.request).then((hit) => hit || caches.match('./index.html'));
+    const networkRefresh = fetch(e.request, { cache: 'no-cache' })
+      .then(async (res) => {
+        if (res && res.ok) {
+          const c = await caches.open(CACHE);
+          await c.put(e.request, res.clone());
         }
-      })()
+        return res;
+      })
+      .catch(() => null);
+    e.waitUntil(networkRefresh);
+    e.respondWith(
+      caches.open(CACHE).then(async (cache) => {
+        const cached = (await cache.match(e.request)) || (await cache.match('./index.html'));
+        if (cached) return cached;
+        const netRes = await networkRefresh;
+        return netRes || (await caches.match('./index.html'));
+      })
     );
     return;
   }
@@ -103,7 +102,7 @@ self.addEventListener('fetch', (e) => {
         fetch(e.request, { cache: 'no-cache' }).then((res) => {
           if (res && res.ok) {
             const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(e.request, copy));
+            e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {}));
           }
           return res;
         })

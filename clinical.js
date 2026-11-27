@@ -1,7 +1,7 @@
 // On-device deterministic clinical calculators & guideline pre-pass audits
 // Strictly follows CLINICAL-WORKFLOW-STE.md §8 and §11. Pure local computation — zero network calls.
 
-import { parseChart, metaOf, getTodayDateStrings, extractClinicalMetricsFromBlock } from './census.js';
+import { parseChart, getTodayDateStrings, extractClinicalMetricsFromBlock } from './census.js';
 import { parseRawLabs } from './labs.js';
 
 export const DRIP_PRESETS = [
@@ -238,34 +238,45 @@ function isNonLabLineForClinical(trimmed) {
   );
 }
 
-/**
- * Deterministic extractor for age, sex, weight, creatinine, K, Plt, charted eGFR/CrCl, and active meds.
- * Honors CLINICAL-WORKFLOW-STE.md §11 (never converts units or invents missing inputs).
- */
-export function extractClinicalInputs(content, note = {}, options = {}) {
-  const text = String(content || '');
-  const meta = metaOf(text);
+const WT_RE =
+  /(?:^|[\s|;,])(?:Actual\s+|Current\s+|Dosing\s+)?(?:Weight|Wt|ABW|BW)\s*(?:[:=]|is)\s*(\d+(?:\.\d+)?)\s*(kg|kgs|lbs?)?\b/i;
+const CR_RE =
+  /\b(Creatinine|Creat|Crea|SCr|Cr|CR)\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\s*(H|L)?\s*(µmol\/?L|umol\/?L|mmol\/?L|mg\/dL|mg%|mg)?/gi;
+const K_RE =
+  /\b(Potassium|K)\b(?!\s*(?:Cl|mEq|tabs?|mg|IV|PO|PNGT))\s*(?:[:=]|\s+)\s*(\d+(?:\.\d+)?)(?:\s*(H|L))?\b/gi;
+const PLT_RE = /\b(Platelets?|Plt)\b\s*(?:[:=]|\s+)\s*(\d+(?:\.\d+)?)\b/gi;
+const EGFR_RE = /\beGFR\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\b/i;
+const CRCL_RE = /\bCrCl\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\b/i;
+
+const LAB_KEY_TO_FIELD = {
+  Na: 'na', K: 'k', Cl: 'cl', HCO3: 'hco3', BUN: 'bun', Cr: 'cr',
+  Glu: 'glu', Ca: 'ca', Alb: 'alb', TBili: 'tbili', INR: 'inr',
+  pH: 'ph', pCO2: 'pco2', pO2: 'po2', Lactate: 'lactate',
+};
+const LAB_FIELD_COUNT = Object.keys(LAB_KEY_TO_FIELD).length;
+
+const CLINICAL_BASE_CACHE_MAX = 16;
+const clinicalBaseCache = new Map();
+
+function extractClinicalBase(text, note, todayStr, maxCrAgeDays, maxWeightAgeDays, unitSystem) {
+  const noteName = note?.name ? String(note.name) : '';
+  const noteRoom = note?.room ? String(note.room) : '';
+  const noteTitle = note?.sourceFileName || note?.title ? String(note.sourceFileName || note.title) : '';
+  const noteAliases = Array.isArray(note?.aliases)
+    ? note.aliases.map((s) => String(s || '').trim()).filter(Boolean).join('\u0002')
+    : '';
+  const cacheKey = `${todayStr}\u0001${maxCrAgeDays}\u0001${maxWeightAgeDays}\u0001${unitSystem}\u0001${noteName}\u0001${noteRoom}\u0001${noteTitle}\u0001${noteAliases}\u0000${text}`;
+
+  const cached = clinicalBaseCache.get(cacheKey);
+  if (cached) return cached;
+
   const parsed = parseChart(text, note);
-
-  let todayStr;
-  if (options.todayDate instanceof Date) {
-    todayStr = getTodayDateStrings(options.todayDate).mmddyyyy;
-  } else if (typeof options.todayDate === 'string' && options.todayDate.trim()) {
-    todayStr = options.todayDate.trim();
-  } else {
-    todayStr = getTodayDateStrings().mmddyyyy;
-  }
-
-  const maxCrAgeDays = Number.isFinite(options.maxCrAgeDays) ? options.maxCrAgeDays : 3;
-  const maxWeightAgeDays = Number.isFinite(options.maxWeightAgeDays) ? options.maxWeightAgeDays : 7;
-
-  const age = parsePositiveNumber(parsed.age || meta.age, 1, 120);
-  const sex = normalizeSex(parsed.sex || meta.sex || meta.gender);
+  const age = parsePositiveNumber(parsed.age, 1, 120);
+  const sex = normalizeSex(parsed.sex);
 
   // 1. Weight extraction: YAML frontmatter first, then dated chart blocks newest-to-oldest
   let weight = null;
-  const fmWeightRaw =
-    parsed.weight || meta.weight || meta.wt || meta.weight_kg || meta['weight (kg)'] || '';
+  const fmWeightRaw = parsed.weight || '';
   if (String(fmWeightRaw).trim()) {
     const wtStr = String(fmWeightRaw).trim();
     const lbMatch = wtStr.match(/^(\d+(?:\.\d+)?)\s*lbs?$/i);
@@ -296,190 +307,229 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
     }
   }
 
-  const dateSectionsDesc = splitChartDateSections(text).reverse();
-
-  if (!weight) {
-    const wtRe =
-      /(?:^|[\s|;,])(?:Actual\s+|Current\s+|Dosing\s+)?(?:Weight|Wt|ABW|BW)\s*(?:[:=]|is)\s*(\d+(?:\.\d+)?)\s*(kg|kgs|lbs?)?\b/i;
-    for (const sec of dateSectionsDesc) {
-      const shiftsDesc = splitShiftChunks(sec.text).reverse();
-      for (const blk of shiftsDesc) {
-        const lines = blk.split('\n').reverse();
-        for (const rawLine of lines) {
-          const m = rawLine.match(wtRe);
-          if (!m) continue;
-          const unit = (m[2] || '').toLowerCase();
-          const ageDays = sec.date ? daysBetweenDates(sec.date, todayStr) : null;
-          const stale = ageDays !== null && ageDays > maxWeightAgeDays;
-          if (unit === 'lb' || unit === 'lbs') {
-            weight = {
-              valueKg: null,
-              invalidUnit: true,
-              raw: m[0].trim(),
-              source: 'chart',
-              date: sec.date || 'Undated',
-              ageDays,
-              stale,
-            };
-          } else {
-            const val = parsePositiveNumber(m[1], 1, 400);
-            if (val !== null) {
-              weight = {
-                valueKg: val,
-                invalidUnit: false,
-                raw: `${val} kg`,
-                source: 'chart',
-                date: sec.date || 'Undated',
-                ageDays,
-                stale,
-              };
-            }
-          }
-          if (weight) break;
-        }
-        if (weight) break;
-      }
-      if (weight) break;
-    }
-  }
-
-  // 2. Creatinine, Potassium, Platelets & Charted eGFR/CrCl (newest shift -> oldest)
+  // Unified newest-to-oldest pass over date sections & shifts for weight, Cr/K/Plt/eGFR/CrCl, and latestLabsMap
   let creatinine = null;
   let potassium = null;
   let platelets = null;
   let chartedEgfr = null;
   let chartedCrCl = null;
+  const latestLabsMap = {};
+  let remainingLabFields = LAB_FIELD_COUNT;
 
-  const crRe =
-    /\b(Creatinine|Creat|Crea|SCr|Cr|CR)\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\s*(H|L)?\s*(µmol\/?L|umol\/?L|mmol\/?L|mg\/dL|mg%|mg)?/gi;
-  const kRe =
-    /\b(Potassium|K)\b(?!\s*(?:Cl|mEq|tabs?|mg|IV|PO|PNGT))\s*(?:[:=]|\s+)\s*(\d+(?:\.\d+)?)(?:\s*(H|L))?\b/gi;
-  const pltRe = /\b(Platelets?|Plt)\b\s*(?:[:=]|\s+)\s*(\d+(?:\.\d+)?)\b/gi;
-  const egfrRe = /\beGFR\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\b/i;
-  const crclRe = /\bCrCl\b\s*(?:[:=]|\s+is\s+|\s+)\s*(\d+(?:\.\d+)?)\b/i;
+  const applyLabItems = (items) => {
+    for (const it of items) {
+      const fld = LAB_KEY_TO_FIELD[it.key];
+      if (fld && latestLabsMap[fld] === undefined && Number.isFinite(it.num)) {
+        if (it.key === 'Cr' && creatinine?.invalidUnit) continue;
+        latestLabsMap[fld] = it.num;
+        remainingLabFields--;
+      }
+    }
+  };
+
+  const dateSectionsDesc = splitChartDateSections(text).reverse();
 
   for (const sec of dateSectionsDesc) {
+    if (
+      weight &&
+      chartedEgfr &&
+      chartedCrCl &&
+      creatinine &&
+      potassium &&
+      platelets &&
+      remainingLabFields === 0
+    ) {
+      break;
+    }
+
     const ageDays = sec.date ? daysBetweenDates(sec.date, todayStr) : null;
     const shiftsDesc = splitShiftChunks(sec.text).reverse();
 
     for (const blk of shiftsDesc) {
-      const linesDesc = blk.split('\n').reverse();
-      for (const rawLine of linesDesc) {
-        const trimmed = rawLine.trim();
-        if (!trimmed || /^#{2,3}\s+/.test(trimmed)) continue;
+      if (
+        weight &&
+        chartedEgfr &&
+        chartedCrCl &&
+        creatinine &&
+        potassium &&
+        platelets &&
+        remainingLabFields === 0
+      ) {
+        break;
+      }
 
-        if (!chartedEgfr) {
-          const egMatch = trimmed.match(egfrRe);
-          if (egMatch) {
-            const val = parsePositiveNumber(egMatch[1], 1, 250);
-            if (val !== null) {
-              chartedEgfr = {
-                value: val,
-                date: sec.date || 'Undated',
-                ageDays,
-                label: 'CHARTED',
-              };
+      const hasDigits = /\d/.test(blk);
+      if (!hasDigits) continue;
+
+      if (!weight || !chartedEgfr || !chartedCrCl || !creatinine || !potassium || !platelets) {
+        const linesDesc = blk.split('\n').reverse();
+        for (const rawLine of linesDesc) {
+          if (!/\d/.test(rawLine)) continue;
+
+          if (!weight) {
+            const m = rawLine.match(WT_RE);
+            if (m) {
+              const unit = (m[2] || '').toLowerCase();
+              const wtStale = ageDays !== null && ageDays > maxWeightAgeDays;
+              if (unit === 'lb' || unit === 'lbs') {
+                weight = {
+                  valueKg: null,
+                  invalidUnit: true,
+                  raw: m[0].trim(),
+                  source: 'chart',
+                  date: sec.date || 'Undated',
+                  ageDays,
+                  stale: wtStale,
+                };
+              } else {
+                const val = parsePositiveNumber(m[1], 1, 400);
+                if (val !== null) {
+                  weight = {
+                    valueKg: val,
+                    invalidUnit: false,
+                    raw: `${val} kg`,
+                    source: 'chart',
+                    date: sec.date || 'Undated',
+                    ageDays,
+                    stale: wtStale,
+                  };
+                }
+              }
             }
+          }
+
+          if (!chartedEgfr || !chartedCrCl || !creatinine || !potassium || !platelets) {
+            const trimmed = rawLine.trim();
+            if (!trimmed || /^#{2,3}\s+/.test(trimmed)) continue;
+
+            if (!chartedEgfr) {
+              const egMatch = trimmed.match(EGFR_RE);
+              if (egMatch) {
+                const val = parsePositiveNumber(egMatch[1], 1, 250);
+                if (val !== null) {
+                  chartedEgfr = {
+                    value: val,
+                    date: sec.date || 'Undated',
+                    ageDays,
+                    label: 'CHARTED',
+                  };
+                }
+              }
+            }
+
+            if (!chartedCrCl) {
+              const ccMatch = trimmed.match(CRCL_RE);
+              if (ccMatch) {
+                const val = parsePositiveNumber(ccMatch[1], 1, 300);
+                if (val !== null) {
+                  chartedCrCl = {
+                    value: val,
+                    date: sec.date || 'Undated',
+                    ageDays,
+                    label: 'CHARTED',
+                  };
+                }
+              }
+            }
+
+            if (!isNonLabLineForClinical(trimmed)) {
+              if (!creatinine) {
+                CR_RE.lastIndex = 0;
+                let m;
+                let lineCr = null;
+                while ((m = CR_RE.exec(trimmed)) !== null) {
+                  const rawAlias = m[1];
+                  const num = parsePositiveNumber(m[2], 0.05, 2500);
+                  if (num === null) continue;
+                  const unit = (m[4] || '').trim();
+                  // Guard: uppercase "CR 78" (cardiac rate) unless explicitly in a lab line
+                  if (
+                    rawAlias === 'CR' &&
+                    num >= 25 &&
+                    !/\b(?:labs?|BUN|Na|K|eGFR|CrCl|creatinine|renal|umol|µmol)\b/i.test(trimmed)
+                  ) {
+                    continue;
+                  }
+                  const umolOnLine =
+                    /^(?:µmol|umol|mmol)/i.test(unit) ||
+                    /(?:Creatinine|Creat|Crea|SCr|Cr)\b[^|;\n]{0,30}(?:µmol\/?L|umol\/?L)/i.test(trimmed);
+                  const stale = ageDays !== null && ageDays > maxCrAgeDays;
+                  if (umolOnLine && unitSystem === 'si') {
+                    lineCr = {
+                      value: roundTo(num / 88.4, 2),
+                      unit: 'mg/dL',
+                      invalidUnit: false,
+                      rawSiValue: num,
+                      rawSiUnit: unit || 'µmol/L',
+                      date: sec.date || 'Undated',
+                      ageDays,
+                      stale,
+                    };
+                  } else {
+                    lineCr = {
+                      value: num,
+                      unit: umolOnLine ? unit || 'umol/L' : unit || 'mg/dL',
+                      invalidUnit: umolOnLine,
+                      date: sec.date || 'Undated',
+                      ageDays,
+                      stale,
+                    };
+                  }
+                }
+                if (lineCr) creatinine = lineCr;
+              }
+
+              if (!potassium && !/\b(?:Vit(?:amin)?\s+K|KCl)\b/i.test(trimmed)) {
+                K_RE.lastIndex = 0;
+                let km;
+                let lineK = null;
+                while ((km = K_RE.exec(trimmed)) !== null) {
+                  const kVal = parsePositiveNumber(km[2], 1.0, 12.0);
+                  if (kVal !== null) {
+                    lineK = {
+                      value: kVal,
+                      date: sec.date || 'Undated',
+                      ageDays,
+                      stale: ageDays !== null && ageDays > maxCrAgeDays,
+                    };
+                  }
+                }
+                if (lineK) potassium = lineK;
+              }
+
+              if (!platelets) {
+                PLT_RE.lastIndex = 0;
+                let pm;
+                let linePlt = null;
+                while ((pm = PLT_RE.exec(trimmed)) !== null) {
+                  const pltVal = parsePositiveNumber(pm[2], 1, 2000);
+                  if (pltVal !== null) {
+                    linePlt = {
+                      value: pltVal,
+                      date: sec.date || 'Undated',
+                      ageDays,
+                      stale: ageDays !== null && ageDays > maxCrAgeDays,
+                    };
+                  }
+                }
+                if (linePlt) platelets = linePlt;
+              }
+            }
+          }
+
+          if (weight && chartedEgfr && chartedCrCl && creatinine && potassium && platelets) {
+            break;
           }
         }
+      }
 
-        if (!chartedCrCl) {
-          const ccMatch = trimmed.match(crclRe);
-          if (ccMatch) {
-            const val = parsePositiveNumber(ccMatch[1], 1, 300);
-            if (val !== null) {
-              chartedCrCl = {
-                value: val,
-                date: sec.date || 'Undated',
-                ageDays,
-                label: 'CHARTED',
-              };
-            }
-          }
+      if (remainingLabFields > 0) {
+        const metrics = extractClinicalMetricsFromBlock(blk);
+        if (metrics.labs) {
+          applyLabItems(parseRawLabs(metrics.labs));
         }
-
-        if (isNonLabLineForClinical(trimmed)) continue;
-
-        if (!creatinine) {
-          crRe.lastIndex = 0;
-          let m;
-          let lineCr = null;
-          while ((m = crRe.exec(trimmed)) !== null) {
-            const rawAlias = m[1];
-            const num = parsePositiveNumber(m[2], 0.05, 2500);
-            if (num === null) continue;
-            const unit = (m[4] || '').trim();
-            // Guard: uppercase "CR 78" (cardiac rate) unless explicitly in a lab line
-            if (
-              rawAlias === 'CR' &&
-              num >= 25 &&
-              !/\b(?:labs?|BUN|Na|K|eGFR|CrCl|creatinine|renal|umol|µmol)\b/i.test(trimmed)
-            ) {
-              continue;
-            }
-            const umolOnLine =
-              /^(?:µmol|umol|mmol)/i.test(unit) ||
-              /(?:Creatinine|Creat|Crea|SCr|Cr)\b[^|;\n]{0,30}(?:µmol\/?L|umol\/?L)/i.test(trimmed);
-            const stale = ageDays !== null && ageDays > maxCrAgeDays;
-            if (umolOnLine && options.unitSystem === 'si') {
-              lineCr = {
-                value: roundTo(num / 88.4, 2),
-                unit: 'mg/dL',
-                invalidUnit: false,
-                rawSiValue: num,
-                rawSiUnit: unit || 'µmol/L',
-                date: sec.date || 'Undated',
-                ageDays,
-                stale,
-              };
-            } else {
-              lineCr = {
-                value: num,
-                unit: umolOnLine ? unit || 'umol/L' : unit || 'mg/dL',
-                invalidUnit: umolOnLine,
-                date: sec.date || 'Undated',
-                ageDays,
-                stale,
-              };
-            }
-          }
-          if (lineCr) creatinine = lineCr;
-        }
-
-        if (!potassium && !/\b(?:Vit(?:amin)?\s+K|KCl)\b/i.test(trimmed)) {
-          kRe.lastIndex = 0;
-          let km;
-          let lineK = null;
-          while ((km = kRe.exec(trimmed)) !== null) {
-            const kVal = parsePositiveNumber(km[2], 1.0, 12.0);
-            if (kVal !== null) {
-              lineK = {
-                value: kVal,
-                date: sec.date || 'Undated',
-                ageDays,
-                stale: ageDays !== null && ageDays > maxCrAgeDays,
-              };
-            }
-          }
-          if (lineK) potassium = lineK;
-        }
-
-        if (!platelets) {
-          pltRe.lastIndex = 0;
-          let pm;
-          let linePlt = null;
-          while ((pm = pltRe.exec(trimmed)) !== null) {
-            const pltVal = parsePositiveNumber(pm[2], 1, 2000);
-            if (pltVal !== null) {
-              linePlt = {
-                value: pltVal,
-                date: sec.date || 'Undated',
-                ageDays,
-                stale: ageDays !== null && ageDays > maxCrAgeDays,
-              };
-            }
-          }
-          if (linePlt) platelets = linePlt;
+        if (remainingLabFields > 0 && (blk.includes('ABG') || /\bpH\b|\bpCO2\b|\bpO2\b/i.test(blk))) {
+          applyLabItems(parseRawLabs(blk));
         }
       }
     }
@@ -490,6 +540,7 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
   const medSeen = new Set();
   const latestBlk = parsed.latestDateBlock || text;
   let inMedsOrPlans = false;
+  const stoppedRe = /\b(?:discontinued|d\/c|stopped|completed)\b|\bheld\b(?!\s*for\b)/i;
   for (const rawLine of String(latestBlk).split('\n')) {
     const trimmed = rawLine.trim();
     if (!trimmed) {
@@ -502,7 +553,6 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
       inMedsOrPlans = false;
     }
 
-    const stoppedRe = /\b(?:discontinued|d\/c|stopped|completed)\b|\bheld\b(?!\s*for\b)/i;
     if (
       inMedsOrPlans ||
       /\b(?:IV|IVF|PNGT|PO|QHS|BID|TID|QID|OD|q\d+h|mcg\/kg|cc\/hr|ml\/hr)\b/i.test(trimmed)
@@ -516,75 +566,6 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
         }
       }
     }
-  }
-
-  const ov = options.overrides || {};
-  const finalAge = parsePositiveNumber(ov.age, 1, 120) ?? age;
-  const finalSex = normalizeSex(ov.sex) || sex;
-  const heightCm = parsePositiveNumber(ov.heightCm ?? parsed.heightCm ?? meta.height_cm ?? meta.height, 80, 250);
-
-  const ovWeightKg = parsePositiveNumber(ov.weightKg, 1, 400);
-  const finalWeight =
-    ovWeightKg !== null
-      ? {
-          valueKg: ovWeightKg,
-          invalidUnit: false,
-          raw: `${ovWeightKg} kg`,
-          source: 'override',
-          date: 'Override',
-          ageDays: 0,
-          stale: false,
-        }
-      : weight;
-
-  const ovCr = parsePositiveNumber(ov.scrMgDl, 0.05, 30);
-  const finalCr =
-    ovCr !== null
-      ? {
-          value: ovCr,
-          unit: 'mg/dL',
-          invalidUnit: false,
-          date: 'Override',
-          ageDays: 0,
-          stale: false,
-        }
-      : creatinine;
-
-  // Extract structured latest labs & vitals for auto-filled Physiology & Scores
-  const latestLabsMap = {};
-  const labKeyToField = {
-    Na: 'na', K: 'k', Cl: 'cl', HCO3: 'hco3', BUN: 'bun', Cr: 'cr',
-    Glu: 'glu', Ca: 'ca', Alb: 'alb', TBili: 'tbili', INR: 'inr',
-    pH: 'ph', pCO2: 'pco2', pO2: 'po2', Lactate: 'lactate',
-  };
-  for (const sec of dateSectionsDesc) {
-    const shiftsDesc = splitShiftChunks(sec.text).reverse();
-    for (const blk of shiftsDesc) {
-      const metrics = extractClinicalMetricsFromBlock(blk);
-      if (metrics.labs) {
-        const parsedItems = parseRawLabs(metrics.labs);
-        for (const it of parsedItems) {
-          const fld = labKeyToField[it.key];
-          if (fld && latestLabsMap[fld] === undefined && Number.isFinite(it.num)) {
-            if (it.key === 'Cr' && creatinine?.invalidUnit) continue;
-            latestLabsMap[fld] = it.num;
-          }
-        }
-      }
-      if (blk.includes('ABG') || /\bpH\b|\bpCO2\b|\bpO2\b/i.test(blk)) {
-        const abgItems = parseRawLabs(blk);
-        for (const it of abgItems) {
-          const fld = labKeyToField[it.key];
-          if (fld && latestLabsMap[fld] === undefined && Number.isFinite(it.num)) {
-            if (it.key === 'Cr' && creatinine?.invalidUnit) continue;
-            latestLabsMap[fld] = it.num;
-          }
-        }
-      }
-    }
-  }
-  if (finalCr && !finalCr.invalidUnit && finalCr.value !== null) {
-    latestLabsMap.cr = finalCr.value;
   }
 
   const vitalRaw = String(parsed.vitals || '');
@@ -618,6 +599,88 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
     fio2Pct,
   };
 
+  const base = {
+    parsed,
+    age,
+    sex,
+    weight,
+    creatinine,
+    potassium,
+    platelets,
+    chartedEgfr,
+    chartedCrCl,
+    medLines,
+    latestLabsMap,
+    vitals: vitalsExtracted,
+  };
+
+  if (clinicalBaseCache.size >= CLINICAL_BASE_CACHE_MAX) {
+    clinicalBaseCache.delete(clinicalBaseCache.keys().next().value);
+  }
+  clinicalBaseCache.set(cacheKey, base);
+  return base;
+}
+
+/**
+ * Deterministic extractor for age, sex, weight, creatinine, K, Plt, charted eGFR/CrCl, and active meds.
+ * Honors CLINICAL-WORKFLOW-STE.md §11 (never converts units or invents missing inputs).
+ */
+export function extractClinicalInputs(content, note = {}, options = {}) {
+  const text = String(content || '');
+
+  let todayStr;
+  if (options.todayDate instanceof Date) {
+    todayStr = getTodayDateStrings(options.todayDate).mmddyyyy;
+  } else if (typeof options.todayDate === 'string' && options.todayDate.trim()) {
+    todayStr = options.todayDate.trim();
+  } else {
+    todayStr = getTodayDateStrings().mmddyyyy;
+  }
+
+  const maxCrAgeDays = Number.isFinite(options.maxCrAgeDays) ? options.maxCrAgeDays : 3;
+  const maxWeightAgeDays = Number.isFinite(options.maxWeightAgeDays) ? options.maxWeightAgeDays : 7;
+  const unitSystem = options.unitSystem === 'si' ? 'si' : 'conventional';
+
+  const base = extractClinicalBase(text, note, todayStr, maxCrAgeDays, maxWeightAgeDays, unitSystem);
+  const { parsed } = base;
+
+  const ov = options.overrides || {};
+  const finalAge = parsePositiveNumber(ov.age, 1, 120) ?? base.age;
+  const finalSex = normalizeSex(ov.sex) || base.sex;
+  const heightCm = parsePositiveNumber(ov.heightCm ?? parsed.heightCm, 80, 250);
+
+  const ovWeightKg = parsePositiveNumber(ov.weightKg, 1, 400);
+  const finalWeight =
+    ovWeightKg !== null
+      ? {
+          valueKg: ovWeightKg,
+          invalidUnit: false,
+          raw: `${ovWeightKg} kg`,
+          source: 'override',
+          date: 'Override',
+          ageDays: 0,
+          stale: false,
+        }
+      : base.weight;
+
+  const ovCr = parsePositiveNumber(ov.scrMgDl, 0.05, 30);
+  const finalCr =
+    ovCr !== null
+      ? {
+          value: ovCr,
+          unit: 'mg/dL',
+          invalidUnit: false,
+          date: 'Override',
+          ageDays: 0,
+          stale: false,
+        }
+      : base.creatinine;
+
+  const latestLabsMap = { ...base.latestLabsMap };
+  if (finalCr && !finalCr.invalidUnit && finalCr.value !== null) {
+    latestLabsMap.cr = finalCr.value;
+  }
+
   return {
     parsed,
     todayStr,
@@ -626,16 +689,16 @@ export function extractClinicalInputs(content, note = {}, options = {}) {
     heightCm,
     weight: finalWeight,
     creatinine: finalCr,
-    potassium,
-    platelets,
-    chartedEgfr,
-    chartedCrCl,
-    medLines,
+    potassium: base.potassium,
+    platelets: base.platelets,
+    chartedEgfr: base.chartedEgfr,
+    chartedCrCl: base.chartedCrCl,
+    medLines: [...base.medLines],
     allergies: parsed.allergies || '',
     trackedLines: parsed.trackedLines || [],
     trackedAntibiotics: parsed.trackedAntibiotics || [],
     labs: latestLabsMap,
-    vitals: vitalsExtracted,
+    vitals: { ...base.vitals },
   };
 }
 

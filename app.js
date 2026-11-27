@@ -253,36 +253,214 @@ let librarySearchTimer = null;
 
 const chartHeaderCache = new Map();
 const parsedChartCache = new Map();
+const explorerPendingCountCache = new Map();
 let notesIndexCache = null;
 let roundsSummaryCache = null;
+let notesMutationSeq = 0;
 let inboxDryRunTimer = null;
+
+const sharedNameCollator =
+  typeof Intl !== 'undefined' && typeof Intl.Collator === 'function'
+    ? new Intl.Collator(undefined, { sensitivity: 'base', numeric: true })
+    : null;
+const sharedShortDateFormatter =
+  typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
+    ? new Intl.DateTimeFormat(undefined)
+    : null;
+
+function formatShortLocaleDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return sharedShortDateFormatter ? sharedShortDateFormatter.format(d) : d.toLocaleDateString();
+}
 
 function invalidateNotesIndex() {
   notesIndexCache = null;
   roundsSummaryCache = null;
 }
 
+function adjustCategoryCounts(categoryCounts, categories, delta) {
+  if (!categoryCounts || !Array.isArray(categories) || !categories.length) return;
+  for (const c of categories) {
+    const key = String(c || '').toLowerCase();
+    if (!key) continue;
+    const next = (categoryCounts.get(key) || 0) + delta;
+    if (next > 0) categoryCounts.set(key, next);
+    else categoryCounts.delete(key);
+  }
+}
+
+function insertEntrySortedByRoom(entriesArr, newEntry, mirrorNotesArr = null) {
+  const targetRoom = newEntry?.header?.room;
+  let lo = 0;
+  let hi = entriesArr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (naturalBedCompare(entriesArr[mid]?.header?.room, targetRoom) <= 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  entriesArr.splice(lo, 0, newEntry);
+  if (mirrorNotesArr) mirrorNotesArr.splice(lo, 0, newEntry.note);
+}
+
+function removeEntryById(entriesArr, id, mirrorNotesArr = null) {
+  for (let i = 0; i < entriesArr.length; i++) {
+    if (entriesArr[i]?.note?.id === id) {
+      entriesArr.splice(i, 1);
+      if (mirrorNotesArr) mirrorNotesArr.splice(i, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+function patchNoteInIndex(updatedNote, targetIdx = 0) {
+  notesMutationSeq++;
+  roundsSummaryCache = null;
+  const cache = notesIndexCache;
+  if (!cache || !updatedNote?.id) return;
+
+  const id = updatedNote.id;
+  const prevEntry = cache.entryById.get(id);
+  const newHeader = getChartHeader(updatedNote);
+  const newEntry = { note: updatedNote, header: newHeader };
+
+  if (prevEntry) {
+    adjustCategoryCounts(cache.categoryCounts, prevEntry.header.categories, -1);
+    if (prevEntry.header.isCensus) {
+      removeEntryById(cache.activeAllEntries, id, cache.activeAll);
+      if (prevEntry.header.isCharity) {
+        removeEntryById(cache.charityEntries, id);
+      } else {
+        removeEntryById(cache.activeCensusEntries, id, cache.activeCensus);
+      }
+    } else if (prevEntry.header.isCharity) {
+      removeEntryById(cache.charityEntries, id);
+    } else {
+      removeEntryById(cache.dischargedEntries, id);
+    }
+
+    const oldAllIdx = cache.allEntries.indexOf(prevEntry);
+    if (oldAllIdx === targetIdx) {
+      cache.allEntries[targetIdx] = newEntry;
+    } else {
+      if (oldAllIdx !== -1) cache.allEntries.splice(oldAllIdx, 1);
+      const safeIdx = Math.max(0, Math.min(targetIdx, cache.allEntries.length));
+      cache.allEntries.splice(safeIdx, 0, newEntry);
+    }
+  } else {
+    const safeIdx = Math.max(0, Math.min(targetIdx, cache.allEntries.length));
+    cache.allEntries.splice(safeIdx, 0, newEntry);
+  }
+
+  cache.byId.set(id, updatedNote);
+  cache.entryById.set(id, newEntry);
+  if (updatedNote.sourceFileName) cache.linkedIds.add(id);
+  else cache.linkedIds.delete(id);
+  cache.linkedCount = cache.linkedIds.size;
+
+  adjustCategoryCounts(cache.categoryCounts, newHeader.categories, 1);
+
+  if (newHeader.isCensus) {
+    insertEntrySortedByRoom(cache.activeAllEntries, newEntry, cache.activeAll);
+    if (newHeader.isCharity) {
+      insertEntrySortedByRoom(cache.charityEntries, newEntry);
+    } else {
+      insertEntrySortedByRoom(cache.activeCensusEntries, newEntry, cache.activeCensus);
+    }
+  } else if (newHeader.isCharity) {
+    insertEntrySortedByRoom(cache.charityEntries, newEntry);
+  } else if (targetIdx === 0) {
+    cache.dischargedEntries.unshift(newEntry);
+  } else {
+    const upd = updatedNote.updated || 0;
+    let pos = 0;
+    while (pos < cache.dischargedEntries.length && (cache.dischargedEntries[pos]?.note?.updated || 0) >= upd) {
+      pos++;
+    }
+    cache.dischargedEntries.splice(pos, 0, newEntry);
+  }
+}
+
+function removeNoteFromIndex(noteId) {
+  notesMutationSeq++;
+  roundsSummaryCache = null;
+  const cache = notesIndexCache;
+  if (!cache || !noteId) return;
+
+  const prevEntry = cache.entryById.get(noteId);
+  if (!prevEntry) return;
+
+  adjustCategoryCounts(cache.categoryCounts, prevEntry.header.categories, -1);
+  cache.byId.delete(noteId);
+  cache.entryById.delete(noteId);
+  cache.linkedIds.delete(noteId);
+  cache.linkedCount = cache.linkedIds.size;
+
+  const allIdx = cache.allEntries.indexOf(prevEntry);
+  if (allIdx !== -1) cache.allEntries.splice(allIdx, 1);
+
+  if (prevEntry.header.isCensus) {
+    removeEntryById(cache.activeAllEntries, noteId, cache.activeAll);
+    if (prevEntry.header.isCharity) {
+      removeEntryById(cache.charityEntries, noteId);
+    } else {
+      removeEntryById(cache.activeCensusEntries, noteId, cache.activeCensus);
+    }
+  } else if (prevEntry.header.isCharity) {
+    removeEntryById(cache.charityEntries, noteId);
+  } else {
+    removeEntryById(cache.dischargedEntries, noteId);
+  }
+}
+
+function patchNoteLinkedInIndex(note) {
+  if (!note?.id) return;
+  notesMutationSeq++;
+  const cache = notesIndexCache;
+  if (!cache) return;
+  if (note.sourceFileName) cache.linkedIds.add(note.id);
+  else cache.linkedIds.delete(note.id);
+  cache.linkedCount = cache.linkedIds.size;
+}
+
 function getNotesIndex() {
   if (notesIndexCache) return notesIndexCache;
   const byId = new Map();
+  const entryById = new Map();
   const allEntries = [];
   const activeAll = [];
   const activeCensus = [];
   const charity = [];
   const discharged = [];
   const categoryCounts = new Map();
-  let linkedCount = 0;
+  const linkedIds = new Set();
+
+  let catChanged = false;
+  const seenCats = new Set(customCategories.map((c) => c.toLowerCase()));
 
   for (const n of notes) {
     if (!n) continue;
-    if (n.id) byId.set(n.id, n);
-    if (n.sourceFileName) linkedCount++;
+    if (n.id) {
+      byId.set(n.id, n);
+      if (n.sourceFileName) linkedIds.add(n.id);
+    }
     const h = getChartHeader(n);
     const entry = { note: n, header: h };
+    if (n.id) entryById.set(n.id, entry);
     allEntries.push(entry);
     for (const c of h.categories || []) {
-      const key = c.toLowerCase();
-      categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
+      const norm = normalizeCategoryName(c);
+      const key = norm ? norm.toLowerCase() : c.toLowerCase();
+      if (norm && !seenCats.has(key)) {
+        seenCats.add(key);
+        customCategories.push(norm);
+        catChanged = true;
+      }
+      if (key) categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
     }
     if (h.isCensus) {
       activeAll.push(entry);
@@ -294,6 +472,7 @@ function getNotesIndex() {
       discharged.push(entry);
     }
   }
+  if (catChanged) saveCustomCategories();
 
   const byRoom = (a, b) => naturalBedCompare(a.header.room, b.header.room);
   activeAll.sort(byRoom);
@@ -302,13 +481,16 @@ function getNotesIndex() {
 
   notesIndexCache = {
     byId,
+    entryById,
     allEntries,
+    activeAllEntries: activeAll,
     activeAll: activeAll.map((x) => x.note),
     activeCensus: activeCensus.map((x) => x.note),
     activeCensusEntries: activeCensus,
     charityEntries: charity,
     dischargedEntries: discharged,
-    linkedCount,
+    linkedIds,
+    linkedCount: linkedIds.size,
     categoryCounts,
   };
   return notesIndexCache;
@@ -344,6 +526,26 @@ function getParsedChart(note) {
   return parsed;
 }
 
+function getLightweightOpenPendingCount(note) {
+  if (!note) return 0;
+  const parsedHit = parsedChartCache.get(note.id);
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  const noteSig = makeChartCacheSig(note);
+  if (parsedHit && parsedHit.sig === `${dayKey}|${noteSig}`) {
+    return (parsedHit.parsed.pending || []).filter((t) => !t.checked).length;
+  }
+  const hit = explorerPendingCountCache.get(note.id);
+  if (hit && hit.sig === noteSig) return hit.count;
+  const content = String(note.content || '');
+  let startIdx = content.lastIndexOf('\n### ');
+  if (startIdx === -1) startIdx = content.lastIndexOf('\n## ');
+  const tail = startIdx >= 0 ? content.slice(startIdx) : content;
+  const matches = tail.match(/^[ \t]*(?:[-*]\s*)?\[\s\]/gm);
+  const count = matches ? matches.length : 0;
+  if (note.id) explorerPendingCountCache.set(note.id, { sig: noteSig, count });
+  return count;
+}
+
 function pruneChartCaches(validNotes = notes) {
   const liveIds = new Set((validNotes || []).map((n) => n?.id).filter(Boolean));
   for (const id of chartHeaderCache.keys()) {
@@ -351,6 +553,9 @@ function pruneChartCaches(validNotes = notes) {
   }
   for (const id of parsedChartCache.keys()) {
     if (!liveIds.has(id)) parsedChartCache.delete(id);
+  }
+  for (const id of explorerPendingCountCache.keys()) {
+    if (!liveIds.has(id)) explorerPendingCountCache.delete(id);
   }
 }
 
@@ -533,7 +738,21 @@ function renderShiftScheduleSettings() {
   }
 }
 
+let deferredSettingsUiInitialized = false;
+function ensureDeferredSettingsUiInitialized({ skipSetSettingsTab = false } = {}) {
+  if (deferredSettingsUiInitialized) return;
+  deferredSettingsUiInitialized = true;
+  renderAllShiftPillGroups();
+  renderShiftScheduleSettings();
+  if (!skipSetSettingsTab) {
+    setSettingsTab(activeSettingsTab, { persist: false });
+  }
+}
+
 function setSettingsTab(tabId, { persist = true, focus = false } = {}) {
+  if (!deferredSettingsUiInitialized) {
+    ensureDeferredSettingsUiInitialized({ skipSetSettingsTab: true });
+  }
   const next = VALID_SETTINGS_TABS.has(tabId) ? tabId : 'appearance';
   activeSettingsTab = next;
   if (persist) {
@@ -784,6 +1003,7 @@ let vaultBannerDismissed = false;
 let vaultActiveOnly = safeGetItem(VAULT_ACTIVE_ONLY_KEY, '0') === '1';
 const vaultWriteQueues = new Map();
 const vaultPendingMirrorIds = new Set();
+const vaultActiveWriteIds = new Set();
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -860,6 +1080,23 @@ function rawPutManyNotes(batch) {
     t.oncomplete = res;
     t.onerror = () => rej(t.error);
   });
+}
+
+async function putManyNotesInBatches(batch, { batchSize = 300, markDirtySync = true } = {}) {
+  if (!Array.isArray(batch) || !batch.length) return;
+  if (markDirtySync && vaultDirHandle) {
+    for (const n of batch) {
+      if (n && !isUneditedSyntheticNote(n)) {
+        n.localDirtySync = true;
+      }
+    }
+  }
+  for (let i = 0; i < batch.length; i += batchSize) {
+    await rawPutManyNotes(batch.slice(i, i + batchSize));
+    if (i + batchSize < batch.length) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
 }
 
 function renderVaultSyncProgress(progress = vaultSyncProgress) {
@@ -1058,6 +1295,9 @@ async function refreshNoteFromVaultIfClean(noteId) {
   if (!existing || !existing.sourceFileName || existing.localDirtySync) {
     return existing || null;
   }
+  if (vaultPendingMirrorIds.has(noteId) || vaultActiveWriteIds.has(noteId)) {
+    return existing;
+  }
   if (currentMode === 'editor' && currentId === noteId && dirtyChart) {
     return existing;
   }
@@ -1067,6 +1307,7 @@ async function refreshNoteFromVaultIfClean(noteId) {
       const idx = notes.findIndex((n) => n.id === noteId);
       if (idx !== -1) notes[idx] = res.note;
       await rawPutNote(res.note);
+      patchNoteInIndex(res.note, idx !== -1 ? idx : 0);
       return res.note;
     }
     return existing;
@@ -1121,6 +1362,7 @@ async function mirrorNoteToVault(noteOrId) {
 
     const idx = notes.findIndex((n) => n.id === note.id);
     if (idx !== -1) notes[idx] = note;
+    patchNoteLinkedInIndex(note);
     vaultLastSyncedAt = Date.now();
     setMeta('vaultSyncMeta', { folderName: vaultDirHandle.name || '', lastSyncedAt: vaultLastSyncedAt }).catch(() => {});
     updateVaultUi();
@@ -1147,7 +1389,14 @@ function enqueueVaultMirror(noteOrId) {
     .catch(() => {})
     .then(() => {
       vaultPendingMirrorIds.delete(id);
+      vaultActiveWriteIds.add(id);
       return mirrorNoteToVault(id);
+    })
+    .finally(() => {
+      vaultActiveWriteIds.delete(id);
+      if (vaultWriteQueues.get(id) === next) {
+        vaultWriteQueues.delete(id);
+      }
     });
   vaultWriteQueues.set(id, next);
   return next;
@@ -1163,14 +1412,15 @@ async function put(note, { skipVaultMirror = false, deferVaultMirror = false } =
   }
 }
 
-async function runVaultSync({ interactive = true, forceScan = false } = {}) {
+async function runVaultSync({ interactive = true, forceScan = false, activeOnlyOverride = null } = {}) {
   if (!vaultDirHandle || !isDirectoryPickerSupported()) return null;
   if (vaultSyncInFlight) {
     if (interactive) toast('Obsidian folder sync already in progress…');
     return null;
   }
+  const effectiveActiveOnly = typeof activeOnlyOverride === 'boolean' ? activeOnlyOverride : vaultActiveOnly;
   const hasLinkedActive = notes.some((n) => Boolean(n?.sourceFileName) && getChartHeader(n).isCensus);
-  const useFastActive = vaultActiveOnly && !forceScan && hasLinkedActive;
+  const useFastActive = effectiveActiveOnly && !forceScan && hasLinkedActive;
 
   vaultSyncInFlight = true;
   vaultLastHadError = false;
@@ -1215,18 +1465,18 @@ async function runVaultSync({ interactive = true, forceScan = false } = {}) {
         onProgress: handleSyncProgress,
       });
     } else {
-      const inactiveCache = vaultActiveOnly ? (await getMeta('vaultInactiveIndex')) || {} : null;
+      const inactiveCache = effectiveActiveOnly ? (await getMeta('vaultInactiveIndex')) || {} : null;
       res = await syncVaultDirectory({
         dirHandle: vaultDirHandle,
         localNotes: notes,
         putNote: put,
         putNotesBatch: rawPutManyNotes,
         generateId: uid,
-        activeOnly: vaultActiveOnly,
+        activeOnly: effectiveActiveOnly,
         inactiveCache,
         onProgress: handleSyncProgress,
       });
-      if (vaultActiveOnly && res?.inactiveCache) {
+      if (effectiveActiveOnly && res?.inactiveCache) {
         await setMeta('vaultInactiveIndex', res.inactiveCache);
       }
     }
@@ -1238,7 +1488,11 @@ async function runVaultSync({ interactive = true, forceScan = false } = {}) {
       lastSyncedAt: vaultLastSyncedAt,
       lastSummary: vaultLastSummary,
     });
-    await refresh();
+    if ((res.pulled || 0) + (res.pushed || 0) + (res.conflicts || 0) + (res.unlinked || 0) > 0 || !notes.length) {
+      await refresh();
+    } else {
+      updateVaultUi();
+    }
 
     if (currentId) {
       const updatedCurr = notes.find((n) => n.id === currentId);
@@ -1316,7 +1570,8 @@ async function unlinkVaultFolder() {
       toUnlink.push(n);
     }
   }
-  if (toUnlink.length) await rawPutManyNotes(toUnlink);
+  if (toUnlink.length) await putManyNotesInBatches(toUnlink, { markDirtySync: false });
+  notesMutationSeq++;
   invalidateNotesIndex();
   updateVaultUi();
   toast(`Unlinked "${folderName}"`);
@@ -1341,7 +1596,10 @@ async function initVaultLink() {
     vaultPermission = await queryDirPermission(savedHandle, { request: false });
     updateVaultUi();
     if (vaultPermission === 'granted') {
-      await runVaultSync({ interactive: false });
+      await runVaultSync({
+        interactive: false,
+        activeOnlyOverride: notes.length > 0 ? true : null,
+      });
     }
   } catch {
     updateVaultUi();
@@ -1428,8 +1686,9 @@ function toast(msg, opts = {}) {
   }, duration);
 }
 
-function download(name, text, type = 'text/markdown') {
-  const url = URL.createObjectURL(new Blob([text], { type }));
+function download(name, textOrBlob, type = 'text/markdown') {
+  const blob = textOrBlob instanceof Blob ? textOrBlob : new Blob([textOrBlob], { type });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -1443,22 +1702,24 @@ function download(name, text, type = 'text/markdown') {
 async function shareOrDownload({
   filename,
   text,
+  blob = null,
   mimeType = 'text/markdown',
   title = '',
   allowTextShare = false,
 }) {
+  const outBlob = blob instanceof Blob ? blob : new Blob([text ?? ''], { type: mimeType });
   const isCoarse = Boolean(window.matchMedia?.('(pointer: coarse)').matches);
   if (isCoarse && typeof navigator.share === 'function') {
     try {
       if (typeof File === 'function' && typeof navigator.canShare === 'function') {
         const shareMime = mimeType === 'text/markdown' ? 'text/plain' : mimeType;
-        const file = new File([text], filename, { type: shareMime });
+        const file = new File([outBlob], filename, { type: shareMime });
         if (navigator.canShare({ files: [file] })) {
           await navigator.share({ title: title || filename, files: [file] });
           return true;
         }
       }
-      if (allowTextShare) {
+      if (allowTextShare && typeof text === 'string') {
         await navigator.share({ title: title || filename, text });
         return true;
       }
@@ -1466,7 +1727,7 @@ async function shareOrDownload({
       if (err?.name === 'AbortError') return false;
     }
   }
-  download(filename, text, mimeType);
+  download(filename, outBlob, mimeType);
   return true;
 }
 
@@ -1518,12 +1779,79 @@ function pushUndoSnapshot(noteId, snapshot) {
   if (noteId === currentId) updateUndoButton();
 }
 
+let undoCoalesceTimer = null;
+let undoCoalesceNoteId = null;
+let undoCoalesceBaseline = null;
+let rawProfileSyncTimer = null;
+let profileInputsStaleFromRaw = false;
+let timelineGuidedSerializeTimer = null;
+let timelineSearchTimer = null;
+
+function clearUndoCoalesce() {
+  clearTimeout(undoCoalesceTimer);
+  undoCoalesceTimer = null;
+  undoCoalesceNoteId = null;
+  undoCoalesceBaseline = null;
+}
+
+function commitCoalescedUndoSnapshot() {
+  clearTimeout(undoCoalesceTimer);
+  undoCoalesceTimer = null;
+  const noteId = undoCoalesceNoteId;
+  const baseline = undoCoalesceBaseline;
+  undoCoalesceNoteId = null;
+  undoCoalesceBaseline = null;
+  if (noteId && typeof baseline === 'string') {
+    const currentVal = noteId === currentId ? $('noteText')?.value : null;
+    if (currentVal === null || currentVal !== baseline) {
+      pushUndoSnapshot(noteId, baseline);
+      if (noteId === currentId && currentVal !== null) {
+        lastSavedChartContent = currentVal;
+      }
+    }
+  }
+}
+
+function flushStaleProfileInputsFromRaw() {
+  clearTimeout(rawProfileSyncTimer);
+  rawProfileSyncTimer = null;
+  if (!profileInputsStaleFromRaw || !currentId) return;
+  profileInputsStaleFromRaw = false;
+  const n = notes.find((x) => x.id === currentId) || {};
+  populateProfileInputs(n, $('noteText').value, true);
+}
+
+function flushTimelineGuidedSync() {
+  clearTimeout(timelineGuidedSerializeTimer);
+  timelineGuidedSerializeTimer = null;
+  if (!timelineEditDraft || !timelineEditDraft.guidedDirty) return;
+  const listEl = $('chartTimelineList');
+  const card = listEl?.querySelector('.timeline-inline-edit');
+  const ta = card?.querySelector('.tl-edit-textarea');
+  const saveBtn = card?.querySelector('.tl-save-entry-btn');
+  if (!card || !ta) return;
+  const meta = saveBtn
+    ? resolveTimelineEditMeta(card, saveBtn.dataset.date, saveBtn.dataset.origShift)
+    : { nextShift: '' };
+  ta.value = serializeEditedShiftBlock(timelineEditDraft.fields, {
+    isInterim: isInterimShift(meta.nextShift),
+    planMode: currentPlanMode,
+  });
+}
+
 function markChartDirty() {
   if (!currentId) return;
   const currentContent = $('noteText').value;
   if (currentContent !== lastSavedChartContent) {
-    pushUndoSnapshot(currentId, lastSavedChartContent);
-    lastSavedChartContent = currentContent;
+    if (!undoCoalesceTimer || undoCoalesceNoteId !== currentId) {
+      if (undoCoalesceNoteId && undoCoalesceNoteId !== currentId) {
+        commitCoalescedUndoSnapshot();
+      }
+      undoCoalesceNoteId = currentId;
+      undoCoalesceBaseline = lastSavedChartContent;
+    }
+    clearTimeout(undoCoalesceTimer);
+    undoCoalesceTimer = setTimeout(commitCoalescedUndoSnapshot, 1000);
   }
   dirtyChart = true;
   updateSaveStatusPill('unsaved');
@@ -1537,8 +1865,10 @@ function markChartDirty() {
   }, 650);
 }
 
-async function flushPendingChartSave() {
+async function flushPendingChartSave({ deferVaultMirror = false } = {}) {
   clearTimeout(chartAutosaveTimer);
+  flushTimelineGuidedSync();
+  commitCoalescedUndoSnapshot();
   if (!currentId) return;
   const activeInlineTa = $('chartTimelineList')?.querySelector('.tl-edit-textarea');
   if (activeInlineTa && editingTimelineKey) {
@@ -1566,11 +1896,18 @@ async function flushPendingChartSave() {
     }
   }
   if (dirtyChart) {
-    await saveCurrent(null, { silent: true });
+    await saveCurrent(null, { silent: true, deferVaultMirror });
+    if (deferVaultMirror && vaultDirHandle && vaultPermission === 'granted') {
+      enqueueVaultMirror(currentId).catch(() => {});
+    }
   } else {
     const curr = notes.find((n) => n.id === currentId);
     if (curr?.localDirtySync && vaultDirHandle && vaultPermission === 'granted') {
-      await enqueueVaultMirror(curr.id);
+      if (deferVaultMirror) {
+        enqueueVaultMirror(curr.id).catch(() => {});
+      } else {
+        await enqueueVaultMirror(curr.id);
+      }
     }
   }
 }
@@ -1744,74 +2081,97 @@ function formatBytesCompact(bytes) {
   return `${(n / 1073741824).toFixed(2)} GB`;
 }
 
-async function refreshStorageAndPwaStatus({ requestPersist = false } = {}) {
-  let persisted = null;
-  try {
-    if (navigator.storage?.persisted) {
-      persisted = await navigator.storage.persisted();
+let storagePwaStatusInFlight = null;
+let storagePwaStatusInFlightPersist = false;
+let lastStoragePwaStatusAt = 0;
+
+async function refreshStorageAndPwaStatus({ requestPersist = false, force = false } = {}) {
+  if (storagePwaStatusInFlight && (!requestPersist || storagePwaStatusInFlightPersist)) {
+    return storagePwaStatusInFlight;
+  }
+  if (storagePwaStatusInFlight && requestPersist && !storagePwaStatusInFlightPersist) {
+    await storagePwaStatusInFlight.catch(() => {});
+  }
+  if (!force && !requestPersist && lastStoragePwaStatusAt && Date.now() - lastStoragePwaStatusAt < 1000) {
+    return;
+  }
+  storagePwaStatusInFlightPersist = Boolean(requestPersist);
+  storagePwaStatusInFlight = (async () => {
+    try {
+      let persisted = null;
+      try {
+        if (navigator.storage?.persisted) {
+          persisted = await navigator.storage.persisted();
+        }
+        if (!persisted && requestPersist && navigator.storage?.persist) {
+          persisted = await navigator.storage.persist();
+        }
+      } catch {}
+
+      let est = null;
+      try {
+        est = await navigator.storage?.estimate?.();
+      } catch {}
+
+      const isStandalone =
+        Boolean(window.matchMedia?.('(display-mode: standalone)').matches) ||
+        navigator.standalone === true;
+      const isCoarseMobile = Boolean(window.matchMedia?.('(pointer: coarse)').matches);
+
+      const persistPill = $('storagePersistPill');
+      if (persistPill) {
+        if (persisted === true) {
+          persistPill.textContent = 'PERSISTENT';
+          persistPill.className = 'status-meta safe';
+        } else if (persisted === false) {
+          persistPill.textContent = 'BEST-EFFORT';
+          persistPill.className = 'status-meta warn';
+        } else {
+          persistPill.textContent = 'LOCAL ONLY';
+          persistPill.className = 'status-meta';
+        }
+      }
+
+      if ($('storageQuotaText')) {
+        $('storageQuotaText').textContent =
+          est && typeof est.usage === 'number'
+            ? `${formatBytesCompact(est.usage)} used${est.quota ? ` of ${formatBytesCompact(est.quota)}` : ''}`
+            : 'Unavailable in this browser';
+      }
+
+      if ($('pwaInstallStatusText')) {
+        $('pwaInstallStatusText').textContent = isStandalone
+          ? 'Installed PWA (Standalone)'
+          : 'Browser Tab (Add to Home Screen recommended)';
+      }
+
+      const swStatusEl = $('swUpdateStatusText');
+      if (swStatusEl) {
+        if (swWaitingWorker) {
+          swStatusEl.textContent = 'Update downloaded — tap Reload Safely';
+        } else if (navigator.serviceWorker?.controller) {
+          swStatusEl.textContent = 'Active offline cache ready';
+        } else {
+          swStatusEl.textContent = 'Standard browser mode';
+        }
+      }
+
+      const riskBanner = $('storageRiskBanner');
+      if (riskBanner) {
+        riskBanner.hidden =
+          storageRiskDismissed ||
+          !notes.length ||
+          persisted === true ||
+          isStandalone ||
+          !isCoarseMobile;
+      }
+      lastStoragePwaStatusAt = Date.now();
+    } finally {
+      storagePwaStatusInFlight = null;
+      storagePwaStatusInFlightPersist = false;
     }
-    if (!persisted && requestPersist && navigator.storage?.persist) {
-      persisted = await navigator.storage.persist();
-    }
-  } catch {}
-
-  let est = null;
-  try {
-    est = await navigator.storage?.estimate?.();
-  } catch {}
-
-  const isStandalone =
-    Boolean(window.matchMedia?.('(display-mode: standalone)').matches) ||
-    navigator.standalone === true;
-  const isCoarseMobile = Boolean(window.matchMedia?.('(pointer: coarse)').matches);
-
-  const persistPill = $('storagePersistPill');
-  if (persistPill) {
-    if (persisted === true) {
-      persistPill.textContent = 'PERSISTENT';
-      persistPill.className = 'status-meta safe';
-    } else if (persisted === false) {
-      persistPill.textContent = 'BEST-EFFORT';
-      persistPill.className = 'status-meta warn';
-    } else {
-      persistPill.textContent = 'LOCAL ONLY';
-      persistPill.className = 'status-meta';
-    }
-  }
-
-  if ($('storageQuotaText')) {
-    $('storageQuotaText').textContent =
-      est && typeof est.usage === 'number'
-        ? `${formatBytesCompact(est.usage)} used${est.quota ? ` of ${formatBytesCompact(est.quota)}` : ''}`
-        : 'Unavailable in this browser';
-  }
-
-  if ($('pwaInstallStatusText')) {
-    $('pwaInstallStatusText').textContent = isStandalone
-      ? 'Installed PWA (Standalone)'
-      : 'Browser Tab (Add to Home Screen recommended)';
-  }
-
-  const swStatusEl = $('swUpdateStatusText');
-  if (swStatusEl) {
-    if (swWaitingWorker) {
-      swStatusEl.textContent = 'Update downloaded — tap Reload Safely';
-    } else if (navigator.serviceWorker?.controller) {
-      swStatusEl.textContent = 'Active offline cache ready';
-    } else {
-      swStatusEl.textContent = 'Standard browser mode';
-    }
-  }
-
-  const riskBanner = $('storageRiskBanner');
-  if (riskBanner) {
-    riskBanner.hidden =
-      storageRiskDismissed ||
-      !notes.length ||
-      persisted === true ||
-      isStandalone ||
-      !isCoarseMobile;
-  }
+  })();
+  return storagePwaStatusInFlight;
 }
 
 function updateNetworkStatusUi() {
@@ -1847,16 +2207,43 @@ function getFocusableInModal(modalEl) {
   )].filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
 }
 
-function syncVisualViewportVars() {
+let visualViewportRafId = 0;
+let lastVvHeight = -1;
+let lastVvTop = -1;
+let lastKbInset = -1;
+let lastKbOpen = null;
+
+function applyVisualViewportVarsNow() {
   const vv = window.visualViewport;
-  const height = vv ? vv.height : window.innerHeight;
-  const offsetTop = vv ? vv.offsetTop : 0;
-  const kbInset = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
+  const height = Math.round(vv ? vv.height : window.innerHeight);
+  const offsetTop = Math.round(vv ? vv.offsetTop : 0);
+  const kbInset = Math.round(vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0);
+  const kbOpen = kbInset > 120;
+  if (
+    height === lastVvHeight &&
+    offsetTop === lastVvTop &&
+    kbInset === lastKbInset &&
+    kbOpen === lastKbOpen
+  ) {
+    return;
+  }
+  lastVvHeight = height;
+  lastVvTop = offsetTop;
+  lastKbInset = kbInset;
+  lastKbOpen = kbOpen;
   const root = document.documentElement;
-  root.style.setProperty('--vvh', `${Math.round(height)}px`);
-  root.style.setProperty('--vvt', `${Math.round(offsetTop)}px`);
-  root.style.setProperty('--kb-inset', `${Math.round(kbInset)}px`);
-  root.classList.toggle('kb-open', kbInset > 120);
+  root.style.setProperty('--vvh', `${height}px`);
+  root.style.setProperty('--vvt', `${offsetTop}px`);
+  root.style.setProperty('--kb-inset', `${kbInset}px`);
+  root.classList.toggle('kb-open', kbOpen);
+}
+
+function syncVisualViewportVars() {
+  if (visualViewportRafId) return;
+  visualViewportRafId = requestAnimationFrame(() => {
+    visualViewportRafId = 0;
+    applyVisualViewportVarsNow();
+  });
 }
 
 function setBackgroundInert(isInert) {
@@ -1963,6 +2350,8 @@ const MODE_SUBTITLES = {
   settings: 'Device-only preferences',
 };
 
+let activeRowMoreBtn = null;
+
 function closeAllMenus() {
   const roundsMenu = $('roundsMoreMenu');
   const roundsMoreBtn = $('roundsMoreBtn');
@@ -1976,6 +2365,12 @@ function closeAllMenus() {
   const ptTrigger = $('editorPatientTrigger');
   if (ptDropdown) ptDropdown.hidden = true;
   if (ptTrigger) ptTrigger.setAttribute('aria-expanded', 'false');
+  const rowMenu = $('rowActionMenu');
+  if (rowMenu) {
+    rowMenu.hidden = true;
+    delete rowMenu.dataset.activeId;
+  }
+  activeRowMoreBtn = null;
   document.querySelectorAll('.row-more-menu:not([hidden])').forEach((m) => {
     m.hidden = true;
   });
@@ -1984,14 +2379,20 @@ function closeAllMenus() {
   });
 }
 
+let lastRoundsRenderSig = '';
+let lastLibraryRenderSig = '';
+let lastScratchRenderSig = '';
+
 async function setMode(mode) {
   closeAllMenus();
-  if (currentMode === 'rounds' && mode !== 'rounds') {
+  const prevMode = currentMode;
+  if (prevMode === 'rounds' && mode !== 'rounds') {
     lastRoundsScrollY = window.scrollY;
   }
-  if (currentMode === 'editor' && mode !== 'editor') {
+  let pendingFlushPromise = null;
+  if (prevMode === 'editor' && mode !== 'editor') {
     setRawMdFullscreen(false);
-    await flushPendingChartSave();
+    pendingFlushPromise = flushPendingChartSave({ deferVaultMirror: true });
   }
   if (mode === 'editor' && currentId) {
     lastEditedRoundsId = currentId;
@@ -2025,12 +2426,17 @@ async function setMode(mode) {
     $(id).setAttribute('aria-pressed', String(active));
   }
 
+  if (pendingFlushPromise) {
+    await pendingFlushPromise;
+    if (currentMode !== mode) return;
+  }
+
   if (mode === 'rounds') {
     if ($('shieldStatus')) {
       $('shieldStatus').textContent = 'LOCAL ONLY';
       $('shieldStatus').className = 'status-meta';
     }
-    renderRounds();
+    renderRounds({ skipIfClean: true });
     requestAnimationFrame(() => {
       const card = lastEditedRoundsId
         ? document.querySelector(`.ledger-row[data-id="${CSS.escape(lastEditedRoundsId)}"]`)
@@ -2049,10 +2455,11 @@ async function setMode(mode) {
     updateEditorEmptyAndNav();
     updateCompanionConnHint();
   } else if (mode === 'library') {
-    renderList();
+    renderList({ skipIfClean: true });
   } else if (mode === 'scratch') {
-    renderScratchNotes();
+    renderScratchNotes({ skipIfClean: true });
   } else if (mode === 'settings') {
+    ensureDeferredSettingsUiInitialized({ skipSetSettingsTab: true });
     setSettingsTab(activeSettingsTab, { persist: false });
   }
 }
@@ -2196,6 +2603,8 @@ function getFilteredSortedRoundsEntries(summary = null) {
 
   if (searchQuery.trim()) {
     const q = searchQuery.toLowerCase().trim();
+    const escapedQ = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const contentRe = new RegExp(escapedQ, 'i');
     entries = entries.filter((e) => {
       const p = e.parsed;
       if (p) {
@@ -2228,7 +2637,7 @@ function getFilteredSortedRoundsEntries(summary = null) {
         .join('\n')
         .toLowerCase();
       if (fastHay.includes(q)) return true;
-      return String(e.note.content || '').toLowerCase().includes(q);
+      return contentRe.test(e.note.content || '');
     });
   }
 
@@ -2346,13 +2755,451 @@ function formatLedgerLabsHtml(labsStr) {
   return tokens.join('<span class="ledger-dot" aria-hidden="true"> · </span>');
 }
 
-function renderRounds() {
+function renderRoundsLedgerBodyHtml(pt) {
+  const ageSuffix = !pt.isUpdatedToday && pt.latestDate
+    ? ` <span class="ledger-age">(${esc(formatShortStatusDate(pt.latestDate))})</span>`
+    : '';
+
+  const paramRows = [];
+  if (pt.vitals) {
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">VS</div>
+        <div class="ledger-v">${formatMiddotStreamHtml(pt.vitals)}${ageSuffix}</div>
+      </div>`);
+  }
+  if (pt.vent) {
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">VENT</div>
+        <div class="ledger-v">${formatMiddotStreamHtml(pt.vent)}${ageSuffix}</div>
+      </div>`);
+  }
+  if (pt.io || pt.cumulativeFb) {
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">I&amp;O</div>
+        <div class="ledger-v">${pt.io ? formatLedgerIoHtml(pt.io, pt.cumulativeFb, ageSuffix) : formatLedgerIoHtml('', pt.cumulativeFb)}</div>
+      </div>`);
+  }
+  if (pt.hgt) {
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">HGT</div>
+        <div class="ledger-v">${esc(pt.hgt.replace(/\s*\|\s*/g, ' · '))}${ageSuffix}</div>
+      </div>`);
+  }
+  if (pt.labs) {
+    paramRows.push(`
+      <div class="ledger-kv is-labs">
+        <div class="ledger-labs-head">
+          <span class="ledger-k">LABS</span>
+          <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">All →</button>
+        </div>
+        <div class="ledger-v ledger-labs-vals">${formatLedgerLabsHtml(pt.labs)}${ageSuffix}</div>
+      </div>`);
+  } else {
+    paramRows.push(`
+      <div class="ledger-kv is-labs">
+        <div class="ledger-labs-head">
+          <span class="ledger-k">LABS</span>
+          <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">Open Labs →</button>
+        </div>
+        <div class="ledger-v muted">No labs logged yet</div>
+      </div>`);
+  }
+
+  if (Array.isArray(pt.trackedLines) && pt.trackedLines.length) {
+    const linesHtml = pt.trackedLines
+      .map((item) => {
+        const cls = item.overdue ? 'ledger-inline-warn' : '';
+        const suffix = item.overdue ? ' · Review' : '';
+        return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}${esc(suffix)}</strong></span>`;
+      })
+      .join('<span class="ledger-dot" aria-hidden="true"> · </span>');
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">LINES</div>
+        <div class="ledger-v">${linesHtml}</div>
+      </div>`);
+  }
+
+  const hasAbx = Array.isArray(pt.trackedAntibiotics) && pt.trackedAntibiotics.length > 0;
+  const abxHtml = hasAbx
+    ? pt.trackedAntibiotics
+        .map((item) => {
+          const cls = item.overdue ? 'ledger-inline-crit' : item.dueSoon ? 'ledger-inline-warn' : '';
+          return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}</strong></span>`;
+        })
+        .join('<span class="ledger-dot" aria-hidden="true"> · </span>')
+    : '';
+  paramRows.push(`
+    <div class="ledger-kv is-abx">
+      <div class="ledger-labs-head">
+        <span class="ledger-k">ABX</span>
+        <button type="button" class="ledger-all-labs-btn open-abx-btn" data-id="${pt.id}">${hasAbx ? 'Manage →' : '+ Abx'}</button>
+      </div>
+      <div class="ledger-v ${hasAbx ? '' : 'muted'}">${hasAbx ? abxHtml : 'No active antibiotics'}</div>
+    </div>`);
+
+  if (pt.contingencies) {
+    paramRows.push(`
+      <div class="ledger-kv">
+        <div class="ledger-k">IF/THEN</div>
+        <div class="ledger-v">${esc(pt.contingencies)}</div>
+      </div>`);
+  }
+
+  const medsAgeSuffix =
+    pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
+      ? ` (${formatShortStatusDate(pt.medicationsDate)})`
+      : '';
+  const medsAccordion = pt.medications && pt.medications.length
+    ? `<details class="ledger-accordion">
+        <summary>
+          <span class="acc-title">Medications${esc(medsAgeSuffix)}</span>
+          <span class="acc-right"><span class="acc-count">${pt.medications.length}</span>${uiIcon('chevron-right')}</span>
+        </summary>
+        <ul class="ledger-meds-list">${pt.medications.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+      </details>`
+    : '';
+
+  const planGroups = Array.isArray(pt.servicePlanGroups) ? pt.servicePlanGroups : [];
+  const planCount = planGroups.length || (pt.servicePlans ? pt.servicePlans.length : 0);
+  const planTitle = PLAN_MODES[currentPlanMode]?.label || 'Service Plans';
+  const plansContent = planGroups.length
+    ? `<div class="ledger-plans-grid">${planGroups
+        .map(
+          (g) => `<div class="ledger-plan-tag">${esc(g.tag)}</div><div class="ledger-plan-txt">${esc(g.text)}</div>`
+        )
+        .join('')}</div>`
+    : `<ul class="ledger-meds-list">${(pt.servicePlans || []).map((pl) => `<li>${esc(pl)}</li>`).join('')}</ul>`;
+  const plansAccordion = planCount
+    ? `<details class="ledger-accordion">
+        <summary>
+          <span class="acc-title">${esc(planTitle)}</span>
+          <span class="acc-right"><span class="acc-count">${planCount}</span>${uiIcon('chevron-right')}</span>
+        </summary>
+        ${plansContent}
+      </details>`
+    : '';
+
+  const openPendingCount = pt.pending.filter((p) => !p.checked).length;
+  const pendingItemsHtml = pt.pending.length
+    ? pt.pending
+        .map(
+          (item) => `
+      <label class="pending-line ${item.checked ? 'done' : ''}">
+        <input type="checkbox" class="pending-check" data-note-id="${pt.id}" data-task="${esc(item.text)}" ${item.checked ? 'checked' : ''}>
+        <span>${esc(item.text)}</span>
+      </label>`
+        )
+        .join('')
+    : '';
+
+  return `
+    ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
+    ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${pt.drips.split(/\s*\|\s*/).map((d) => esc(d)).join('<br>')}</span></div>` : ''}
+    <div class="ledger-params">${paramRows.join('')}</div>
+    ${medsAccordion}
+    ${plansAccordion}
+    <div class="ledger-pending">
+      <div class="ledger-pending-hdr">PENDING · ${openPendingCount}</div>
+      ${pendingItemsHtml ? `<div class="pending-items">${pendingItemsHtml}</div>` : ''}
+      <div class="pending-add-row">
+        <input type="text" class="pending-add-input" enterkeyhint="done" autocapitalize="sentences" data-note-id="${pt.id}" placeholder="+ Quick add pending item..." aria-label="Add pending task for ${esc(pt.name)}">
+      </div>
+    </div>
+    <div class="ledger-footer">
+      <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
+      <button type="button" class="ledger-btn-subtle dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
+      <button type="button" class="ledger-btn-subtle shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
+      <button type="button" class="ledger-btn-icon copy-update-btn" data-id="${pt.id}" title="Copy update text" aria-label="Copy update">${uiIcon('copy')}</button>
+      <div class="row-more-wrap">
+        <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-controls="rowActionMenu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
+      </div>
+    </div>`;
+}
+
+function getOrCreateRowActionMenu() {
+  let menu = $('rowActionMenu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'rowActionMenu';
+  menu.className = 'popover-menu row-more-menu floating-row-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Patient actions');
+  menu.hidden = true;
+  menu.style.cssText = 'position:fixed;z-index:120;right:auto;bottom:auto;';
+  menu.innerHTML = `
+    <button type="button" class="popover-menu-item open-chart-btn" role="menuitem">${uiIcon('pencil')}<span>Open Chart</span></button>
+    <button type="button" class="popover-menu-item open-labs-btn" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
+    <button type="button" class="popover-menu-item open-abx-btn" role="menuitem">${uiIcon('pill')}<span>Antibiotics</span></button>
+    <button type="button" class="popover-menu-item calc-btn" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
+    <button type="button" class="popover-menu-item pitch-btn" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>`;
+  document.body.appendChild(menu);
+  return menu;
+}
+
+async function openPatientLabsTabFromRounds(id) {
+  if (!id) return;
+  closeAllMenus();
+  await select(id);
+  setEditorView('labs');
+  await setMode('editor');
+  requestAnimationFrame(() => {
+    const bar = document.querySelector('#editorSection .editor-view-bar');
+    if (bar && typeof bar.scrollIntoView === 'function') {
+      bar.scrollIntoView({ behavior: 'auto', block: 'start' });
+    } else {
+      window.scrollTo(0, 0);
+    }
+  });
+}
+
+function updateRoundsExpandAllBtnState() {
+  const expandAllBtn = $('roundsToggleExpandAllBtn');
+  const container = $('roundsGrid');
+  if (!expandAllBtn || !container) return;
+  const rows = container.querySelectorAll('.ledger-row[data-id]');
+  const allOpen = rows.length > 0 && Array.from(rows).every((r) => expandedRowIds.has(r.dataset.id));
+  expandAllBtn.querySelector('span').textContent = allOpen ? 'Collapse All' : 'Expand All';
+  expandAllBtn.dataset.allOpen = String(allOpen);
+}
+
+function toggleRoundsRow(id) {
+  const container = $('roundsGrid');
+  if (!id || !container) return;
+  closeAllMenus();
+  const row = container.querySelector(`.ledger-row[data-id="${CSS.escape(id)}"]`);
+  const next = !expandedRowIds.has(id);
+  if (next) expandedRowIds.add(id);
+  else expandedRowIds.delete(id);
+  if (row) {
+    if (next) {
+      const bodyEl = row.querySelector('.ledger-body');
+      if (bodyEl && bodyEl.dataset.lazyBody === '1') {
+        const note = getNoteById(id) || notes.find((n) => n.id === id);
+        if (note) {
+          bodyEl.innerHTML = renderRoundsLedgerBodyHtml(getParsedChart(note));
+        }
+        delete bodyEl.dataset.lazyBody;
+      }
+    }
+    row.classList.toggle('expanded', next);
+    const head = row.querySelector('.ledger-head[data-toggle-row-id]');
+    if (head) head.setAttribute('aria-expanded', String(next));
+    const statusWrap = row.querySelector('.ledger-head-status');
+    if (statusWrap) {
+      const existingChev = statusWrap.querySelector('.ledger-chevron.is-open');
+      if (next && !existingChev) {
+        statusWrap.insertAdjacentHTML(
+          'beforeend',
+          `<span class="ledger-chevron is-open" aria-hidden="true">${uiIcon('chevron-down')}</span>`
+        );
+      } else if (!next && existingChev) {
+        existingChev.remove();
+      }
+    }
+  }
+  updateRoundsExpandAllBtnState();
+}
+
+function openSharedRowActionMenu(btn) {
+  const id = btn?.dataset?.id;
+  if (!id) return;
+  const menu = getOrCreateRowActionMenu();
+  // Read trigger geometry and viewport BEFORE mutating DOM / un-hiding menu (zero forced reflow)
+  const btnRect = btn.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const isFooter = Boolean(btn.closest('.ledger-footer'));
+  const isSameOpen = !menu.hidden && activeRowMoreBtn === btn;
+
+  closeAllMenus();
+  if (isSameOpen) return;
+
+  activeRowMoreBtn = btn;
+  menu.dataset.activeId = id;
+  const openChartItem = menu.querySelector('.open-chart-btn');
+  if (openChartItem) openChartItem.hidden = isFooter;
+  menu.querySelectorAll('[role="menuitem"]').forEach((item) => {
+    item.dataset.id = id;
+  });
+
+  const estW = 200;
+  const estH = isFooter ? 176 : 216;
+  const alignRight = btnRect.left + estW > vw - 12;
+  const bottomLimit = vh - (vw <= 820 ? 68 : 16);
+  const openUp = btnRect.bottom + estH + 8 > bottomLimit;
+
+  menu.style.left = alignRight ? 'auto' : `${Math.max(8, Math.round(btnRect.left))}px`;
+  menu.style.right = alignRight ? `${Math.max(8, Math.round(vw - btnRect.right))}px` : 'auto';
+  menu.style.top = openUp ? 'auto' : `${Math.round(btnRect.bottom + 6)}px`;
+  menu.style.bottom = openUp ? `${Math.max(8, Math.round(vh - btnRect.top + 6))}px` : 'auto';
+  menu.classList.toggle('align-right', alignRight);
+  menu.classList.toggle('open-up', openUp);
+  menu.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+}
+
+async function handleRoundsActionTarget(btn, { returnTrigger = null } = {}) {
+  const id = btn?.dataset?.id;
+  const triggerEl = returnTrigger || btn;
+  if (btn.classList.contains('dictate-btn')) {
+    closeAllMenus();
+    openDictateModal(id, triggerEl);
+    return true;
+  }
+  if (btn.classList.contains('open-chart-btn')) {
+    closeAllMenus();
+    await select(id);
+    await setMode('editor');
+    return true;
+  }
+  if (btn.classList.contains('open-labs-btn')) {
+    await openPatientLabsTabFromRounds(id);
+    return true;
+  }
+  if (btn.classList.contains('open-abx-btn')) {
+    closeAllMenus();
+    openAbxModal(id, triggerEl);
+    return true;
+  }
+  if (btn.classList.contains('shift-btn')) {
+    closeAllMenus();
+    openShiftModal(id, triggerEl);
+    return true;
+  }
+  if (btn.classList.contains('copy-update-btn')) {
+    closeAllMenus();
+    const note = getNoteById(id) || notes.find((n) => n.id === id);
+    if (note) copyUpdateTextForContent(note.content, note);
+    return true;
+  }
+  if (btn.classList.contains('calc-btn')) {
+    closeAllMenus();
+    openCalcModal(id, 'audit', triggerEl);
+    return true;
+  }
+  if (btn.classList.contains('pitch-btn')) {
+    closeAllMenus();
+    openPitchModal(id, PITCH_PRESETS[0].prompt, triggerEl);
+    return true;
+  }
+  return false;
+}
+
+function ensureRoundsGridDelegation(container) {
+  if (!container || container.dataset.delegated === '1') return;
+  container.dataset.delegated = '1';
+
+  const menu = getOrCreateRowActionMenu();
+  if (menu.dataset.delegated !== '1') {
+    menu.dataset.delegated = '1';
+    menu.addEventListener('click', (e) => {
+      const item = e.target.closest('.popover-menu-item[role="menuitem"]');
+      if (!item) return;
+      e.stopPropagation();
+      const triggerBtn = activeRowMoreBtn || item;
+      handleRoundsActionTarget(item, { returnTrigger: triggerBtn });
+    });
+  }
+
+  container.addEventListener('click', (e) => {
+    const emptyLoad = e.target.closest('#emptyLoadBtn');
+    if (emptyLoad) {
+      loadSampleCensus();
+      return;
+    }
+    const emptyNew = e.target.closest('#emptyNewBtn');
+    if (emptyNew) {
+      newNoteAndEdit();
+      return;
+    }
+    const moreLoad = e.target.closest('#roundsLoadMoreBtn');
+    if (moreLoad) {
+      roundsRenderLimit += ROUNDS_PAGE_SIZE;
+      renderRounds();
+      return;
+    }
+    const apBtn = e.target.closest('.ap-more-btn[data-ap-id]');
+    if (apBtn) {
+      e.stopPropagation();
+      const id = apBtn.dataset.apId;
+      if (!id) return;
+      expandedApIds.add(id);
+      renderRounds();
+      return;
+    }
+    const rowMoreBtn = e.target.closest('.row-more-btn');
+    if (rowMoreBtn) {
+      e.stopPropagation();
+      openSharedRowActionMenu(rowMoreBtn);
+      return;
+    }
+    const actionBtn = e.target.closest(
+      '.dictate-btn, .open-chart-btn, .open-labs-btn, .open-abx-btn, .shift-btn, .copy-update-btn, .calc-btn, .pitch-btn'
+    );
+    if (actionBtn) {
+      e.stopPropagation();
+      handleRoundsActionTarget(actionBtn);
+      return;
+    }
+    const chevBtn = e.target.closest('.ledger-chevron-btn[data-toggle-row-id]');
+    if (chevBtn) {
+      e.stopPropagation();
+      toggleRoundsRow(chevBtn.dataset.toggleRowId);
+      return;
+    }
+    const headEl = e.target.closest('.ledger-head[data-toggle-row-id]');
+    if (headEl && !e.target.closest('.ap-more-btn, button, a')) {
+      toggleRoundsRow(headEl.dataset.toggleRowId);
+    }
+  });
+
+  container.addEventListener('keydown', async (e) => {
+    const addInp = e.target.closest('.pending-add-input');
+    if (addInp) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const val = addInp.value.trim();
+        if (val) await handleQuickAddPending(addInp.dataset.noteId, val);
+      }
+      return;
+    }
+    const headEl = e.target.closest('.ledger-head[data-toggle-row-id]');
+    if (headEl && !e.target.closest('.ap-more-btn, button, a')) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleRoundsRow(headEl.dataset.toggleRowId);
+      }
+    }
+  });
+
+  container.addEventListener('change', async (e) => {
+    const chk = e.target.closest('.pending-check');
+    if (chk) {
+      await handleTogglePending(chk.dataset.noteId, chk.dataset.task, chk.checked);
+    }
+  });
+}
+
+function renderRounds({ skipIfClean = false } = {}) {
   const container = $('roundsGrid');
   const footerSummary = $('roundsFooterSummary');
+  ensureRoundsGridDelegation(container);
   updateDutyClockUi();
   if ($('roundsSortSelect')) $('roundsSortSelect').value = roundsSortMode;
   const sampleBtn = $('loadSyntheticBtn');
   if (sampleBtn) sampleBtn.hidden = notes.length > 0;
+
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  const sig = `${notesMutationSeq}|${activeFilter}|${roundsSortMode}|${searchQuery}|${roundsRenderLimit}|${currentPlanMode}|${dayKey}|${customCategories.join('\u0001')}`;
+  if (skipIfClean && lastRoundsRenderSig === sig && container.childElementCount > 0) {
+    return;
+  }
+  lastRoundsRenderSig = sig;
 
   if (!notes.length) {
     container.innerHTML = `
@@ -2364,9 +3211,6 @@ function renderRounds() {
           <button type="button" id="emptyNewBtn" class="btn-secondary">+ Add Patient</button>
         </div>
       </div>`;
-    const emptyLoad = $('emptyLoadBtn'), emptyNew = $('emptyNewBtn');
-    if (emptyLoad) emptyLoad.onclick = loadSampleCensus;
-    if (emptyNew) emptyNew.onclick = newNoteAndEdit;
     if (footerSummary) footerSummary.textContent = '';
     updateCensusStats([]);
     return;
@@ -2424,102 +3268,8 @@ function renderRounds() {
       const expandedDemoLine = demoParts.map((d) => esc(d)).join(' · ');
       const expandedApLine = pt.ap ? `AP: ${esc(pt.ap)}` : '';
 
-      const ageSuffix = !pt.isUpdatedToday && pt.latestDate
-        ? ` <span class="ledger-age">(${esc(formatShortStatusDate(pt.latestDate))})</span>`
-        : '';
-
-      const paramRows = [];
-      if (pt.vitals) {
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">VS</div>
-            <div class="ledger-v">${formatMiddotStreamHtml(pt.vitals)}${ageSuffix}</div>
-          </div>`);
-      }
-      if (pt.vent) {
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">VENT</div>
-            <div class="ledger-v">${formatMiddotStreamHtml(pt.vent)}${ageSuffix}</div>
-          </div>`);
-      }
-      if (pt.io || pt.cumulativeFb) {
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">I&amp;O</div>
-            <div class="ledger-v">${pt.io ? formatLedgerIoHtml(pt.io, pt.cumulativeFb, ageSuffix) : formatLedgerIoHtml('', pt.cumulativeFb)}</div>
-          </div>`);
-      }
-      if (pt.hgt) {
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">HGT</div>
-            <div class="ledger-v">${esc(pt.hgt.replace(/\s*\|\s*/g, ' · '))}${ageSuffix}</div>
-          </div>`);
-      }
-      if (pt.labs) {
-        paramRows.push(`
-          <div class="ledger-kv is-labs">
-            <div class="ledger-labs-head">
-              <span class="ledger-k">LABS</span>
-              <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">All →</button>
-            </div>
-            <div class="ledger-v ledger-labs-vals">${formatLedgerLabsHtml(pt.labs)}${ageSuffix}</div>
-          </div>`);
-      } else {
-        paramRows.push(`
-          <div class="ledger-kv is-labs">
-            <div class="ledger-labs-head">
-              <span class="ledger-k">LABS</span>
-              <button type="button" class="ledger-all-labs-btn open-labs-btn" data-id="${pt.id}">Open Labs →</button>
-            </div>
-            <div class="ledger-v muted">No labs logged yet</div>
-          </div>`);
-      }
-
       const isUnstable = String(pt.severity || '').toLowerCase() === 'unstable';
       const isWatcher = String(pt.severity || '').toLowerCase() === 'watcher';
-
-      if (Array.isArray(pt.trackedLines) && pt.trackedLines.length) {
-        const linesHtml = pt.trackedLines
-          .map((item) => {
-            const cls = item.overdue ? 'ledger-inline-warn' : '';
-            const suffix = item.overdue ? ' · Review' : '';
-            return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}${esc(suffix)}</strong></span>`;
-          })
-          .join('<span class="ledger-dot" aria-hidden="true"> · </span>');
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">LINES</div>
-            <div class="ledger-v">${linesHtml}</div>
-          </div>`);
-      }
-
-      const hasAbx = Array.isArray(pt.trackedAntibiotics) && pt.trackedAntibiotics.length > 0;
-      const abxHtml = hasAbx
-        ? pt.trackedAntibiotics
-            .map((item) => {
-              const cls = item.overdue ? 'ledger-inline-crit' : item.dueSoon ? 'ledger-inline-warn' : '';
-              return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}</strong></span>`;
-            })
-            .join('<span class="ledger-dot" aria-hidden="true"> · </span>')
-        : '';
-      paramRows.push(`
-        <div class="ledger-kv is-abx">
-          <div class="ledger-labs-head">
-            <span class="ledger-k">ABX</span>
-            <button type="button" class="ledger-all-labs-btn open-abx-btn" data-id="${pt.id}">${hasAbx ? 'Manage →' : '+ Abx'}</button>
-          </div>
-          <div class="ledger-v ${hasAbx ? '' : 'muted'}">${hasAbx ? abxHtml : 'No active antibiotics'}</div>
-        </div>`);
-
-      if (pt.contingencies) {
-        paramRows.push(`
-          <div class="ledger-kv">
-            <div class="ledger-k">IF/THEN</div>
-            <div class="ledger-v">${esc(pt.contingencies)}</div>
-          </div>`);
-      }
 
       const safetyTags = [];
       if (pt.codeStatus && pt.codeStatus.toLowerCase() !== 'full code') {
@@ -2540,52 +3290,9 @@ function renderRounds() {
         ? `<div class="ledger-safety-strip">${safetyTags.join('')}</div>`
         : '';
 
-      const medsAgeSuffix =
-        pt.medicationsDate && (!pt.isUpdatedToday || pt.medicationsDate !== pt.latestDate)
-          ? ` (${formatShortStatusDate(pt.medicationsDate)})`
-          : '';
-      const medsAccordion = pt.medications && pt.medications.length
-        ? `<details class="ledger-accordion">
-            <summary>
-              <span class="acc-title">Medications${esc(medsAgeSuffix)}</span>
-              <span class="acc-right"><span class="acc-count">${pt.medications.length}</span>${uiIcon('chevron-right')}</span>
-            </summary>
-            <ul class="ledger-meds-list">${pt.medications.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
-          </details>`
-        : '';
-
-      const planGroups = Array.isArray(pt.servicePlanGroups) ? pt.servicePlanGroups : [];
-      const planCount = planGroups.length || (pt.servicePlans ? pt.servicePlans.length : 0);
-      const planTitle = PLAN_MODES[currentPlanMode]?.label || 'Service Plans';
-      const plansContent = planGroups.length
-        ? `<div class="ledger-plans-grid">${planGroups
-            .map(
-              (g) => `<div class="ledger-plan-tag">${esc(g.tag)}</div><div class="ledger-plan-txt">${esc(g.text)}</div>`
-            )
-            .join('')}</div>`
-        : `<ul class="ledger-meds-list">${(pt.servicePlans || []).map((pl) => `<li>${esc(pl)}</li>`).join('')}</ul>`;
-      const plansAccordion = planCount
-        ? `<details class="ledger-accordion">
-            <summary>
-              <span class="acc-title">${esc(planTitle)}</span>
-              <span class="acc-right"><span class="acc-count">${planCount}</span>${uiIcon('chevron-right')}</span>
-            </summary>
-            ${plansContent}
-          </details>`
-        : '';
-
-      const openPendingCount = pt.pending.filter((p) => !p.checked).length;
-      const pendingItemsHtml = pt.pending.length
-        ? pt.pending
-            .map(
-              (item) => `
-          <label class="pending-line ${item.checked ? 'done' : ''}">
-            <input type="checkbox" class="pending-check" data-note-id="${pt.id}" data-task="${esc(item.text)}" ${item.checked ? 'checked' : ''}>
-            <span>${esc(item.text)}</span>
-          </label>`
-            )
-            .join('')
-        : '';
+      const bodyHtml = isExpanded
+        ? `<div class="ledger-body">${renderRoundsLedgerBodyHtml(pt)}</div>`
+        : `<div class="ledger-body" data-lazy-body="1"></div>`;
 
       return `
       <article class="ledger-row ${isUnstable ? 'severity-unstable' : isStale ? 'is-overdue' : ''} ${isExpanded ? 'expanded' : ''}" data-id="${pt.id}">
@@ -2612,59 +3319,16 @@ function renderRounds() {
             <button type="button" class="ghost-action shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
             <button type="button" class="ghost-action copy-update-btn" data-id="${pt.id}">${uiIcon('copy')}<span>Copy</span></button>
             <div class="row-more-wrap">
-              <button type="button" class="ghost-action row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
-              <div class="popover-menu row-more-menu" role="menu" hidden>
-                <button type="button" class="popover-menu-item open-chart-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pencil')}<span>Open Chart</span></button>
-                <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
-                <button type="button" class="popover-menu-item open-abx-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pill')}<span>Antibiotics</span></button>
-                <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
-                <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
-              </div>
+              <button type="button" class="ghost-action row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-controls="rowActionMenu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
             </div>
           </div>
           <button type="button" class="ledger-chevron-btn" data-toggle-row-id="${pt.id}" aria-label="Expand ${esc(pt.name)}">${uiIcon('chevron-down')}</button>
         </div>
 
-        <div class="ledger-body">
-          ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
-          ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${pt.drips.split(/\s*\|\s*/).map((d) => esc(d)).join('<br>')}</span></div>` : ''}
-          <div class="ledger-params">${paramRows.join('')}</div>
-          ${medsAccordion}
-          ${plansAccordion}
-          <div class="ledger-pending">
-            <div class="ledger-pending-hdr">PENDING · ${openPendingCount}</div>
-            ${pendingItemsHtml ? `<div class="pending-items">${pendingItemsHtml}</div>` : ''}
-            <div class="pending-add-row">
-              <input type="text" class="pending-add-input" enterkeyhint="done" autocapitalize="sentences" data-note-id="${pt.id}" placeholder="+ Quick add pending item..." aria-label="Add pending task for ${esc(pt.name)}">
-            </div>
-          </div>
-          <div class="ledger-footer">
-            <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
-            <button type="button" class="ledger-btn-subtle dictate-btn" data-id="${pt.id}">${uiIcon('mic')}<span>Dictate</span></button>
-            <button type="button" class="ledger-btn-subtle shift-btn" data-id="${pt.id}">${uiIcon('plus')}<span>Add</span></button>
-            <button type="button" class="ledger-btn-icon copy-update-btn" data-id="${pt.id}" title="Copy update text" aria-label="Copy update">${uiIcon('copy')}</button>
-            <div class="row-more-wrap">
-              <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
-              <div class="popover-menu row-more-menu" role="menu" hidden>
-                <button type="button" class="popover-menu-item open-labs-btn" data-id="${pt.id}" role="menuitem">${uiIcon('flask')}<span>Lab Results</span></button>
-                <button type="button" class="popover-menu-item open-abx-btn" data-id="${pt.id}" role="menuitem">${uiIcon('pill')}<span>Antibiotics</span></button>
-                <button type="button" class="popover-menu-item calc-btn" data-id="${pt.id}" role="menuitem">${uiIcon('calc')}<span>Calculators</span></button>
-                <button type="button" class="popover-menu-item pitch-btn" data-id="${pt.id}" role="menuitem">${uiIcon('ai-brain')}<span>Bedside Pitch</span></button>
-              </div>
-            </div>
-          </div>
-        </div>
+        ${bodyHtml}
       </article>`;
     })
     .join('') + loadMoreHtml;
-
-  const roundsLoadMoreBtn = $('roundsLoadMoreBtn');
-  if (roundsLoadMoreBtn) {
-    roundsLoadMoreBtn.onclick = () => {
-      roundsRenderLimit += ROUNDS_PAGE_SIZE;
-      renderRounds();
-    };
-  }
 
   if (footerSummary) {
     const duty = getDutyDateStrings(new Date(), shiftSchedule);
@@ -2674,171 +3338,6 @@ function renderRounds() {
       : `${filteredEntries.length}`;
     footerSummary.textContent = `${shownLabel} SHOWN · ${summary.updatedTodayCount}/${summary.activeParsed.length} UPDATED FOR ${shiftUpper}`;
   }
-
-  // Wire row expand/collapse & inline AP toggle
-  const toggleRow = (id) => {
-    if (!id) return;
-    closeAllMenus();
-    const row = container.querySelector(`.ledger-row[data-id="${CSS.escape(id)}"]`);
-    const next = !expandedRowIds.has(id);
-    if (next) expandedRowIds.add(id);
-    else expandedRowIds.delete(id);
-    if (row) row.classList.toggle('expanded', next);
-    const head = row?.querySelector('.ledger-head[data-toggle-row-id]');
-    if (head) head.setAttribute('aria-expanded', String(next));
-  };
-
-  container.querySelectorAll('.ledger-head[data-toggle-row-id]').forEach((headEl) => {
-    headEl.onclick = (e) => {
-      if (e.target.closest('.ap-more-btn, button, a')) return;
-      toggleRow(headEl.dataset.toggleRowId);
-    };
-    headEl.onkeydown = (e) => {
-      if (e.target.closest('.ap-more-btn, button, a')) return;
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        toggleRow(headEl.dataset.toggleRowId);
-      }
-    };
-  });
-
-  container.querySelectorAll('.ledger-chevron-btn[data-toggle-row-id]').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      toggleRow(btn.dataset.toggleRowId);
-    };
-  });
-
-  container.querySelectorAll('.ap-more-btn[data-ap-id]').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.apId;
-      if (!id) return;
-      expandedApIds.add(id);
-      renderRounds();
-    };
-  });
-
-  container.querySelectorAll('.row-more-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const menu = btn.parentElement?.querySelector('.row-more-menu');
-      if (!menu) return;
-      const willOpen = menu.hidden;
-      closeAllMenus();
-      if (!willOpen) return;
-      menu.classList.remove('align-right', 'open-up');
-      menu.hidden = false;
-      btn.setAttribute('aria-expanded', 'true');
-      const btnRect = btn.getBoundingClientRect();
-      const menuRect = menu.getBoundingClientRect();
-      if (btnRect.left + menuRect.width > window.innerWidth - 12) {
-        menu.classList.add('align-right');
-      }
-      const bottomLimit = window.innerHeight - (window.innerWidth <= 820 ? 68 : 16);
-      if (btnRect.bottom + menuRect.height + 8 > bottomLimit) {
-        menu.classList.add('open-up');
-      }
-    };
-  });
-
-  // Wire row actions
-  async function openPatientLabsTab(id) {
-    if (!id) return;
-    closeAllMenus();
-    await select(id);
-    setEditorView('labs');
-    await setMode('editor');
-    requestAnimationFrame(() => {
-      const bar = document.querySelector('#editorSection .editor-view-bar');
-      if (bar && typeof bar.scrollIntoView === 'function') {
-        bar.scrollIntoView({ behavior: 'auto', block: 'start' });
-      } else {
-        window.scrollTo(0, 0);
-      }
-    });
-  }
-
-  container.querySelectorAll('.dictate-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      openDictateModal(btn.dataset.id, btn);
-    };
-  });
-
-  container.querySelectorAll('.open-chart-btn').forEach((btn) => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      await select(btn.dataset.id);
-      await setMode('editor');
-    };
-  });
-
-  container.querySelectorAll('.open-labs-btn').forEach((btn) => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      await openPatientLabsTab(btn.dataset.id);
-    };
-  });
-
-  container.querySelectorAll('.open-abx-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      openAbxModal(btn.dataset.id, btn);
-    };
-  });
-
-  container.querySelectorAll('.shift-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      openShiftModal(btn.dataset.id, btn);
-    };
-  });
-
-  container.querySelectorAll('.copy-update-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      const note = notes.find((n) => n.id === btn.dataset.id);
-      if (note) copyUpdateTextForContent(note.content, note);
-    };
-  });
-
-  container.querySelectorAll('.calc-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      openCalcModal(btn.dataset.id, 'audit', btn);
-    };
-  });
-
-  container.querySelectorAll('.pitch-btn').forEach((btn) => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      closeAllMenus();
-      openPitchModal(btn.dataset.id, PITCH_PRESETS[0].prompt, btn);
-    };
-  });
-
-  container.querySelectorAll('.pending-check').forEach((chk) => {
-    chk.onchange = async (e) => {
-      await handleTogglePending(e.target.dataset.noteId, e.target.dataset.task, e.target.checked);
-    };
-  });
-
-  container.querySelectorAll('.pending-add-input').forEach((inp) => {
-    inp.onkeydown = async (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const val = inp.value.trim();
-        if (val) await handleQuickAddPending(inp.dataset.noteId, val);
-      }
-    };
-  });
 }
 
 function updateCensusStats(parsed) {
@@ -4268,21 +4767,24 @@ async function generatePitchInModal() {
 
 async function loadSampleCensus() {
   const samples = getSyntheticCensusData();
-  const existingSamples = samples.filter((s) => notes.some((n) => n.id === s.id));
+  const existingIds = new Set(notes.map((n) => n?.id).filter(Boolean));
+  const existingCount = samples.filter((s) => existingIds.has(s.id)).length;
   let overwriteExisting = true;
-  if (existingSamples.length > 0) {
+  if (existingCount > 0) {
     overwriteExisting = confirm(
-      `${existingSamples.length} sample patient chart(s) already exist locally. Overwrite them with fresh synthetic defaults? (Cancel imports only missing sample charts.)`
+      `${existingCount} sample patient chart(s) already exist locally. Overwrite them with fresh synthetic defaults? (Cancel imports only missing sample charts.)`
     );
   }
-  let count = 0;
+  const toPut = [];
   for (const s of samples) {
-    if (!overwriteExisting && notes.some((n) => n.id === s.id)) continue;
-    await put(s);
-    count++;
+    if (!overwriteExisting && existingIds.has(s.id)) continue;
+    toPut.push({ ...s });
   }
-  await refresh();
-  toast(count ? `${count} synthetic patient(s) loaded for practice rounds` : 'No existing sample charts overwritten');
+  if (toPut.length) {
+    await putManyNotesInBatches(toPut);
+    await refresh();
+  }
+  toast(toPut.length ? `${toPut.length} synthetic patient(s) loaded for practice rounds` : 'No existing sample charts overwritten');
 }
 
 async function newNoteAndEdit(triggerEl = null) {
@@ -4301,7 +4803,10 @@ function loadScratchNotes() {
   }
 }
 
+let scratchMutationSeq = 0;
+
 function saveScratchNotes() {
+  scratchMutationSeq++;
   safeSetItem(SCRATCH_KEY, JSON.stringify(scratchNotes));
 }
 
@@ -4443,9 +4948,14 @@ function updateScratchFilterChipCounts() {
   });
 }
 
-function renderScratchNotes() {
+function renderScratchNotes({ skipIfClean = false } = {}) {
   const grid = $('scratchGrid');
   if (!grid) return;
+  const sig = `${scratchMutationSeq}|${scratchFilter}|${scratchSearch}|${currentId || ''}|${notesMutationSeq}`;
+  if (skipIfClean && lastScratchRenderSig === sig && grid.childElementCount > 0) {
+    return;
+  }
+  lastScratchRenderSig = sig;
   updateScratchFilterChipCounts();
 
   if (!scratchNotes.length) {
@@ -4615,18 +5125,38 @@ function renderScratchNotes() {
 }
 
 /* ---------- dump-to-chart inbox & lab trending ---------- */
+const MAX_FILED_INBOX_HISTORY = 50;
+
+function pruneFiledInboxItems(items = [], maxFiled = MAX_FILED_INBOX_HISTORY) {
+  if (!Array.isArray(items)) return [];
+  const filed = [];
+  for (const item of items) {
+    if (item && item.status === 'filed') filed.push(item);
+  }
+  if (filed.length <= maxFiled) return items;
+  filed.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const keepFiled = new Set(filed.slice(0, maxFiled));
+  return items.filter((item) => item && (item.status !== 'filed' || keepFiled.has(item)));
+}
+
 function loadInbox() {
   try {
     const raw = safeGetItem(INBOX_KEY, '');
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const pruned = pruneFiledInboxItems(parsed, MAX_FILED_INBOX_HISTORY);
+    if (pruned.length !== parsed.length) {
+      safeSetItem(INBOX_KEY, JSON.stringify(pruned));
+    }
+    return pruned;
   } catch {
     return [];
   }
 }
 
 function saveInbox() {
+  inboxItems = pruneFiledInboxItems(inboxItems, MAX_FILED_INBOX_HISTORY);
   safeSetItem(INBOX_KEY, JSON.stringify(inboxItems));
 }
 
@@ -6396,7 +6926,9 @@ function closeDictateModal(force = false) {
 
 /* ---------- editor notes list, navigation & selection ---------- */
 function getSortedNotesByBed() {
-  return [...notes].sort((a, b) => naturalBedCompare(getChartHeader(a).room, getChartHeader(b).room));
+  return [...getNotesIndex().allEntries]
+    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room))
+    .map((e) => e.note);
 }
 
 function getActiveEditorNotes() {
@@ -6412,14 +6944,23 @@ function getEditorNavNotes() {
   return activeNotes.length ? activeNotes : getSortedNotesByBed();
 }
 
+let lastEditorDropdownSig = '';
+
 function renderEditorPatientDropdown() {
   const dropdownEl = $('editorPatientDropdown');
   if (!dropdownEl) return;
   const activeNotes = getActiveEditorNotes();
   if (!activeNotes.length) {
+    lastEditorDropdownSig = '';
     dropdownEl.innerHTML = `<div class="editor-pt-empty">No active census patients</div>`;
     return;
   }
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  const sig = `${notesMutationSeq}|${currentId || ''}|${dayKey}`;
+  if (lastEditorDropdownSig === sig && dropdownEl.childElementCount > 0) {
+    return;
+  }
+  lastEditorDropdownSig = sig;
   dropdownEl.innerHTML = activeNotes
     .map((n) => {
       const h = getChartHeader(n);
@@ -6449,32 +6990,35 @@ function renderEditorPatientDropdown() {
     })
     .join('');
 
-  dropdownEl.querySelectorAll('.editor-pt-opt').forEach((btn) => {
-    btn.onclick = async () => {
+  if (dropdownEl.dataset.delegated !== '1') {
+    dropdownEl.dataset.delegated = '1';
+    dropdownEl.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.editor-pt-opt');
+      if (!btn) return;
       const nextId = btn.dataset.noteId;
       closeAllMenus();
       if (nextId && nextId !== currentId) {
         await select(nextId);
       }
-    };
-  });
+    });
+  }
 }
 
 function populateEditorPatientSelect() {
-  renderEditorPatientDropdown();
   const sel = $('editorPatientSelect');
-  if (!sel) return;
-  const activeNotes = getActiveEditorNotes();
-  sel.innerHTML = activeNotes.length
-    ? activeNotes
-        .map((n) => {
-          const h = getChartHeader(n);
-          return `<option value="${esc(n.id)}">${esc(h.room || 'Unassigned')} · ${esc(h.name)}</option>`;
-        })
-        .join('')
-    : '<option value="">No active charts</option>';
-  if (currentId && activeNotes.some((n) => n.id === currentId)) {
-    sel.value = currentId;
+  if (sel) {
+    const activeNotes = getActiveEditorNotes();
+    sel.innerHTML = activeNotes.length
+      ? activeNotes
+          .map((n) => {
+            const h = getChartHeader(n);
+            return `<option value="${esc(n.id)}">${esc(h.room || 'Unassigned')} · ${esc(h.name)}</option>`;
+          })
+          .join('')
+      : '<option value="">No active charts</option>';
+    if (currentId && activeNotes.some((n) => n.id === currentId)) {
+      sel.value = currentId;
+    }
   }
 
   const navNotes = getEditorNavNotes();
@@ -6499,6 +7043,10 @@ function updateEditorEmptyAndNav() {
 function renderLibraryFilterChips() {
   const host = $('libraryFilterChips');
   if (!host) return;
+  const sig = `${libraryFilter}|${customCategories.join('\u0001')}`;
+  if (host.dataset.chipsSig === sig && host.childElementCount > 0) return;
+  host.dataset.chipsSig = sig;
+
   const mkChip = (key, label) => {
     const isAct = libraryFilter === key;
     return `<button type="button" class="chip ${isAct ? 'active' : ''}" data-lib-filter="${esc(key)}" aria-pressed="${isAct}">${label}</button>`;
@@ -6522,21 +7070,121 @@ function renderLibraryFilterChips() {
     mkChip('discharged', 'Discharged'),
   ].join('');
 
-  host.querySelectorAll('.chip[data-lib-filter]').forEach((chip) => {
-    chip.onclick = () => {
-      libraryFilter = chip.dataset.libFilter || 'all';
-      libraryRenderLimit = LIBRARY_PAGE_SIZE;
-      renderLibraryFilterChips();
-      renderList();
-    };
-  });
-  host.querySelectorAll('.chip-del-btn[data-del-cat]').forEach((btn) => {
-    btn.onclick = () => removeCustomCategory(btn.dataset.delCat);
+  if (host.dataset.delegated !== '1') {
+    host.dataset.delegated = '1';
+    host.addEventListener('click', (e) => {
+      const delBtn = e.target.closest('.chip-del-btn[data-del-cat]');
+      if (delBtn) {
+        removeCustomCategory(delBtn.dataset.delCat);
+        return;
+      }
+      const chip = e.target.closest('.chip[data-lib-filter]');
+      if (chip) {
+        libraryFilter = chip.dataset.libFilter || 'all';
+        libraryRenderLimit = LIBRARY_PAGE_SIZE;
+        renderLibraryFilterChips();
+        renderList();
+      }
+    });
+  }
+}
+
+function renderLibraryRowHtml(n, header) {
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  const parsedHit = parsedChartCache.get(n.id);
+  const cachedParsed =
+    parsedHit && parsedHit.sig === `${dayKey}|${makeChartCacheSig(n)}` ? parsedHit.parsed : null;
+  const openTasks = cachedParsed
+    ? (cachedParsed.pending || []).filter((t) => !t.checked).length
+    : getLightweightOpenPendingCount(n);
+  const badge = !header.isCensus && !header.isCharity
+    ? '<span class="status-meta">Discharged</span>'
+    : header.isCharity
+      ? '<span class="status-tag charity">Charity</span>'
+      : '<span class="status-meta safe">Active</span>';
+  const extraBadges = (header.categories || [])
+    .filter((c) => !(header.isCharity && c.toLowerCase() === 'charity'))
+    .map((c) => `<span class="status-tag category">${esc(c)}</span>`)
+    .join('');
+  const dxStr = (cachedParsed && cachedParsed.assessment) || header.assessment || '';
+  const dxPreview = dxStr ? ` · ${esc(dxStr.slice(0, 64))}${dxStr.length > 64 ? '…' : ''}` : '';
+  const bedLabel = header.room ? formatRoomLabel(header.room) : '—';
+  const displayName = header.name || n.title || 'Untitled';
+  return `
+    <div class="item ${n.id === currentId ? 'active' : ''}">
+      <button type="button" class="item-main-btn" data-id="${n.id}">
+        <span class="item-main-head">
+          <span class="ledger-bed">${esc(bedLabel)}</span>
+          <span class="lib-item-name">${esc(displayName)}</span>
+        </span>
+        <small>${openTasks} open${dxPreview} · ${formatShortLocaleDate(n.updated)}</small>
+      </button>
+      <div class="item-row-actions">
+        ${badge}
+        ${extraBadges}
+        <button type="button" class="ghost-action lib-toggle-census-btn" data-id="${n.id}" title="${header.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${header.isCensus ? 'Discharge' : 'Readmit'}</button>
+      </div>
+    </div>`;
+}
+
+function ensureNoteListDelegation(listEl) {
+  if (!listEl || listEl.dataset.delegated === '1') return;
+  listEl.dataset.delegated = '1';
+  listEl.addEventListener('click', async (e) => {
+    const moreBtn = e.target.closest('#libraryLoadMoreBtn');
+    if (moreBtn) {
+      const prevLimit = libraryRenderLimit;
+      libraryRenderLimit += LIBRARY_PAGE_SIZE;
+      renderList({ appendFrom: prevLimit });
+      return;
+    }
+    const emptyNew = e.target.closest('#libEmptyNewBtn');
+    if (emptyNew) {
+      openAdmitModal({ mode: 'new', triggerEl: emptyNew });
+      return;
+    }
+    const emptySample = e.target.closest('#libEmptySampleBtn');
+    if (emptySample) {
+      loadSampleCensus();
+      return;
+    }
+    const mainBtn = e.target.closest('.item-main-btn');
+    if (mainBtn) {
+      await select(mainBtn.dataset.id);
+      await setMode('editor');
+      return;
+    }
+    const toggleBtn = e.target.closest('.lib-toggle-census-btn');
+    if (toggleBtn) {
+      const note = getNoteById(toggleBtn.dataset.id) || notes.find((x) => x.id === toggleBtn.dataset.id);
+      if (!note) return;
+      const h = getChartHeader(note);
+      note.content = syncFrontmatter(note.content, { census: !h.isCensus });
+      note.updated = Date.now();
+      await put(note);
+      if (currentId === note.id) {
+        $('noteText').value = note.content;
+        populateProfileInputs(note, note.content, true);
+        lastSavedChartContent = note.content;
+      }
+      syncSingleNoteInMemory(note);
+      toast(!h.isCensus ? 'Patient readmitted to active census' : 'Patient marked Discharged (retained locally)');
+    }
   });
 }
 
-function renderList() {
+function renderList({ appendFrom = 0, skipIfClean = false } = {}) {
   renderLibraryFilterChips();
+  const listEl = $('noteList');
+  if (!listEl) return;
+  ensureNoteListDelegation(listEl);
+
+  const sig = `${notesMutationSeq}|${libraryFilter}|${librarySortMode}|${librarySearchQuery}|${libraryRenderLimit}|${currentId || ''}|${customCategories.join('\u0001')}`;
+  if (skipIfClean && appendFrom === 0 && lastLibraryRenderSig === sig && listEl.childElementCount > 0) {
+    return;
+  }
+  lastLibraryRenderSig = sig;
+
   const q = librarySearchQuery.trim().toLowerCase();
   const enriched = getNotesIndex().allEntries;
 
@@ -6552,25 +7200,29 @@ function renderList() {
   });
 
   if (q) {
+    const escapedQ = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const contentRe = new RegExp(escapedQ, 'i');
     visible = visible.filter(({ note, header }) => {
       const fastHay = `${note.title || ''}\n${header.name}\n${header.room}\n${header.assessment}\n${header.ap || ''}\n${header.service || ''}`.toLowerCase();
       if (fastHay.includes(q)) return true;
-      return String(note.content || '').toLowerCase().includes(q);
+      return contentRe.test(note.content || '');
     });
   }
 
-  visible.sort((a, b) => {
-    if (librarySortMode === 'bed') {
-      return naturalBedCompare(a.header.room, b.header.room);
-    }
-    if (librarySortMode === 'name') {
-      return (a.header.name || '').localeCompare(b.header.name || '');
-    }
-    return (b.note.updated || 0) - (a.note.updated || 0);
-  });
-
-  const listEl = $('noteList');
-  if (!listEl) return;
+  if (librarySortMode === 'bed') {
+    visible.sort((a, b) => {
+      const rA = a.header.room || '';
+      const rB = b.header.room || '';
+      if (rA === rB) return 0;
+      return naturalBedCompare(rA, rB);
+    });
+  } else if (librarySortMode === 'name') {
+    visible.sort((a, b) => {
+      const nA = a.header.name || '';
+      const nB = b.header.name || '';
+      return sharedNameCollator ? sharedNameCollator.compare(nA, nB) : nA.localeCompare(nB);
+    });
+  }
 
   if (!notes.length) {
     listEl.innerHTML = `
@@ -6581,8 +7233,6 @@ function renderList() {
           <button type="button" id="libEmptySampleBtn" class="btn-secondary">${uiIcon('sparkles')} Load Sample Census</button>
         </div>
       </div>`;
-    if ($('libEmptyNewBtn')) $('libEmptyNewBtn').onclick = () => openAdmitModal({ mode: 'new', triggerEl: $('libEmptyNewBtn') });
-    if ($('libEmptySampleBtn')) $('libEmptySampleBtn').onclick = loadSampleCensus;
     return;
   }
 
@@ -6600,80 +7250,26 @@ function renderList() {
       </div>`
     : '';
 
-  listEl.innerHTML = pageItems
-    .map(({ note: n, header }) => {
-      const parsed = getParsedChart(n);
-      const openTasks = parsed.pending.filter((t) => !t.checked).length;
-      const badge = !header.isCensus && !header.isCharity
-        ? '<span class="status-meta">Discharged</span>'
-        : header.isCharity
-          ? '<span class="status-tag charity">Charity</span>'
-          : '<span class="status-meta safe">Active</span>';
-      const extraBadges = (header.categories || [])
-        .filter((c) => !(header.isCharity && c.toLowerCase() === 'charity'))
-        .map((c) => `<span class="status-tag category">${esc(c)}</span>`)
-        .join('');
-      const dxStr = parsed.assessment || header.assessment || '';
-      const dxPreview = dxStr ? ` · ${esc(dxStr.slice(0, 64))}${dxStr.length > 64 ? '…' : ''}` : '';
-      const bedLabel = header.room ? formatRoomLabel(header.room) : '—';
-      const displayName = header.name || n.title || 'Untitled';
-      return `
-        <div class="item ${n.id === currentId ? 'active' : ''}">
-          <button type="button" class="item-main-btn" data-id="${n.id}">
-            <span class="item-main-head">
-              <span class="ledger-bed">${esc(bedLabel)}</span>
-              <span class="lib-item-name">${esc(displayName)}</span>
-            </span>
-            <small>${openTasks} open${dxPreview} · ${new Date(n.updated).toLocaleDateString()}</small>
-          </button>
-          <div class="item-row-actions">
-            ${badge}
-            ${extraBadges}
-            <button type="button" class="ghost-action lib-toggle-census-btn" data-id="${n.id}" title="${header.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${header.isCensus ? 'Discharge' : 'Readmit'}</button>
-          </div>
-        </div>`;
-    })
-    .join('') + loadMoreHtml;
-
-  const libMoreBtn = $('libraryLoadMoreBtn');
-  if (libMoreBtn) {
-    libMoreBtn.onclick = () => {
-      libraryRenderLimit += LIBRARY_PAGE_SIZE;
-      renderList();
-    };
+  if (appendFrom > 0 && appendFrom < pageItems.length && listEl.querySelector('.item')) {
+    listEl.querySelector('.list-load-more-row')?.remove();
+    const chunkHtml = pageItems
+      .slice(appendFrom)
+      .map(({ note: n, header }) => renderLibraryRowHtml(n, header))
+      .join('');
+    listEl.insertAdjacentHTML('beforeend', chunkHtml + loadMoreHtml);
+    return;
   }
 
-  listEl.querySelectorAll('.item-main-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      await select(btn.dataset.id);
-      await setMode('editor');
-    };
-  });
-
-  listEl.querySelectorAll('.lib-toggle-census-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const note = notes.find((x) => x.id === btn.dataset.id);
-      if (!note) return;
-      const h = getChartHeader(note);
-      note.content = syncFrontmatter(note.content, { census: !h.isCensus });
-      note.updated = Date.now();
-      await put(note);
-      if (currentId === note.id) {
-        $('noteText').value = note.content;
-        populateProfileInputs(note, note.content, true);
-        lastSavedChartContent = note.content;
-      }
-      syncSingleNoteInMemory(note);
-      toast(!h.isCensus ? 'Patient readmitted to active census' : 'Patient marked Discharged (retained locally)');
-    };
-  });
+  listEl.innerHTML =
+    pageItems.map(({ note: n, header }) => renderLibraryRowHtml(n, header)).join('') + loadMoreHtml;
 }
 
 async function refresh() {
   notes = await all();
+  notesMutationSeq++;
   invalidateNotesIndex();
   pruneChartCaches(notes);
-  syncCategoriesFromNotes(notes);
+  getNotesIndex();
   updateBackupReminderUi();
   updateVaultUi();
   if (currentMode === 'library') {
@@ -6688,15 +7284,26 @@ async function refresh() {
 function syncSingleNoteInMemory(updatedNote, { skipUi = false } = {}) {
   if (!updatedNote?.id) return;
   const idx = notes.findIndex((n) => n.id === updatedNote.id);
-  if (idx > 0) {
-    notes.splice(idx, 1);
+  if (idx !== -1) notes.splice(idx, 1);
+
+  let targetIdx = 0;
+  const upd = updatedNote.updated || 0;
+  if (!notes.length || upd >= (notes[0]?.updated || 0)) {
     notes.unshift(updatedNote);
-  } else if (idx === 0) {
-    notes[0] = updatedNote;
+    targetIdx = 0;
   } else {
-    notes.unshift(updatedNote);
+    let lo = 0;
+    let hi = notes.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if ((notes[mid]?.updated || 0) >= upd) lo = mid + 1;
+      else hi = mid;
+    }
+    targetIdx = lo;
+    notes.splice(targetIdx, 0, updatedNote);
   }
-  invalidateNotesIndex();
+
+  patchNoteInIndex(updatedNote, targetIdx);
   syncCategoriesFromNotes([updatedNote]);
   updateBackupReminderUi();
   updateVaultUi();
@@ -6717,7 +7324,8 @@ function removeNoteInMemory(noteId, { skipUi = false } = {}) {
   if (idx !== -1) notes.splice(idx, 1);
   chartHeaderCache.delete(noteId);
   parsedChartCache.delete(noteId);
-  invalidateNotesIndex();
+  explorerPendingCountCache.delete(noteId);
+  removeNoteFromIndex(noteId);
   updateBackupReminderUi();
   updateVaultUi();
   if (!skipUi) {
@@ -6817,6 +7425,7 @@ async function removeCustomCategory(catName) {
   saveCustomCategories();
   currentChartCategories = currentChartCategories.filter((c) => c.toLowerCase() !== targetLower);
 
+  const modifiedNotes = [];
   for (const n of affectedNotes) {
     const sourceContent =
       currentId === n.id && currentMode === 'editor' ? $('noteText').value : n.content;
@@ -6824,7 +7433,7 @@ async function removeCustomCategory(catName) {
     if (res.modified) {
       n.content = res.text;
       n.updated = Date.now();
-      await put(n);
+      modifiedNotes.push(n);
       if (currentId === n.id) {
         $('noteText').value = n.content;
         lastSavedChartContent = n.content;
@@ -6832,6 +7441,12 @@ async function removeCustomCategory(catName) {
         updateSaveStatusPill('saved');
         populateProfileInputs(n, n.content, true);
       }
+    }
+  }
+  if (modifiedNotes.length) {
+    await putManyNotesInBatches(modifiedNotes);
+    if (vaultDirHandle && vaultPermission === 'granted') {
+      runVaultSync({ interactive: false }).catch(() => {});
     }
   }
   if (currentId && !affectedNotes.some((a) => a.id === currentId)) {
@@ -6915,6 +7530,7 @@ function setPatientInfoTab(tab = 'demo') {
 
 function openPatientInfoModal(tab = 'demo', triggerEl = null, focusEl = null) {
   if (!currentId) return toast('Select or create a patient chart first');
+  flushStaleProfileInputsFromRaw();
   updateProfileSummary();
   setPatientInfoTab(tab);
   openModalEl($('patientInfoModal'), triggerEl || $('editorPatientMetaBtn'), focusEl);
@@ -7047,11 +7663,15 @@ function renderProfileAbxList() {
 }
 
 function populateProfileInputs(note = {}, content = '', preserveAliases = false) {
+  profileInputsStaleFromRaw = false;
   if (!preserveAliases) {
     resetProfileAbxForm();
   }
   const m = metaOf(content);
-  const parsed = parseChart(content, note);
+  const parsed =
+    note && note.id && typeof content === 'string' && content === note.content
+      ? getParsedChart(note)
+      : parseChart(content, note);
   const derivedName = parsed.name && parsed.name !== 'Unknown Patient' ? parsed.name : '';
   const derivedRoom = parsed.room && parsed.room !== 'Unassigned' ? parsed.room : '';
   $('nameInput').value = m.name || m.patient || note.name || derivedName;
@@ -7231,8 +7851,7 @@ function setEditorView(mode) {
   $('editorRawTab').setAttribute('aria-pressed', String(mode === 'raw'));
 
   if (mode === 'timeline' || mode === 'labs') {
-    const note = notes.find((n) => n.id === currentId) || {};
-    populateProfileInputs(note, $('noteText').value, true);
+    flushStaleProfileInputsFromRaw();
     refreshActiveEditorView();
   }
 }
@@ -7247,10 +7866,23 @@ function buildLabExportSlug(patient = {}) {
   return base || 'patient';
 }
 
+let chartLabSummaryCache = null;
+
 function getCurrentChartLabSummary() {
   const note = notes.find((n) => n.id === currentId) || {};
   const content = $('noteText').value || '';
-  return extractChartLabSummary(content, note, { unitSystem: currentUnitSystem });
+  const metaSig = `${note.id || ''}|${note.name || ''}|${note.room || ''}|${note.updated || 0}`;
+  if (
+    chartLabSummaryCache &&
+    chartLabSummaryCache.metaSig === metaSig &&
+    chartLabSummaryCache.unitSystem === currentUnitSystem &&
+    chartLabSummaryCache.content === content
+  ) {
+    return chartLabSummaryCache.summary;
+  }
+  const summary = extractChartLabSummary(content, note, { unitSystem: currentUnitSystem });
+  chartLabSummaryCache = { metaSig, content, unitSystem: currentUnitSystem, summary };
+  return summary;
 }
 
 function renderFishboneCell(slot, extraCls = '') {
@@ -7734,6 +8366,9 @@ function syncEditorSidebarFluidBalance(content) {
   return cumFb;
 }
 
+const TIMELINE_DAYS_PAGE_SIZE = 12;
+let timelineDateGroupLimit = TIMELINE_DAYS_PAGE_SIZE;
+
 function setTimelineSearchOpen(open, { clear = false, focus = false } = {}) {
   const wrap = $('timelineSearchWrap');
   const btn = $('timelineSearchToggleBtn');
@@ -7745,6 +8380,8 @@ function setTimelineSearchOpen(open, { clear = false, focus = false } = {}) {
     btn.classList.toggle('is-active', isOpen || Boolean(timelineSearchQuery.trim()));
   }
   if (clear) {
+    clearTimeout(timelineSearchTimer);
+    timelineSearchTimer = null;
     const hadQuery = Boolean(timelineSearchQuery);
     timelineSearchQuery = '';
     if (inp) inp.value = '';
@@ -7927,9 +8564,31 @@ function renderChartTimeline() {
 
   const cumFbBannerHtml = buildCumFbCardHtml(cumFb);
 
+  let renderedGroups = visibleGroups;
+  let remainingDays = 0;
+  if (timelineDateFilter === 'all' && !q) {
+    if (editingTimelineKey) {
+      const editDate = editingTimelineKey.split('::')[0];
+      const editGroupIdx = visibleGroups.findIndex((g) => g.date === editDate);
+      if (editGroupIdx >= timelineDateGroupLimit) {
+        timelineDateGroupLimit = editGroupIdx + 1;
+      }
+    }
+    if (visibleGroups.length > timelineDateGroupLimit) {
+      renderedGroups = visibleGroups.slice(0, timelineDateGroupLimit);
+      remainingDays = visibleGroups.length - renderedGroups.length;
+    }
+  }
+  const olderDaysHtml = remainingDays > 0
+    ? `<div class="list-load-more-row">
+        <span class="cf-meta">Showing latest ${renderedGroups.length} of ${visibleGroups.length} days</span>
+        <button type="button" id="timelineShowOlderDaysBtn" class="btn-secondary">Show older days (${remainingDays} remaining)</button>
+      </div>`
+    : '';
+
   const shiftLookup = new Map();
 
-  listEl.innerHTML = cumFbBannerHtml + visibleGroups
+  listEl.innerHTML = cumFbBannerHtml + renderedGroups
     .map((g) => {
       const cardsHtml = g.shifts
         .map((s) => {
@@ -8093,7 +8752,15 @@ function renderChartTimeline() {
           ${cardsHtml}
         </div>`;
     })
-    .join('');
+    .join('') + olderDaysHtml;
+
+  const olderDaysBtn = $('timelineShowOlderDaysBtn');
+  if (olderDaysBtn) {
+    olderDaysBtn.onclick = () => {
+      timelineDateGroupLimit = Infinity;
+      renderChartTimeline();
+    };
+  }
 
   listEl.querySelectorAll('.tl-edit-btn').forEach((btn) => {
     btn.onclick = () => {
@@ -8123,23 +8790,23 @@ function renderChartTimeline() {
     if (rowEl) rowEl.hidden = !fb;
   };
 
-  const syncTimelineGuidedToMarkdown = (card) => {
+  const syncTimelineGuidedToMarkdown = (card, { immediate = false } = {}) => {
     if (!card || !timelineEditDraft) return;
-    const ta = card.querySelector('.tl-edit-textarea');
-    const saveBtn = card.querySelector('.tl-save-entry-btn');
-    const meta = saveBtn
-      ? resolveTimelineEditMeta(card, saveBtn.dataset.date, saveBtn.dataset.origShift)
-      : { nextShift: '' };
     syncTlGuidedFbDisplay(card);
-    if (ta) {
-      ta.value = serializeEditedShiftBlock(timelineEditDraft.fields, {
-        isInterim: isInterimShift(meta.nextShift),
-        planMode: currentPlanMode,
-      });
-    }
     timelineEditDraft.guidedDirty = true;
     timelineEditDraft.rawDirty = false;
-    markChartDirty();
+    dirtyChart = true;
+    updateSaveStatusPill('unsaved');
+    markCompanionStale();
+    if (immediate) {
+      flushTimelineGuidedSync();
+    } else {
+      clearTimeout(timelineGuidedSerializeTimer);
+      timelineGuidedSerializeTimer = setTimeout(() => {
+        timelineGuidedSerializeTimer = null;
+        flushTimelineGuidedSync();
+      }, 150);
+    }
   };
 
   const bindTlPendingRows = (card) => {
@@ -8154,7 +8821,7 @@ function renderChartTimeline() {
         chk.onchange = () => {
           if (timelineEditDraft.fields.pending[idx]) {
             timelineEditDraft.fields.pending[idx].checked = chk.checked;
-            syncTimelineGuidedToMarkdown(card);
+            syncTimelineGuidedToMarkdown(card, { immediate: true });
           }
         };
       }
@@ -8171,7 +8838,7 @@ function renderChartTimeline() {
           timelineEditDraft.fields.pending.splice(idx, 1);
           listHost.innerHTML = renderTlPendingEditRowsHtml(timelineEditDraft.fields.pending);
           bindTlPendingRows(card);
-          syncTimelineGuidedToMarkdown(card);
+          syncTimelineGuidedToMarkdown(card, { immediate: true });
         };
       }
     });
@@ -8286,11 +8953,15 @@ function renderChartTimeline() {
     const rawTa = card.querySelector('.tl-edit-textarea');
     if (rawTa) {
       rawTa.addEventListener('input', () => {
+        clearTimeout(timelineGuidedSerializeTimer);
+        timelineGuidedSerializeTimer = null;
         if (timelineEditDraft) {
           timelineEditDraft.rawDirty = true;
           timelineEditDraft.guidedDirty = false;
         }
-        markChartDirty();
+        dirtyChart = true;
+        updateSaveStatusPill('unsaved');
+        markCompanionStale();
       });
     }
   });
@@ -8301,7 +8972,9 @@ function renderChartTimeline() {
       const card = shiftCard?.querySelector('.timeline-inline-edit');
       const nextMode = btn.dataset.tlMode === 'raw' ? 'raw' : 'guided';
       if (nextMode === timelineEditMode) return;
-      if (nextMode === 'guided' && timelineEditDraft?.rawDirty) {
+      if (nextMode === 'raw') {
+        flushTimelineGuidedSync();
+      } else if (nextMode === 'guided' && timelineEditDraft?.rawDirty) {
         const ta = card?.querySelector('.tl-edit-textarea');
         if (ta) {
           timelineEditDraft.fields = parseShiftBlockForEdit(ta.value);
@@ -8348,9 +9021,10 @@ function renderChartTimeline() {
       if (badge) badge.textContent = nextShift;
       if (meta) meta.textContent = `Edit · ${nextDate}`;
       if (timelineEditDraft?.guidedDirty) {
-        syncTimelineGuidedToMarkdown(inlineCard);
+        syncTimelineGuidedToMarkdown(inlineCard, { immediate: true });
       } else {
-        markChartDirty();
+        dirtyChart = true;
+        updateSaveStatusPill('unsaved');
       }
     };
     el.addEventListener('change', syncMetaHeader);
@@ -8361,6 +9035,8 @@ function renderChartTimeline() {
 
   listEl.querySelectorAll('.tl-cancel-entry-btn').forEach((btn) => {
     btn.onclick = () => {
+      clearTimeout(timelineGuidedSerializeTimer);
+      timelineGuidedSerializeTimer = null;
       const ta = listEl.querySelector('.tl-edit-textarea');
       const inlineCard = btn.closest('.timeline-inline-edit');
       const saveBtn = inlineCard?.querySelector('.tl-save-entry-btn');
@@ -8401,6 +9077,7 @@ function renderChartTimeline() {
       if (!ta) return;
       const card = btn.closest('.timeline-inline-edit');
       flushTlNewPendingInput(card);
+      flushTimelineGuidedSync();
       const { nextDate, nextShift } = resolveTimelineEditMeta(
         card,
         btn.dataset.date,
@@ -8510,6 +9187,14 @@ async function select(id, opts = {}) {
   currentId = id;
   if (currentMode === 'editor') lastEditedRoundsId = id;
   clearTimeout(chartAutosaveTimer);
+  clearTimeout(timelineGuidedSerializeTimer);
+  timelineGuidedSerializeTimer = null;
+  clearTimeout(timelineSearchTimer);
+  timelineSearchTimer = null;
+  clearTimeout(rawProfileSyncTimer);
+  rawProfileSyncTimer = null;
+  profileInputsStaleFromRaw = false;
+  clearUndoCoalesce();
   dirtyChart = false;
   lastSavedChartContent = n.content || '';
   updateSaveStatusPill('saved', { silentHide: true });
@@ -8527,10 +9212,10 @@ async function select(id, opts = {}) {
   $('noteText').value = n.content;
   populateProfileInputs(n, n.content, false);
   renderAdmittingHistoryCard(n.content);
-  syncEditorSidebarFluidBalance(n.content);
   timelineDateFilter = 'all';
   timelineShiftFilter = 'all';
   timelineSearchQuery = '';
+  timelineDateGroupLimit = TIMELINE_DAYS_PAGE_SIZE;
   editingTimelineKey = null;
   timelineEditDraft = null;
   timelineEditMode = 'guided';
@@ -8556,9 +9241,11 @@ async function select(id, opts = {}) {
 
 async function undoChartEdit() {
   if (!currentId) return;
+  commitCoalescedUndoSnapshot();
   const stack = undoStacks.get(currentId);
   if (!stack || !stack.length) return;
   const prev = stack.pop();
+  clearUndoCoalesce();
   updateUndoButton();
   editingTimelineKey = null;
   timelineEditDraft = null;
@@ -8602,16 +9289,19 @@ async function newNote() {
 async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
   if (!currentId) return newNote();
   clearTimeout(chartAutosaveTimer);
+  if (!opts.silent && !opts.skipUndoPush) {
+    commitCoalescedUndoSnapshot();
+  }
   const n = notes.find((x) => x.id === currentId) || {};
   if (editorViewMode === 'timeline') {
     syncProfileInputsToMarkdown();
   } else {
-    populateProfileInputs(n, $('noteText').value, true);
+    flushStaleProfileInputsFromRaw();
   }
   const text = $('noteText').value;
   renderAdmittingHistoryCard(text);
   syncEditorSidebarFluidBalance(text);
-  if (!opts.skipUndoPush && n.content && n.content !== text) {
+  if (!opts.skipUndoPush && !undoCoalesceTimer && n.content && n.content !== text) {
     pushUndoSnapshot(currentId, n.content);
   }
   const m = metaOf(text);
@@ -8647,37 +9337,48 @@ async function saveCurrent(toastMsg = 'Saved on this device', opts = {}) {
 }
 
 async function importFiles(files) {
-  const importedIds = [];
-  for (const f of files) {
-    const text = await f.text();
-    const m = metaOf(text);
-    const derived = parseRoomAndNameFromTitle(f.name);
-    const parsedAliases = String(m.aliases || '')
-      .split(/[;,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const id = uid();
-    await put({
-      id,
-      title: f.name.replace(/\.(md|markdown|txt)$/i, ''),
-      content: text,
-      name: m.name || m.patient || derived.name || '',
-      aliases: parsedAliases,
-      room: m.room || m.bed || m.rm || derived.room || '',
-      updated: Date.now(),
-    });
-    importedIds.push(id);
+  const fileList = [...(files || [])];
+  if (!fileList.length) return;
+  const notesBatch = [];
+  const READ_CHUNK = 32;
+  for (let i = 0; i < fileList.length; i += READ_CHUNK) {
+    const chunk = fileList.slice(i, i + READ_CHUNK);
+    const texts = await Promise.all(chunk.map((f) => f.text()));
+    for (let j = 0; j < chunk.length; j++) {
+      const f = chunk[j];
+      const text = texts[j];
+      const m = metaOf(text);
+      const derived = parseRoomAndNameFromTitle(f.name);
+      const parsedAliases = String(m.aliases || '')
+        .split(/[;,]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      notesBatch.push({
+        id: uid(),
+        title: f.name.replace(/\.(md|markdown|txt)$/i, ''),
+        content: text,
+        name: m.name || m.patient || derived.name || '',
+        aliases: parsedAliases,
+        room: m.room || m.bed || m.rm || derived.room || '',
+        updated: Date.now(),
+      });
+    }
   }
+  await putManyNotesInBatches(notesBatch);
   await refresh();
-  toast(`${files.length} note(s) imported locally`);
-  if (importedIds.length === 1) {
-    await select(importedIds[0]);
+  if (vaultDirHandle && vaultPermission === 'granted' && notesBatch.length) {
+    runVaultSync({ interactive: false }).catch(() => {});
+  }
+  toast(`${fileList.length} note(s) imported locally`);
+  if (notesBatch.length === 1) {
+    await select(notesBatch[0].id);
     await setMode('editor');
   }
 }
 
 /* ---------- redaction / companion ---------- */
 function buildPreview() {
+  flushStaleProfileInputsFromRaw();
   const r = redact($('noteText').value, profile());
   lastSafe = r.text;
   $('preview').innerHTML = esc(r.text).replace(/\[PATIENT\]/g, '<mark>[PATIENT]</mark>');
@@ -8741,11 +9442,10 @@ async function send() {
 /* ---------- workspace backup & restore preview ---------- */
 async function runFullWorkspaceBackup() {
   const charts = [...notes];
-  const bundle = {
+  const headerBundle = {
     version: 2,
     app: 'Kardex',
     exportedAt: new Date().toISOString(),
-    charts,
     scratchNotes,
     captureInbox: inboxItems,
     customCategories,
@@ -8755,9 +9455,26 @@ async function runFullWorkspaceBackup() {
     templateConfig,
     rawUpdateTemplate: getSavedUpdateTemplate(),
   };
+  const headerJson = JSON.stringify(headerBundle);
+  const parts = [headerJson.slice(0, -1), ',"charts":['];
+  const CHUNK = 100;
+  for (let i = 0; i < charts.length; i += CHUNK) {
+    const end = Math.min(i + CHUNK, charts.length);
+    const chunkPieces = [];
+    for (let j = i; j < end; j++) {
+      if (j > 0) chunkPieces.push(',');
+      chunkPieces.push(JSON.stringify(charts[j]));
+    }
+    parts.push(chunkPieces.join(''));
+    if (end < charts.length) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  parts.push(']}');
+  const backupBlob = new Blob(parts, { type: 'application/json' });
   const shared = await shareOrDownload({
     filename: `kardex-workspace-${new Date().toISOString().slice(0, 10)}.json`,
-    text: JSON.stringify(bundle, null, 2),
+    blob: backupBlob,
     mimeType: 'application/json',
     title: 'Kardex Workspace Backup',
   });
@@ -8771,12 +9488,25 @@ async function runFullWorkspaceBackup() {
 async function exportAllChartsMarkdown() {
   const charts = getSortedNotesByBed();
   if (!charts.length) return toast('No patient charts to export');
-  const combined = charts
-    .map((n) => `# ${n.title || n.name || 'Chart'}\n\n${String(n.content || '').trim()}`)
-    .join('\n\n---\n\n');
+  const parts = [];
+  const CHUNK = 100;
+  for (let i = 0; i < charts.length; i += CHUNK) {
+    const end = Math.min(i + CHUNK, charts.length);
+    const chunkPieces = [];
+    for (let j = i; j < end; j++) {
+      const n = charts[j];
+      if (j > 0) chunkPieces.push('\n\n---\n\n');
+      chunkPieces.push(`# ${n.title || n.name || 'Chart'}\n\n${String(n.content || '').trim()}`);
+    }
+    parts.push(chunkPieces.join(''));
+    if (end < charts.length) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  const mdBlob = new Blob(parts, { type: 'text/markdown' });
   const shared = await shareOrDownload({
     filename: `kardex-all-charts-${new Date().toISOString().slice(0, 10)}.md`,
-    text: combined,
+    blob: mdBlob,
     mimeType: 'text/markdown',
     title: 'Kardex All Charts',
   });
@@ -8820,7 +9550,11 @@ function parseBackupPayload(rawJson) {
 
 function openRestoreModal(payload, triggerEl = null) {
   pendingRestorePayload = payload;
-  const conflicts = payload.charts.filter((c) => notes.some((local) => local.id === c.id)).length;
+  const localById = new Map(notes.map((n) => [n.id, n]));
+  let conflicts = 0;
+  for (const c of payload.charts) {
+    if (localById.has(c.id)) conflicts++;
+  }
   $('restoreSummary').textContent =
     `Found ${payload.charts.length} chart(s) (${conflicts} matching existing IDs), ${payload.scratchNotes.length} quick note(s), ${payload.captureInbox.length} inbox item(s)${
       payload.templateConfig || payload.rawUpdateTemplate ? ', + shift template' : ''
@@ -8829,7 +9563,7 @@ function openRestoreModal(payload, triggerEl = null) {
   $('restorePreviewList').innerHTML = payload.charts
     .slice(0, 30)
     .map((c) => {
-      const localMatch = notes.find((l) => l.id === c.id);
+      const localMatch = localById.get(c.id);
       const localNewer = localMatch && (localMatch.updated || 0) > (c.updated || 0);
       const badge = !localMatch
         ? '<span class="status-meta safe">New</span>'
@@ -8847,30 +9581,37 @@ function openRestoreModal(payload, triggerEl = null) {
 async function applyRestorePayload() {
   if (!pendingRestorePayload) return;
   const mode = $('restoreModeSelect')?.value || 'keep-newer';
-  let importedCharts = 0;
+  const localById = new Map(notes.map((n) => [n.id, n]));
+  const chartsToPut = [];
 
   for (const incoming of pendingRestorePayload.charts) {
-    const existing = notes.find((l) => l.id === incoming.id);
+    const existing = localById.get(incoming.id);
     if (mode === 'import-copy' && existing) {
-      await put({ ...incoming, id: uid(), title: `${incoming.title || 'Chart'} (Restored Copy)` });
-      importedCharts++;
+      chartsToPut.push({ ...incoming, id: uid(), title: `${incoming.title || 'Chart'} (Restored Copy)` });
     } else if (mode === 'keep-newer' && existing && (existing.updated || 0) > (incoming.updated || 0)) {
       continue;
     } else {
-      await put(incoming);
-      importedCharts++;
+      chartsToPut.push({ ...incoming });
     }
   }
+  const importedCharts = chartsToPut.length;
+  if (chartsToPut.length) {
+    await putManyNotesInBatches(chartsToPut);
+  }
 
+  const existingScratchIds = new Set(scratchNotes.map((n) => n?.id).filter(Boolean));
   for (const sn of pendingRestorePayload.scratchNotes) {
-    if (sn && sn.id && !scratchNotes.some((local) => local.id === sn.id)) {
+    if (sn && sn.id && !existingScratchIds.has(sn.id)) {
+      existingScratchIds.add(sn.id);
       scratchNotes.push(sn);
     }
   }
   saveScratchNotes();
 
+  const existingInboxIds = new Set(inboxItems.map((x) => x?.id).filter(Boolean));
   for (const inb of pendingRestorePayload.captureInbox) {
-    if (inb && inb.id && !inboxItems.some((local) => local.id === inb.id)) {
+    if (inb && inb.id && !existingInboxIds.has(inb.id)) {
+      existingInboxIds.add(inb.id);
       inboxItems.push(inb);
     }
   }
@@ -8905,6 +9646,9 @@ async function applyRestorePayload() {
   closeModalEl($('restoreModal'));
   await refresh();
   if (currentId) await select(currentId, { skipFlush: true });
+  if (vaultDirHandle && vaultPermission === 'granted' && chartsToPut.length) {
+    runVaultSync({ interactive: false }).catch(() => {});
+  }
   toast(`Restore complete: ${importedCharts} chart(s) applied`);
 }
 
@@ -8954,14 +9698,51 @@ if ($('roundsMoreBtn')) {
 if ($('roundsToggleExpandAllBtn')) {
   $('roundsToggleExpandAllBtn').onclick = () => {
     const allOpen = $('roundsToggleExpandAllBtn').dataset.allOpen === 'true';
-    const visibleIds = getFilteredSortedRoundsPatients().map((p) => p.id);
+    const container = $('roundsGrid');
+    const visibleRows = container ? Array.from(container.querySelectorAll('.ledger-row[data-id]')) : [];
+    const visibleIds = visibleRows.length
+      ? visibleRows.map((r) => r.dataset.id).filter(Boolean)
+      : getFilteredSortedRoundsEntries().slice(0, roundsRenderLimit).map((e) => e.id);
     if (allOpen) {
       visibleIds.forEach((id) => expandedRowIds.delete(id));
     } else {
       visibleIds.forEach((id) => expandedRowIds.add(id));
     }
     closeAllMenus();
-    renderRounds();
+    if (visibleRows.length) {
+      for (const row of visibleRows) {
+        const id = row.dataset.id;
+        const next = !allOpen;
+        if (next) {
+          const bodyEl = row.querySelector('.ledger-body');
+          if (bodyEl && bodyEl.dataset.lazyBody === '1') {
+            const note = getNoteById(id) || notes.find((n) => n.id === id);
+            if (note) {
+              bodyEl.innerHTML = renderRoundsLedgerBodyHtml(getParsedChart(note));
+            }
+            delete bodyEl.dataset.lazyBody;
+          }
+        }
+        row.classList.toggle('expanded', next);
+        const head = row.querySelector('.ledger-head[data-toggle-row-id]');
+        if (head) head.setAttribute('aria-expanded', String(next));
+        const statusWrap = row.querySelector('.ledger-head-status');
+        if (statusWrap) {
+          const existingChev = statusWrap.querySelector('.ledger-chevron.is-open');
+          if (next && !existingChev) {
+            statusWrap.insertAdjacentHTML(
+              'beforeend',
+              `<span class="ledger-chevron is-open" aria-hidden="true">${uiIcon('chevron-down')}</span>`
+            );
+          } else if (!next && existingChev) {
+            existingChev.remove();
+          }
+        }
+      }
+      updateRoundsExpandAllBtnState();
+    } else {
+      renderRounds();
+    }
   };
 }
 if ($('swDismissBtn')) {
@@ -9449,7 +10230,11 @@ if ($('timelineSearchInput')) {
     if (toggleBtn) {
       toggleBtn.classList.toggle('is-active', Boolean(timelineSearchQuery.trim()) || Boolean(wrap && !wrap.hidden));
     }
-    renderChartTimeline();
+    clearTimeout(timelineSearchTimer);
+    timelineSearchTimer = setTimeout(() => {
+      timelineSearchTimer = null;
+      renderChartTimeline();
+    }, 120);
   };
   $('timelineSearchInput').addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -9598,14 +10383,27 @@ if ($('censusToggle')) {
   };
 }
 $('noteText').oninput = () => {
-  const n = notes.find((x) => x.id === currentId) || {};
-  populateProfileInputs(n, $('noteText').value, true);
+  const modal = $('patientInfoModal');
+  if (modal && !modal.hidden) {
+    clearTimeout(rawProfileSyncTimer);
+    rawProfileSyncTimer = setTimeout(() => {
+      rawProfileSyncTimer = null;
+      if (!currentId) return;
+      const n = notes.find((x) => x.id === currentId) || {};
+      populateProfileInputs(n, $('noteText').value, true);
+    }, 180);
+  } else {
+    clearTimeout(rawProfileSyncTimer);
+    rawProfileSyncTimer = null;
+    profileInputsStaleFromRaw = true;
+  }
   markChartDirty();
 };
 if ($('question')) $('question').oninput = markCompanionStale;
 
 $('appendShiftBtn').onclick = () => {
   if (!currentId) return toast('Select or create a note first');
+  flushStaleProfileInputsFromRaw();
   syncProfileInputsToMarkdown();
   openShiftModal(currentId, $('appendShiftBtn'));
 };
@@ -9616,10 +10414,11 @@ $('chartLabsBtn').onclick = () => {
 };
 $('chartCalcBtn').onclick = () => {
   closeAllMenus();
-  openCalcModal(currentId, 'audit', $('editorMoreBtn') || $('chartCalcBtn'));
+  openCalcModal(currentId, 'audit', $('chartCalcBtn'));
 };
 $('copyUpdateBtn').onclick = () => {
   closeAllMenus();
+  flushStaleProfileInputsFromRaw();
   const note = notes.find((n) => n.id === currentId);
   const content = $('noteText').value;
   if (!content.trim()) return toast('Select or create a note first');
@@ -9641,6 +10440,14 @@ $('deleteBtn').onclick = async () => {
 
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   clearTimeout(chartAutosaveTimer);
+  clearTimeout(timelineGuidedSerializeTimer);
+  timelineGuidedSerializeTimer = null;
+  clearTimeout(timelineSearchTimer);
+  timelineSearchTimer = null;
+  clearTimeout(rawProfileSyncTimer);
+  rawProfileSyncTimer = null;
+  profileInputsStaleFromRaw = false;
+  clearUndoCoalesce();
   dirtyChart = false;
   updateSaveStatusPill('saved', { silentHide: true });
   await remove(currentId);
@@ -9678,6 +10485,7 @@ $('exportBtn').onclick = async () => {
   const n = notes.find((x) => x.id === currentId);
   if (!n) return toast('Save a note first');
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
+  flushStaleProfileInputsFromRaw();
   syncProfileInputsToMarkdown();
   const liveContent = $('noteText').value;
   const title = n.title || $('noteTitle').textContent || 'note';
@@ -9694,6 +10502,7 @@ $('exportDeidBtn').onclick = async () => {
   const n = notes.find((x) => x.id === currentId);
   if (!n) return toast('Save a note first');
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
+  flushStaleProfileInputsFromRaw();
   syncProfileInputsToMarkdown();
   const r = redact($('noteText').value, profile());
   const outName = redactFilename((n.title || $('noteTitle').textContent || 'note') + '.md', profile());
@@ -11957,10 +12766,21 @@ if ($('pitchOpenChartBtn')) {
 }
 
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.header-more-wrap, .row-more-wrap, .editor-patient-switcher')) {
+  if (!e.target.closest('.header-more-wrap, .row-more-wrap, #rowActionMenu, .editor-patient-switcher')) {
     closeAllMenus();
   }
 });
+
+window.addEventListener(
+  'scroll',
+  () => {
+    const rowMenu = $('rowActionMenu');
+    if (rowMenu && !rowMenu.hidden) {
+      closeAllMenus();
+    }
+  },
+  { passive: true }
+);
 
 // Modal backdrop clicks & global keyboard shortcuts
 document.querySelectorAll('.modal-overlay').forEach((overlay) => {
@@ -12116,16 +12936,28 @@ function handleBackgroundLifecycleSave() {
   releaseScreenWakeLock();
 }
 
+let whisperIdleUnloadTimer = null;
+
 window.addEventListener('pagehide', handleBackgroundLifecycleSave);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     handleBackgroundLifecycleSave();
+    clearTimeout(whisperIdleUnloadTimer);
     const st = whisperCtrl.getState();
     if (st.loadedModels.length > 0 && st.status !== 'loading' && st.status !== 'transcribing') {
-      whisperCtrl.unload().then(() => updateWhisperUiStatus()).catch(() => {});
+      whisperIdleUnloadTimer = setTimeout(() => {
+        whisperIdleUnloadTimer = null;
+        if (document.visibilityState !== 'hidden') return;
+        const cur = whisperCtrl.getState();
+        if (cur.loadedModels.length > 0 && cur.status !== 'loading' && cur.status !== 'transcribing') {
+          whisperCtrl.unload().then(() => updateWhisperUiStatus()).catch(() => {});
+        }
+      }, 90000);
     }
     return;
   }
+  clearTimeout(whisperIdleUnloadTimer);
+  whisperIdleUnloadTimer = null;
   updateDutyClockUi();
   if (swRegistration && navigator.onLine !== false && Date.now() - lastSwUpdateCheckAt > 900000) {
     lastSwUpdateCheckAt = Date.now();
@@ -12136,12 +12968,9 @@ setInterval(updateDutyClockUi, 60000);
 
 // Initialization
 (async () => {
-  syncVisualViewportVars();
+  applyVisualViewportVarsNow();
   initAppearanceSettings();
   initClinicalSettings();
-  renderAllShiftPillGroups();
-  renderShiftScheduleSettings();
-  setSettingsTab(activeSettingsTab, { persist: false });
   updateNetworkStatusUi();
   try {
     db = await openDB();
@@ -12156,6 +12985,11 @@ setInterval(updateDutyClockUi, 60000);
   updateCompanionConnHint();
   updateApiKeyStatusPill();
   setMode('rounds');
+  const scheduleIdle =
+    typeof window.requestIdleCallback === 'function'
+      ? (fn) => window.requestIdleCallback(fn, { timeout: 1500 })
+      : (fn) => setTimeout(fn, 250);
+  scheduleIdle(() => ensureDeferredSettingsUiInitialized());
   refreshStorageAndPwaStatus({ requestPersist: true }).catch(() => {});
   refreshWhisperCacheStatus();
   initVaultLink().catch(() => {});
@@ -12177,7 +13011,7 @@ setInterval(updateDutyClockUi, 60000);
             if (nw.state === 'installed' && navigator.serviceWorker.controller) {
               swWaitingWorker = nw;
               if ($('swUpdateBanner')) $('swUpdateBanner').hidden = false;
-              refreshStorageAndPwaStatus();
+              refreshStorageAndPwaStatus({ force: true });
             }
           });
         });
