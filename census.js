@@ -906,6 +906,127 @@ export function formatCompletedAntibiotics(items = []) {
     .join('; ');
 }
 
+export function formatAntibioticsForUpdate(trackedAntibiotics = []) {
+  const list = Array.isArray(trackedAntibiotics) ? trackedAntibiotics : [];
+  const out = [];
+  for (const it of list) {
+    if (!it) continue;
+    const drug = String(it.drug || '').trim();
+    if (!drug) continue;
+    const hasFreqInDrug = /\b(?:q\d+\s*h|od|bid|tid|qid|prn|stat|daily|once)\b/i.test(drug);
+    const freqStr =
+      !hasFreqInDrug && it.freq
+        ? String(it.freq).trim().replace(/h$/i, 'H')
+        : '';
+    let dayBadge = '';
+    if (it.dayCount !== null && it.dayCount !== undefined) {
+      const plannedSuffix = it.plannedDays ? `/${it.plannedDays}` : '';
+      const fracSuffix =
+        it.dayCount === 0 && it.dosesPerDay > 1 && it.partialDoses !== null && it.partialDoses !== undefined
+          ? ` (${it.partialDoses}/${it.dosesPerDay})`
+          : '';
+      dayBadge = `D${it.dayCount}${plannedSuffix}${fracSuffix}`;
+    } else if (it.plannedDays) {
+      dayBadge = `(/${it.plannedDays}d)`;
+    }
+    const line = [drug, freqStr, dayBadge].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    if (line) out.push(line);
+  }
+  return out;
+}
+
+export function filterNonAntibioticMedications(medLines = [], trackedAntibiotics = []) {
+  const meds = Array.isArray(medLines) ? medLines : [];
+  const abx = Array.isArray(trackedAntibiotics) ? trackedAntibiotics : [];
+  if (!meds.length || !abx.length) return [...meds];
+  const abxKeys = new Set();
+  for (const item of abx) {
+    const firstTok = String(item?.drug || '')
+      .trim()
+      .split(/[\s,/(-]+/)[0]
+      .toLowerCase();
+    if (firstTok && firstTok.length >= 4) abxKeys.add(firstTok);
+  }
+  if (!abxKeys.size) return [...meds];
+  return meds.filter((line) => {
+    const clean = String(line || '').trim().toLowerCase();
+    if (!clean) return false;
+    for (const key of abxKeys) {
+      if (clean.startsWith(key)) return false;
+    }
+    return true;
+  });
+}
+
+export function parseWorkingProblems(raw) {
+  const text = String(raw || '').replace(/\r\n/g, '\n').trim();
+  if (!text || /^(?:none|nil|n\/a|-)$/i.test(text)) return [];
+  const parts = text.split(/[;\n]+/);
+  const out = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const clean = String(part || '')
+      .replace(/^(?:[•\-*]|\d+[.)])\s+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean || /^(?:none|nil|n\/a|-)$/i.test(clean)) continue;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
+export function formatWorkingProblems(items = []) {
+  const list = Array.isArray(items)
+    ? parseWorkingProblems(items.map((it) => String(it || '').replace(/\s+/g, ' ')).join('\n'))
+    : parseWorkingProblems(items);
+  return list.join('; ');
+}
+
+export function formatWorkingProblemsMultiline(raw) {
+  return parseWorkingProblems(raw).join('\n');
+}
+
+export function parseResolvedProblems(raw) {
+  const text = String(raw || '').replace(/\r\n/g, '\n').trim();
+  if (!text || /^(?:none|nil|n\/a|-)$/i.test(text)) return [];
+  const entries = text.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+  const out = [];
+  for (const entry of entries) {
+    const parts = entry.split('|').map((s) => s.trim());
+    const dx = parts[0] || '';
+    if (!dx || /^(?:none|nil|n\/a|-)$/i.test(dx)) continue;
+    const resolvedDate = parts[1] || '';
+    const note = parts.slice(2).join(' | ').trim();
+    const label = `${dx}${resolvedDate ? ` (Resolved ${resolvedDate})` : ''}${note ? ` · ${note}` : ''}`;
+    out.push({
+      text: dx,
+      resolvedDate,
+      note,
+      label,
+    });
+  }
+  return out;
+}
+
+export function formatResolvedProblems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .filter((it) => it && String(it.text || '').trim())
+    .map((it) => {
+      const cols = [
+        String(it.text).replace(/[\r\n|]+/g, ' ').replace(/\s+/g, ' ').trim(),
+        String(it.resolvedDate || '').replace(/[\r\n|]+/g, ' ').trim(),
+        String(it.note || '').replace(/[\r\n|]+/g, ' ').trim(),
+      ];
+      while (cols.length > 1 && !cols[cols.length - 1]) cols.pop();
+      return cols.join(' | ');
+    })
+    .join('; ');
+}
+
 export function formatRoomLabel(room) {
   const clean = String(room || '').trim() || 'Unassigned';
   if (/^(?:room|rm\.?|bed|ward|icu|ccu|picu|nicu|er|or|pacu)\b/i.test(clean)) {
@@ -1857,6 +1978,8 @@ function cloneChartHeader(hdr) {
     meta: { ...hdr.meta },
     aliases: [...hdr.aliases],
     categories: [...hdr.categories],
+    activeProblems: [...(hdr.activeProblems || [])],
+    resolvedProblems: (hdr.resolvedProblems || []).map((it) => ({ ...it })),
   };
 }
 
@@ -1919,6 +2042,9 @@ export function parseChartHeader(content, note = {}) {
   }
   const isCensus = /^true(?:\s+#.*)?$/i.test(String(meta.census || '').trim());
 
+  const activeProblems = parseWorkingProblems(assessment);
+  const resolvedProblems = parseResolvedProblems(meta.problems_resolved || meta.resolved_problems || '');
+
   const result = {
     meta,
     name,
@@ -1930,6 +2056,8 @@ export function parseChartHeader(content, note = {}) {
     ap,
     aliases,
     assessment,
+    activeProblems,
+    resolvedProblems,
     categories,
     isCharity,
     isCensus,
@@ -2102,6 +2230,8 @@ export function parseChart(content, note = {}) {
     latestShift,
     isUpdatedToday,
     assessment,
+    activeProblems: parseWorkingProblems(assessment),
+    resolvedProblems: hdr.resolvedProblems || [],
     vitals,
     vent,
     io,
@@ -2454,7 +2584,7 @@ const isMedStopBoundary = (trimmed) =>
   /^(?:\*{0,2})(?:Service|Generic|General|Routine|[A-Za-z][A-Za-z\s/&+-]{1,25})\s+Plans?(?:\*{0,2})\s*:/i.test(
     trimmed
   ) ||
-  /^(?:\*{0,2})(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Plans?|Pending|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Feeding|Diet|Nutrition|Greeting|Footer)\b(?:\*{0,2})(?:\s*:|$)/i.test(
+  /^(?:\*{0,2})(?:Subjective|Objective|Assessment|Impression|Problem\s+list|Antibiotics?|Abx|Plans?|Pending|If\s+ok|Vitals|VS|Vent|Ventilator|Shift\s+I&O|I&O|Drips?|Infusions?|Labs?|PE|Drains?|Feeding|Diet|Nutrition|Greeting|Footer)\b(?:\*{0,2})(?:\s*:|$)/i.test(
     trimmed
   ) ||
   /^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed);
@@ -3204,6 +3334,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   const hasExplicitPlans = /\{\{\s*(?:pending|service[_\s]+plans)\s*\}\}/i.test(tpl);
   const hasExplicitVent = /\{\{\s*vent\s*\}\}/i.test(tpl);
   const hasExplicitDrips = /\{\{\s*drips\s*\}\}/i.test(tpl);
+  const hasExplicitAbx = /\{\{\s*(?:antibiotics?|abx)\s*\}\}/i.test(tpl);
   const hasExplicitPe = /\{\{\s*(?:pe|physical[_\s]+exam)\s*\}\}/i.test(tpl);
 
   let rendered = tpl;
@@ -3227,6 +3358,11 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   // 2. Double-brace placeholders (including friendly layman aliases)
   const ventVal = carryStanding ? data.vent : '';
   const dripsVal = carryStanding ? String(data.drips || '').split(/\s*\|\s*/).filter(Boolean).join('\n') : '';
+  const abxVal = carryStanding
+    ? formatAntibioticsForUpdate(parsed.trackedAntibiotics || [])
+        .map((l) => `- ${l}`)
+        .join('\n')
+    : '';
   const feedingVal = carryFeeding ? data.feeding : '';
   const peVal = carryPe ? data.pe : '';
   const pendingVal = carryPending ? data.openPending.map((p) => `- [ ] ${p}`).join('\n') : '';
@@ -3257,6 +3393,8 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
     date,
     vent: ventVal,
     drips: dripsVal,
+    antibiotics: abxVal,
+    abx: abxVal,
     feeding: feedingVal,
     diet: feedingVal,
     'diet/feeding': feedingVal,
@@ -3269,7 +3407,7 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
     'service plans': servicePlansVal,
   };
 
-  const optionalLineRe = /^(?:(?:Vent|Feeding|Diet):\s*)?\{\{\s*(drips|vent|feeding|diet|diet\/feeding|nutrition|pe|physical_exam|physical\s+exam|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
+  const optionalLineRe = /^(?:(?:Vent|Feeding|Diet):\s*)?\{\{\s*(drips|antibiotics|abx|vent|feeding|diet|diet\/feeding|nutrition|pe|physical_exam|physical\s+exam|service_plans|service\s+plans|pending|assessment|problem_list|problem\s+list)\s*\}\}$/i;
   const outLines = [];
   for (const line of rendered.split('\n')) {
     const trimmed = line.trim();
@@ -3303,6 +3441,13 @@ export function renderCustomShiftTemplate(template, content, shift = '6am', opti
   // 4. Smart carry-forward injection when explicit tags are absent
   if (!hasExplicitAssessment && assessment) {
     rendered = rendered.replace(/^([ \t]*Problem\s+list:)[ \t]*$/im, (_, hdr) => `${hdr}\n${assessment}`);
+  }
+  if (!hasExplicitAbx && abxVal) {
+    const abxHeadingBlock = `Antibiotics:\n${abxVal}`;
+    const medHeadingRe = /^([ \t]*(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Medications?|Meds?)(?:\*{0,2})\s*:?)[ \t]*$/im;
+    if (medHeadingRe.test(rendered)) {
+      rendered = rendered.replace(medHeadingRe, (_, hdr) => `${abxHeadingBlock}\n${hdr}`);
+    }
   }
 
   const carriedLines = [];
@@ -3453,6 +3598,15 @@ function normalizeStructuredLines(rawText, { checklist = false } = {}) {
     });
 }
 
+function buildAbxAndMedsBlock(abxSource, medsSource) {
+  const abxLines = normalizeStructuredLines(abxSource);
+  const medLines = normalizeStructuredLines(medsSource);
+  const parts = [];
+  if (abxLines.length) parts.push(`Antibiotics:\n${abxLines.join('\n')}`);
+  if (medLines.length) parts.push(`Medications:\n${medLines.join('\n')}`);
+  return parts.join('\n');
+}
+
 function formatStructuredVitals(values = {}) {
   const sbp = String(values.sbp || '').trim();
   const dbp = String(values.dbp || '').trim();
@@ -3545,8 +3699,8 @@ export function buildStructuredShiftUpdate({
     if (contLine) blocks.push(`Contingencies: ${contLine}`);
     const labsTxt = String(values.labs || '').trim();
     if (labsTxt) blocks.push(`Labs:\n${labsTxt}`);
-    const medLines = normalizeStructuredLines(values.meds);
-    if (medLines.length) blocks.push(`Medications:\n${medLines.join('\n')}`);
+    const abxMedsInterim = buildAbxAndMedsBlock(values.antibiotics, values.meds);
+    if (abxMedsInterim) blocks.push(abxMedsInterim);
     const pendingLines = normalizeStructuredLines(values.pending, { checklist: true });
     if (pendingLines.length) blocks.push(`**Pending:\n${pendingLines.join('\n')}`);
     const planLines = normalizeStructuredLines(values.servicePlans);
@@ -3638,8 +3792,12 @@ export function buildStructuredShiftUpdate({
         const medBlocks = [];
         const dripsBlk = formatDripsMarkdownBlock(values.drips);
         if (dripsBlk) medBlocks.push(dripsBlk);
-        const medLines = normalizeStructuredLines(values.meds);
-        if (medLines.length) medBlocks.push(`Medications:\n${medLines.join('\n')}`);
+        const abxSource =
+          values.antibiotics !== undefined
+            ? values.antibiotics
+            : formatAntibioticsForUpdate(parsed?.trackedAntibiotics || []);
+        const abxMedsBlk = buildAbxAndMedsBlock(abxSource, values.meds);
+        if (abxMedsBlk) medBlocks.push(abxMedsBlk);
         if (medBlocks.length) blocks.push(medBlocks.join('\n\n'));
         break;
       }
@@ -3675,9 +3833,9 @@ function isShiftEditBoundary(trimmed) {
   if (/^\*{0,2}Pending(?:\s+items|\s+list)?\*{0,2}\s*:?\s*$/i.test(trimmed)) return true;
   if (/^[-*]\s*\[[ xX]\]/.test(trimmed)) return true;
   if (/^(?:Thank\s+you|Thanks|Regards|Best|Sincerely|Respectfully)\b/i.test(trimmed)) return true;
-  return /^(?:\*{0,2})(?:Subjective|S>|S|Objective|O>|O|Assessment|Impression|Working\s+Impression|Problem\s+list|PE|Physical\s+Exam(?:ination)?|Event\s*\/\s*Update|Interval|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Settings|Shift\s+I&O|I&O|Drips?|Infusions?|Medications?|Meds?|Current\s+Meds?|Active\s+Medications?|Therapeutics|Service\s+Plans?|Problem-?Based\s+Plans?|Systems-?Based(?:\s+ICU)?\s+Plans?|Plans?|Generic\s+Plans?|General\s+Plans?|Routine\s+Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Contingenc(?:y|ies)|If\s*\/\s*Then|HGTs?|CBGs?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
+  return /^(?:\*{0,2})(?:Subjective|S>|S|Objective|O>|O|Assessment|Impression|Working\s+Impression|Problem\s+list|PE|Physical\s+Exam(?:ination)?|Event\s*\/\s*Update|Interval|Labs?|Laboratory(?:\s+updates?)?|Vitals?|VS|Vent(?:ilator)?(?:\s+Settings)?|Settings|Shift\s+I&O|I&O|Drips?|Infusions?|Antibiotics?|Abx|Medications?|Meds?|Current\s+Meds?|Active\s+Medications?|Therapeutics|Service\s+Plans?|Problem-?Based\s+Plans?|Systems-?Based(?:\s+ICU)?\s+Plans?|Plans?|Generic\s+Plans?|General\s+Plans?|Routine\s+Plans?|[A-Za-z][A-Za-z\s/&+-]{1,25}\s+Plans?|Feeding|Diet|Nutrition|Contingenc(?:y|ies)|If\s*\/\s*Then|HGTs?|CBGs?|Greeting|Footer)(?:\*{0,2})\s*:/i.test(
     trimmed
-  ) || /^(?:\*{0,2})(?:Medications?|Meds?|Drips?|Pending|Plans?|Labs?)(?:\*{0,2})\s*$/i.test(trimmed);
+  ) || /^(?:\*{0,2})(?:Antibiotics?|Abx|Medications?|Meds?|Drips?|Pending|Plans?|Labs?)(?:\*{0,2})\s*$/i.test(trimmed);
 }
 
 export function parseShiftBlockForEdit(blockBody) {
@@ -3701,6 +3859,7 @@ export function parseShiftBlockForEdit(blockBody) {
     labs: '',
     assessment: '',
     drips: '',
+    antibiotics: '',
     meds: '',
     servicePlans: '',
     planHeading: '',
@@ -3860,6 +4019,8 @@ export function parseShiftBlockForEdit(blockBody) {
   const contingencyLines = [];
   const medLines = [];
   const medSeen = new Set();
+  const abxLines = [];
+  const abxSeen = new Set();
   const planLines = [];
   const planSeen = new Set();
   const rawLabLines = [];
@@ -3876,6 +4037,16 @@ export function parseShiftBlockForEdit(blockBody) {
     if (!medSeen.has(key)) {
       medSeen.add(key);
       medLines.push(clean);
+    }
+  };
+
+  const pushAbxLine = (raw) => {
+    const clean = stripListItemPrefix(String(raw || '').replace(/^[-*]\s*\[[ xX]\]\s*/, ''));
+    if (isMedPlaceholder(clean)) return;
+    const key = clean.toLowerCase();
+    if (!abxSeen.has(key)) {
+      abxSeen.add(key);
+      abxLines.push(clean);
     }
   };
 
@@ -3905,7 +4076,7 @@ export function parseShiftBlockForEdit(blockBody) {
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (!trimmed) {
-      if (section && !['pending', 'meds', 'plans'].includes(section)) {
+      if (section && !['pending', 'abx', 'meds', 'plans'].includes(section)) {
         section = '';
       }
       continue;
@@ -3996,6 +4167,18 @@ export function parseShiftBlockForEdit(blockBody) {
       continue;
     }
 
+    // Antibiotics heading
+    const abxMatch = trimmed.match(/^(?:#{2,6}\s+)?(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Antibiotics?|Abx)(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i);
+    if (abxMatch) {
+      claimed.add(i);
+      section = 'abx';
+      const inline = (abxMatch[1] || '').trim();
+      if (inline) {
+        for (const piece of inline.split(/[|;]/)) pushAbxLine(piece);
+      }
+      continue;
+    }
+
     // Medications heading
     const medMatch =
       trimmed.match(/^(?:#{2,6}\s+)?(?:\*{0,2})(?:(?:Current|Active)\s+)?(?:Medications?|Meds?)(?:\s*\/\s*Drips?)?(?:\*{0,2})(?:\s*:\s*(.*)|\s*)$/i) ||
@@ -4050,7 +4233,13 @@ export function parseShiftBlockForEdit(blockBody) {
         else if (section === 'assessment') assessmentLines.push(trimmed);
         else if (section === 'feeding') feedingLines.push(trimmed);
         else if (section === 'contingencies') contingencyLines.push(trimmed);
-        else if (section === 'meds') {
+        else if (section === 'abx') {
+          if (/[|;]/.test(trimmed) && !/^(?:[•\-*]|\d+[.)])\s+/.test(trimmed)) {
+            for (const piece of trimmed.split(/[|;]/)) pushAbxLine(piece);
+          } else {
+            pushAbxLine(trimmed);
+          }
+        } else if (section === 'meds') {
           if (/[|;]/.test(trimmed) && !/^(?:[•\-*]|\d+[.)])\s+/.test(trimmed)) {
             for (const piece of trimmed.split(/[|;]/)) pushMedLine(piece);
           } else {
@@ -4116,6 +4305,7 @@ export function parseShiftBlockForEdit(blockBody) {
     labs: labsText,
     assessment: assessmentLines.join('\n'),
     drips,
+    antibiotics: abxLines.join('\n'),
     meds: medLines.join('\n'),
     servicePlans: planLines.join('\n'),
     planHeading,
@@ -4195,8 +4385,8 @@ export function serializeEditedShiftBlock(
   const dripsBlk = formatDripsMarkdownBlock(fields.drips);
   if (dripsBlk) blocks.push(dripsBlk);
 
-  const medLines = normalizeStructuredLines(fields.meds);
-  if (medLines.length) blocks.push(`Medications:\n${medLines.join('\n')}`);
+  const abxMedsBlk = buildAbxAndMedsBlock(fields.antibiotics, fields.meds);
+  if (abxMedsBlk) blocks.push(abxMedsBlk);
 
   const otherTxt = String(fields.otherNotes || '').trim();
   if (otherTxt) blocks.push(otherTxt);
@@ -5876,6 +6066,7 @@ export function syncFrontmatter(content, fields = {}) {
     'charity',
     'categories',
     'assessment',
+    'problems_resolved',
   ];
   const requiredKeys = new Set(['name', 'room', 'census', 'charity']);
 
@@ -5896,6 +6087,14 @@ export function syncFrontmatter(content, fields = {}) {
         }
       }
       updates[k] = cleaned.join(', ');
+    } else if (k === 'assessment') {
+      updates[k] = Array.isArray(fields[k]) || /[\r\n]/.test(String(fields[k]))
+        ? formatWorkingProblems(fields[k])
+        : String(fields[k]).trim();
+    } else if (k === 'problems_resolved') {
+      updates[k] = Array.isArray(fields[k])
+        ? formatResolvedProblems(fields[k])
+        : String(fields[k]).replace(/\r?\n/g, ' ').trim();
     } else {
       updates[k] = String(fields[k]).trim();
     }

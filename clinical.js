@@ -547,7 +547,7 @@ function extractClinicalBase(text, note, todayStr, maxCrAgeDays, maxWeightAgeDay
       inMedsOrPlans = false;
       continue;
     }
-    if (/^(?:\*{0,2})(?:Meds?|Medications?|Drips?|Infusions?|(?:Service|[A-Za-z\s/&+-]{1,25}\s+)?Plans?)(?:\*{0,2})\s*:/i.test(trimmed)) {
+    if (/^(?:\*{0,2})(?:Antibiotics?|Abx|Meds?|Medications?|Drips?|Infusions?|(?:Service|[A-Za-z\s/&+-]{1,25}\s+)?Plans?)(?:\*{0,2})\s*:?/i.test(trimmed)) {
       inMedsOrPlans = true;
     } else if (/^#{2,3}\s+/.test(trimmed) || /^(?:\*{0,2})(?:Pending|Vitals|VS|Labs?|PE|Assessment|Subjective|Objective)\b/i.test(trimmed)) {
       inMedsOrPlans = false;

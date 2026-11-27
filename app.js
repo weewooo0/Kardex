@@ -133,6 +133,13 @@ import {
   formatTrackedAntibiotics,
   parseCompletedAntibiotics,
   formatCompletedAntibiotics,
+  formatAntibioticsForUpdate,
+  filterNonAntibioticMedications,
+  parseWorkingProblems,
+  formatWorkingProblems,
+  formatWorkingProblemsMultiline,
+  parseResolvedProblems,
+  formatResolvedProblems,
   buildPrintableScutsheetData,
 } from './census.js';
 import {
@@ -628,6 +635,10 @@ let currentThemeId = normalizeThemeId(safeGetItem(THEME_KEY, 'obsidian'));
 let currentPlanMode = PLAN_MODES[safeGetItem(PLAN_MODE_KEY, 'service')] ? safeGetItem(PLAN_MODE_KEY, 'service') : 'service';
 let currentUnitSystem = LAB_UNIT_SYSTEMS[safeGetItem(UNIT_SYSTEM_KEY, 'conventional')] ? safeGetItem(UNIT_SYSTEM_KEY, 'conventional') : 'conventional';
 let currentHandoverFormat = HANDOVER_FORMATS[safeGetItem(HANDOVER_FORMAT_KEY, 'standard')] ? safeGetItem(HANDOVER_FORMAT_KEY, 'standard') : 'standard';
+const FEATURE_DICTATION_KEY = 'cm.featureDictation';
+const FEATURE_SAMPLES_KEY = 'cm.featureSamples';
+let featureDictationEnabled = safeGetItem(FEATURE_DICTATION_KEY, '1') !== '0';
+let featureSamplesEnabled = safeGetItem(FEATURE_SAMPLES_KEY, '1') !== '0';
 let backupBannerDismissed = false;
 
 const SETTINGS_PANEL_IDS = {
@@ -756,7 +767,10 @@ function setSettingsTab(tabId, { persist = true, focus = false } = {}) {
   if (!deferredSettingsUiInitialized) {
     ensureDeferredSettingsUiInitialized({ skipSetSettingsTab: true });
   }
-  const next = VALID_SETTINGS_TABS.has(tabId) ? tabId : 'appearance';
+  let next = VALID_SETTINGS_TABS.has(tabId) ? tabId : 'appearance';
+  if (next === 'voice' && !featureDictationEnabled) {
+    next = 'appearance';
+  }
   activeSettingsTab = next;
   if (persist) {
     safeSetItem(SETTINGS_TAB_KEY, next);
@@ -844,9 +858,27 @@ function renderAppearanceControls() {
   }
 }
 
+function applyFeatureVisibility() {
+  document.body.classList.toggle('hide-dictation-ui', !featureDictationEnabled);
+  document.body.classList.toggle('hide-samples-ui', !featureSamplesEnabled);
+  if ($('settingDictationToggle')) $('settingDictationToggle').checked = featureDictationEnabled;
+  if ($('settingSamplesToggle')) $('settingSamplesToggle').checked = featureSamplesEnabled;
+  const pill = $('workspaceFeaturesPill');
+  if (pill) {
+    if (featureDictationEnabled && featureSamplesEnabled) pill.textContent = 'All enabled';
+    else if (!featureDictationEnabled && !featureSamplesEnabled) pill.textContent = 'Dictation & samples off';
+    else if (!featureDictationEnabled) pill.textContent = 'Dictation off';
+    else pill.textContent = 'Samples off';
+  }
+  if (!featureDictationEnabled && activeSettingsTab === 'voice') {
+    setSettingsTab('appearance', { persist: true });
+  }
+}
+
 function initAppearanceSettings() {
   renderAppearanceControls();
   applyAppearance(currentThemeId, { persist: false });
+  applyFeatureVisibility();
 
   if ($('themePaletteGrid')) {
     $('themePaletteGrid').addEventListener('click', (e) => {
@@ -854,6 +886,23 @@ function initAppearanceSettings() {
       if (!card) return;
       applyAppearance(card.dataset.themeId, { persist: true });
     });
+  }
+
+  if ($('settingDictationToggle')) {
+    $('settingDictationToggle').onchange = () => {
+      featureDictationEnabled = Boolean($('settingDictationToggle').checked);
+      safeSetItem(FEATURE_DICTATION_KEY, featureDictationEnabled ? '1' : '0');
+      applyFeatureVisibility();
+      toast(featureDictationEnabled ? 'Voice dictation buttons enabled' : 'Voice dictation hidden across UI');
+    };
+  }
+  if ($('settingSamplesToggle')) {
+    $('settingSamplesToggle').onchange = () => {
+      featureSamplesEnabled = Boolean($('settingSamplesToggle').checked);
+      safeSetItem(FEATURE_SAMPLES_KEY, featureSamplesEnabled ? '1' : '0');
+      applyFeatureVisibility();
+      toast(featureSamplesEnabled ? 'Sample / demo buttons enabled' : 'Sample / demo buttons hidden across UI');
+    };
   }
 }
 
@@ -2764,6 +2813,24 @@ function renderRoundsLedgerBodyHtml(pt) {
     : '';
 
   const paramRows = [];
+  const hasAbx = Array.isArray(pt.trackedAntibiotics) && pt.trackedAntibiotics.length > 0;
+  const abxHtml = hasAbx
+    ? pt.trackedAntibiotics
+        .map((item) => {
+          const cls = item.overdue ? 'ledger-inline-crit' : item.dueSoon ? 'ledger-inline-warn' : '';
+          return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}</strong></span>`;
+        })
+        .join('<span class="ledger-dot" aria-hidden="true"> · </span>')
+    : '';
+  paramRows.push(`
+    <div class="ledger-kv is-abx">
+      <div class="ledger-labs-head">
+        <span class="ledger-k">ABX</span>
+        <button type="button" class="ledger-all-labs-btn open-abx-btn" data-id="${pt.id}">${hasAbx ? 'Manage →' : '+ Abx'}</button>
+      </div>
+      <div class="ledger-v ${hasAbx ? '' : 'muted'}">${hasAbx ? abxHtml : 'No active antibiotics'}</div>
+    </div>`);
+
   if (pt.vitals) {
     paramRows.push(`
       <div class="ledger-kv">
@@ -2827,24 +2894,6 @@ function renderRoundsLedgerBodyHtml(pt) {
       </div>`);
   }
 
-  const hasAbx = Array.isArray(pt.trackedAntibiotics) && pt.trackedAntibiotics.length > 0;
-  const abxHtml = hasAbx
-    ? pt.trackedAntibiotics
-        .map((item) => {
-          const cls = item.overdue ? 'ledger-inline-crit' : item.dueSoon ? 'ledger-inline-warn' : '';
-          return `<span class="ledger-tok ${cls}"><strong class="tok-v">${esc(item.label)}</strong></span>`;
-        })
-        .join('<span class="ledger-dot" aria-hidden="true"> · </span>')
-    : '';
-  paramRows.push(`
-    <div class="ledger-kv is-abx">
-      <div class="ledger-labs-head">
-        <span class="ledger-k">ABX</span>
-        <button type="button" class="ledger-all-labs-btn open-abx-btn" data-id="${pt.id}">${hasAbx ? 'Manage →' : '+ Abx'}</button>
-      </div>
-      <div class="ledger-v ${hasAbx ? '' : 'muted'}">${hasAbx ? abxHtml : 'No active antibiotics'}</div>
-    </div>`);
-
   if (pt.contingencies) {
     paramRows.push(`
       <div class="ledger-kv">
@@ -2900,6 +2949,25 @@ function renderRoundsLedgerBodyHtml(pt) {
         .join('')
     : '';
 
+  const dxList = Array.isArray(pt.activeProblems) && pt.activeProblems.length
+    ? pt.activeProblems
+    : parseWorkingProblems(pt.assessment || '');
+  const dxBodyHtml = dxList.length > 1
+    ? `<div class="ledger-impression">${dxList.map((dx) => `<div class="ledger-dx-line">• ${esc(dx)}</div>`).join('')}</div>`
+    : pt.assessment
+      ? `<div class="ledger-impression">${esc(pt.assessment)}</div>`
+      : '';
+  const dxCount = dxList.length || (pt.assessment ? 1 : 0);
+  const impressionHtml = dxBodyHtml
+    ? `<details class="ledger-accordion ledger-dx-accordion">
+        <summary>
+          <span class="acc-title">Working Impression</span>
+          <span class="acc-right"><span class="acc-count">${dxCount}</span>${uiIcon('chevron-right')}</span>
+        </summary>
+        ${dxBodyHtml}
+      </details>`
+    : '';
+
   return `
     <div class="ledger-footer">
       <button type="button" class="ledger-btn-primary open-chart-btn" data-id="${pt.id}">Open Chart</button>
@@ -2910,7 +2978,7 @@ function renderRoundsLedgerBodyHtml(pt) {
         <button type="button" class="ledger-btn-icon row-more-btn" data-id="${pt.id}" aria-haspopup="menu" aria-controls="rowActionMenu" aria-expanded="false" aria-label="More actions for ${esc(pt.name)}">${uiIcon('more')}</button>
       </div>
     </div>
-    ${pt.assessment ? `<div class="ledger-impression">${esc(pt.assessment)}</div>` : ''}
+    ${impressionHtml}
     ${pt.drips ? `<div class="ledger-drips"><span class="crimson-dot" aria-hidden="true"></span><span class="drip-lbl">DRIPS</span> <span class="drip-val">${pt.drips.split(/\s*\|\s*/).map((d) => esc(d)).join('<br>')}</span></div>` : ''}
     <div class="ledger-params">${paramRows.join('')}</div>
     ${medsAccordion}
@@ -3460,7 +3528,8 @@ function populateShiftFormDefaults() {
     pe: carryPe && cfData.pe ? cfData.pe : DEFAULT_NORMAL_PE_TEXT,
     assessment: parsed.assessment || '',
     drips: carryStanding ? cfData.drips || '' : '',
-    meds: carryStanding ? (parsed.medications || []).join('\n') : '',
+    antibiotics: carryStanding ? formatAntibioticsForUpdate(parsed.trackedAntibiotics || []).join('\n') : '',
+    meds: carryStanding ? filterNonAntibioticMedications(parsed.medications || [], parsed.trackedAntibiotics || []).join('\n') : '',
     servicePlans: carryPlans ? (cfData.servicePlans || []).join('\n') : '',
     contingencies: carryContingencies ? (cfData.contingencies || parsed.contingencies || '') : '',
     pending: carryPend ? (cfData.openPending || []).join('\n') : '',
@@ -3562,6 +3631,10 @@ function renderShiftGuidedForm() {
           <div class="field">
             <label for="sfDrips">Active Drips / Infusions (one per line)</label>
             <textarea id="sfDrips" data-sf-key="drips" rows="2" placeholder="One drip per line (e.g. Norepinephrine at 1.4mkm (42.2cc/h))">${esc(shiftFormValues.drips)}</textarea>
+          </div>
+          <div class="field">
+            <label for="sfAntibiotics">Antibiotics (auto-filled from tracker, above Medications)</label>
+            <textarea id="sfAntibiotics" data-sf-key="antibiotics" rows="2" placeholder="e.g. Meropenem 1g IV q12H D4/7">${esc(shiftFormValues.antibiotics || '')}</textarea>
           </div>
           <div class="field">
             <label for="sfMeds">Medications (one per line)</label>
@@ -3671,6 +3744,10 @@ function renderShiftGuidedForm() {
               <div class="field">
                 <label for="sfDrips">Active Drips / Infusions (one per line)</label>
                 <textarea id="sfDrips" data-sf-key="drips" rows="2" placeholder="One drip per line (e.g. Norepinephrine at 1.4mkm (42.2cc/h))">${esc(shiftFormValues.drips)}</textarea>
+              </div>
+              <div class="field">
+                <label for="sfAntibiotics">Antibiotics (auto-filled from tracker, above Medications)</label>
+                <textarea id="sfAntibiotics" data-sf-key="antibiotics" rows="2" placeholder="e.g. Meropenem 1g IV q12H D4/7">${esc(shiftFormValues.antibiotics || '')}</textarea>
               </div>
               <div class="field">
                 <label for="sfMeds">Medication List (one per line)</label>
@@ -6899,6 +6976,9 @@ function rerecordTelegram() {
 }
 
 async function openDictateModal(noteId, triggerEl = null) {
+  if (!featureDictationEnabled) {
+    return toast('Voice dictation is disabled in Settings');
+  }
   const note = (await refreshNoteFromVaultIfClean(noteId)) || notes.find((n) => n.id === noteId);
   if (!note) return;
 
@@ -7645,6 +7725,7 @@ function renderProfileLinesList() {
 }
 
 let currentProfileCompletedAbx = [];
+let currentProfileResolvedProblems = [];
 let profileAbxEditIdx = null;
 
 function resetProfileAbxForm() {
@@ -7719,7 +7800,7 @@ function populateProfileInputs(note = {}, content = '', preserveAliases = false)
   $('apInput').value = m.ap || m.attending || '';
   $('admittedInput').value = m.admitted || m['date admitted'] || '';
   if ($('icuAdmittedInput')) $('icuAdmittedInput').value = m.icu_admitted || '';
-  $('assessmentInput').value = m.assessment || m.impression || m.dx || '';
+  $('assessmentInput').value = formatWorkingProblemsMultiline(m.assessment || m.impression || m.dx || '');
   if ($('codeStatusSelect')) $('codeStatusSelect').value = parsed.codeStatus || 'Full Code';
   if ($('severitySelect')) $('severitySelect').value = parsed.severity || 'Stable';
   if ($('allergiesInput')) $('allergiesInput').value = m.allergies || m.allergy || '';
@@ -7738,6 +7819,7 @@ function populateProfileInputs(note = {}, content = '', preserveAliases = false)
     doseOffset: it.doseOffset || 0,
   }));
   currentProfileCompletedAbx = (parsed.completedAntibiotics || []).map((it) => ({ ...it }));
+  currentProfileResolvedProblems = (parsed.resolvedProblems || []).map((it) => ({ ...it }));
   if ($('addAbxTimeInput') && !$('addAbxTimeInput').value) {
     $('addAbxTimeInput').value = nowHhMm();
   }
@@ -7808,7 +7890,8 @@ function syncProfileInputsToMarkdown() {
     lines: formatTrackedLines(currentProfileLines),
     antibiotics: formatTrackedAntibiotics(currentProfileAbx),
     antibiotics_completed: formatCompletedAntibiotics(currentProfileCompletedAbx),
-    assessment: $('assessmentInput').value.trim(),
+    assessment: formatWorkingProblems(parseWorkingProblems($('assessmentInput').value)),
+    problems_resolved: formatResolvedProblems(currentProfileResolvedProblems),
     census: $('censusToggle').checked,
     categories: dedupeCategoryList(currentChartCategories),
     charity: currentChartCategories.some((c) => c.toLowerCase() === 'charity'),
@@ -7828,6 +7911,8 @@ function syncProfileInputsToMarkdown() {
 function refreshActiveEditorView() {
   if (editorViewMode === 'timeline') renderChartTimeline();
   else if (editorViewMode === 'labs') renderChartLabsSummary();
+  else if (editorViewMode === 'problems') renderEditorProblemsPane();
+  else if (editorViewMode === 'abx') renderEditorAbxPane();
 }
 
 let rawMdFullscreen = false;
@@ -7868,15 +7953,25 @@ function setEditorView(mode) {
   if (mode !== 'raw') setRawMdFullscreen(false);
   $('chartTimelinePane').hidden = mode !== 'timeline';
   $('chartLabsPane').hidden = mode !== 'labs';
+  if ($('chartProblemsPane')) $('chartProblemsPane').hidden = mode !== 'problems';
+  if ($('chartAbxPane')) $('chartAbxPane').hidden = mode !== 'abx';
   $('chartRawPane').hidden = mode !== 'raw';
   $('editorTimelineTab').classList.toggle('active', mode === 'timeline');
   $('editorTimelineTab').setAttribute('aria-pressed', String(mode === 'timeline'));
   $('editorLabsTab').classList.toggle('active', mode === 'labs');
   $('editorLabsTab').setAttribute('aria-pressed', String(mode === 'labs'));
+  if ($('editorProblemsTab')) {
+    $('editorProblemsTab').classList.toggle('active', mode === 'problems');
+    $('editorProblemsTab').setAttribute('aria-pressed', String(mode === 'problems'));
+  }
+  if ($('editorAbxTab')) {
+    $('editorAbxTab').classList.toggle('active', mode === 'abx');
+    $('editorAbxTab').setAttribute('aria-pressed', String(mode === 'abx'));
+  }
   $('editorRawTab').classList.toggle('active', mode === 'raw');
   $('editorRawTab').setAttribute('aria-pressed', String(mode === 'raw'));
 
-  if (mode === 'timeline' || mode === 'labs') {
+  if (mode !== 'raw') {
     flushStaleProfileInputsFromRaw();
     refreshActiveEditorView();
   }
@@ -8309,6 +8404,10 @@ function renderTlGuidedFormHtml(entryKey, f, origShift = '') {
           <div class="field">
             <label>Active Drips (one per line)</label>
             <textarea class="tl-g-field" data-tl-field="drips" rows="2" placeholder="One drip per line (e.g. Plain NSS at 80cc/hr)">${esc(f.drips)}</textarea>
+          </div>
+          <div class="field">
+            <label>Antibiotics (one per line, placed above Medications)</label>
+            <textarea class="tl-g-field" data-tl-field="antibiotics" rows="2" placeholder="e.g. Meropenem 1g IV q12H D4/7">${esc(f.antibiotics || '')}</textarea>
           </div>
           <div class="field">
             <label>Medications (one per line)</label>
@@ -9245,6 +9344,8 @@ async function select(id, opts = {}) {
   editingTimelineKey = null;
   timelineEditDraft = null;
   timelineEditMode = 'guided';
+  resetEditorProblemForm();
+  resetEditorAbxForm();
   labsPanelFilter = 'all';
   if ($('timelineSearchInput')) $('timelineSearchInput').value = '';
   setTimelineSearchOpen(false);
@@ -10208,6 +10309,8 @@ $('saveBtn').onclick = () => {
 };
 $('editorTimelineTab').onclick = () => setEditorView('timeline');
 $('editorLabsTab').onclick = () => setEditorView('labs');
+if ($('editorProblemsTab')) $('editorProblemsTab').onclick = () => setEditorView('problems');
+if ($('editorAbxTab')) $('editorAbxTab').onclick = () => setEditorView('abx');
 $('editorRawTab').onclick = () => setEditorView('raw');
 $('labsCopyBtn').onclick = () => {
   const summary = getCurrentChartLabSummary();
@@ -11403,6 +11506,30 @@ $('inboxPasteInput').addEventListener('paste', () => {
     updateInboxDryRun();
   }, 0);
 });
+if ($('inboxPasteClipboardBtn')) {
+  $('inboxPasteClipboardBtn').onclick = async () => {
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+      $('inboxPasteInput')?.focus();
+      return toast('Clipboard paste not supported — tap inside box and paste manually');
+    }
+    try {
+      const clipText = await navigator.clipboard.readText();
+      if (!String(clipText || '').trim()) {
+        return toast('Clipboard is empty');
+      }
+      $('inboxPasteInput').value = clipText;
+      inboxSelectedQueueId = null;
+      if (!inboxPinnedNoteId) inboxUserSelectedTarget = false;
+      inboxWrapUserOverride = null;
+      renderInboxQueue();
+      updateInboxDryRun();
+      toast('Pasted from clipboard');
+    } catch {
+      $('inboxPasteInput')?.focus();
+      toast('Clipboard permission blocked — tap inside box and paste manually');
+    }
+  };
+}
 $('inboxCaptureBtn').onclick = () => captureToInbox($('inboxPasteInput').value);
 $('inboxSampleBtn').onclick = () => {
   const sampleText =
@@ -11615,15 +11742,15 @@ function getActiveAbxNoteContent(note) {
   return note.content || '';
 }
 
-function updateAbxModalLivePreview() {
-  const el = $('abxModalLivePreview');
+function updateAbxPreviewInto(elId, { drugId, freqId, daysId, dateId, timeId }) {
+  const el = $(elId);
   if (!el) return;
-  const drug = $('abxModalDrugInput')?.value.trim() || 'Antibiotic';
-  const freq = $('abxModalFreqSelect')?.value || 'q8h';
-  const isoDate = $('abxModalDateInput')?.value || getTodayDateStrings().yyyymmdd;
+  const drug = $(drugId)?.value.trim() || 'Antibiotic';
+  const freq = $(freqId)?.value || 'q8h';
+  const isoDate = $(dateId)?.value || getTodayDateStrings().yyyymmdd;
   const startDate = isoToMmDdYyyy(isoDate) || getTodayDateStrings().mmddyyyy;
-  const startTime = $('abxModalTimeInput')?.value || '08:00';
-  const plannedNum = parseInt($('abxModalDaysInput')?.value || '', 10);
+  const startTime = $(timeId)?.value || '08:00';
+  const plannedNum = parseInt($(daysId)?.value || '', 10);
   const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
 
   const [item] = parseTrackedAntibiotics(
@@ -11640,6 +11767,66 @@ function updateAbxModalLivePreview() {
       ? `Day 1 flips after ${freqMeta.dosesPerDay} doses`
       : 'Day 1 starts on 1st dose (24h coverage)';
   el.textContent = `Preview: ${item.label} · ${flipHint}`;
+}
+
+function updateAbxModalLivePreview() {
+  updateAbxPreviewInto('abxModalLivePreview', {
+    drugId: 'abxModalDrugInput',
+    freqId: 'abxModalFreqSelect',
+    daysId: 'abxModalDaysInput',
+    dateId: 'abxModalDateInput',
+    timeId: 'abxModalTimeInput',
+  });
+}
+
+function buildAbxActiveListHtml(active = [], editIdx = null) {
+  if (!active.length) {
+    return '<div class="abx-empty-note">No active antibiotics tracked. Add one below.</div>';
+  }
+  return active
+    .map((it, idx) => {
+      const statusCls = it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : '';
+      const scheduleDesc = [
+        it.freq || 'date-only',
+        it.startDate ? `Started ${it.startDate}${it.startTime ? ` ${it.startTime}` : ''}` : '',
+        it.dosesGiven !== null && it.dosesGiven !== undefined ? `${it.dosesGiven} dose(s) counted` : '',
+        it.nextDoseTime ? `Next ~${it.nextDoseTime}` : '',
+        it.doseOffset ? `Adj ${it.doseOffset > 0 ? `+${it.doseOffset}` : it.doseOffset}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      return `
+        <div class="abx-modal-row ${statusCls} ${editIdx === idx ? 'is-editing' : ''}">
+          <div class="abx-modal-row-main">
+            <div class="abx-modal-row-title">${esc(it.label)}</div>
+            <div class="abx-modal-row-meta">${esc(scheduleDesc)}</div>
+          </div>
+          <div class="abx-modal-row-actions">
+            <button type="button" class="ghost-action sm-btn abx-edit-btn" data-idx="${idx}" title="Edit antibiotic name, schedule, or start date/time">Edit</button>
+            ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="-1" title="Mark 1 dose held / missed">-1 Held</button>` : ''}
+            ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="1" title="Count 1 additional dose given">+1 Dose</button>` : ''}
+            <button type="button" class="btn-secondary sm-btn abx-finish-btn" data-idx="${idx}" title="Complete course and log into today's shift">Finish</button>
+            <button type="button" class="ghost-action danger-ghost sm-btn abx-remove-btn" data-idx="${idx}" title="Delete antibiotic entry">Remove</button>
+          </div>
+        </div>`;
+    })
+    .join('');
+}
+
+function buildAbxCompletedListHtml(completed = []) {
+  if (!completed.length) {
+    return '<div class="cf-meta">No completed courses archived yet.</div>';
+  }
+  return completed
+    .map(
+      (c, idx) => `
+      <div class="abx-completed-row">
+        <span class="abx-completed-lbl">${esc(c.label)}</span>
+        <button type="button" class="ghost-action danger-ghost sm-btn abx-del-completed-btn" data-idx="${idx}" aria-label="Remove ${esc(c.drug)} from history">${uiIcon('x')}</button>
+      </div>`
+    )
+    .join('');
 }
 
 async function saveAbxStateToChart(note, activeList, completedList, { logFinishLine = '' } = {}) {
@@ -11691,54 +11878,9 @@ function renderAbxModal() {
   const active = parsed.trackedAntibiotics || [];
   const completed = parsed.completedAntibiotics || [];
 
-  if (!active.length) {
-    activeEl.innerHTML = '<div class="abx-empty-note">No active antibiotics tracked. Add one below.</div>';
-  } else {
-    activeEl.innerHTML = active
-      .map((it, idx) => {
-        const statusCls = it.overdue ? 'is-crit' : it.dueSoon ? 'is-overdue' : '';
-        const scheduleDesc = [
-          it.freq || 'date-only',
-          it.startDate ? `Started ${it.startDate}${it.startTime ? ` ${it.startTime}` : ''}` : '',
-          it.dosesGiven !== null && it.dosesGiven !== undefined ? `${it.dosesGiven} dose(s) counted` : '',
-          it.nextDoseTime ? `Next ~${it.nextDoseTime}` : '',
-          it.doseOffset ? `Adj ${it.doseOffset > 0 ? `+${it.doseOffset}` : it.doseOffset}` : '',
-        ]
-          .filter(Boolean)
-          .join(' · ');
-
-        return `
-          <div class="abx-modal-row ${statusCls} ${abxModalEditIdx === idx ? 'is-editing' : ''}">
-            <div class="abx-modal-row-main">
-              <div class="abx-modal-row-title">${esc(it.label)}</div>
-              <div class="abx-modal-row-meta">${esc(scheduleDesc)}</div>
-            </div>
-            <div class="abx-modal-row-actions">
-              <button type="button" class="ghost-action sm-btn abx-edit-btn" data-idx="${idx}" title="Edit antibiotic name, schedule, or start date/time">Edit</button>
-              ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="-1" title="Mark 1 dose held / missed">-1 Held</button>` : ''}
-              ${it.freq ? `<button type="button" class="ghost-action sm-btn abx-offset-btn" data-idx="${idx}" data-delta="1" title="Count 1 additional dose given">+1 Dose</button>` : ''}
-              <button type="button" class="btn-secondary sm-btn abx-finish-btn" data-idx="${idx}" title="Complete course and log into today's shift">Finish</button>
-              <button type="button" class="ghost-action danger-ghost sm-btn abx-remove-btn" data-idx="${idx}" title="Delete antibiotic entry">Remove</button>
-            </div>
-          </div>`;
-      })
-      .join('');
-  }
-
+  activeEl.innerHTML = buildAbxActiveListHtml(active, abxModalEditIdx);
   if (compCountEl) compCountEl.textContent = String(completed.length);
-  if (!completed.length) {
-    compEl.innerHTML = '<div class="cf-meta">No completed courses archived yet.</div>';
-  } else {
-    compEl.innerHTML = completed
-      .map(
-        (c, idx) => `
-        <div class="abx-completed-row">
-          <span class="abx-completed-lbl">${esc(c.label)}</span>
-          <button type="button" class="ghost-action danger-ghost sm-btn abx-del-completed-btn" data-idx="${idx}" aria-label="Remove ${esc(c.drug)} from history">${uiIcon('x')}</button>
-        </div>`
-      )
-      .join('');
-  }
+  compEl.innerHTML = buildAbxCompletedListHtml(completed);
 }
 
 async function openAbxModal(noteId, triggerEl = null) {
@@ -11907,6 +12049,11 @@ $('abxModalCompletedList')?.addEventListener('click', async (e) => {
   const note = notes.find((n) => n.id === abxModalNoteId);
   if (!note) return;
   const idx = parseInt(btn.dataset.idx, 10);
+  await deleteCompletedAbxAtIndex(note, idx);
+});
+
+async function deleteCompletedAbxAtIndex(note, idx) {
+  if (!note) return;
   const parsed = parseChart(getActiveAbxNoteContent(note), note);
   const completed = (parsed.completedAntibiotics || []).map((c) => ({ ...c }));
   if (Number.isNaN(idx) || !completed[idx]) return;
@@ -11921,6 +12068,439 @@ $('abxModalCompletedList')?.addEventListener('click', async (e) => {
   }));
   await saveAbxStateToChart(note, active, completed);
   toast(`Deleted ${removed.drug} from history`);
+}
+
+// Chart Editor Antibiotics tab (#chartAbxPane)
+let editorAbxEditIdx = null;
+
+function resetEditorAbxForm() {
+  editorAbxEditIdx = null;
+  if ($('editorAbxFormTitle')) $('editorAbxFormTitle').textContent = 'Start / Add Antibiotic';
+  if ($('editorAbxAddBtn')) $('editorAbxAddBtn').innerHTML = `${uiIcon('plus')} Add Antibiotic`;
+  if ($('editorAbxCancelEditBtn')) $('editorAbxCancelEditBtn').hidden = true;
+  if ($('editorAbxDrugInput')) $('editorAbxDrugInput').value = '';
+  if ($('editorAbxFreqSelect')) $('editorAbxFreqSelect').value = 'q8h';
+  if ($('editorAbxDaysInput')) $('editorAbxDaysInput').value = '';
+  if ($('editorAbxDateInput')) $('editorAbxDateInput').value = getTodayDateStrings().yyyymmdd;
+  if ($('editorAbxTimeInput')) $('editorAbxTimeInput').value = nowHhMm();
+  updateEditorAbxLivePreview();
+}
+
+function updateEditorAbxLivePreview() {
+  updateAbxPreviewInto('editorAbxLivePreview', {
+    drugId: 'editorAbxDrugInput',
+    freqId: 'editorAbxFreqSelect',
+    daysId: 'editorAbxDaysInput',
+    dateId: 'editorAbxDateInput',
+    timeId: 'editorAbxTimeInput',
+  });
+}
+
+function renderEditorAbxPane() {
+  const note = notes.find((n) => n.id === currentId);
+  const activeEl = $('editorAbxActiveList');
+  const activeCountEl = $('editorAbxActiveCount');
+  const compEl = $('editorAbxCompletedList');
+  const compCountEl = $('editorAbxCompletedCount');
+  if (!activeEl || !compEl) return;
+
+  if (!note) {
+    activeEl.innerHTML = '<div class="abx-empty-note">Select a patient chart first.</div>';
+    if (activeCountEl) activeCountEl.textContent = '0';
+    if (compCountEl) compCountEl.textContent = '0';
+    compEl.innerHTML = '';
+    return;
+  }
+
+  const parsed = parseChart($('noteText') ? $('noteText').value : note.content, note);
+  const active = parsed.trackedAntibiotics || [];
+  const completed = parsed.completedAntibiotics || [];
+
+  if (activeCountEl) activeCountEl.textContent = String(active.length);
+  activeEl.innerHTML = buildAbxActiveListHtml(active, editorAbxEditIdx);
+  if (compCountEl) compCountEl.textContent = String(completed.length);
+  compEl.innerHTML = buildAbxCompletedListHtml(completed);
+  updateEditorAbxLivePreview();
+}
+
+['editorAbxDrugInput', 'editorAbxFreqSelect', 'editorAbxDaysInput', 'editorAbxDateInput', 'editorAbxTimeInput'].forEach((id) => {
+  if (!$(id)) return;
+  $(id).addEventListener($(id).tagName === 'SELECT' || id === 'editorAbxDateInput' || id === 'editorAbxTimeInput' ? 'change' : 'input', updateEditorAbxLivePreview);
+});
+
+$('editorAbxCancelEditBtn')?.addEventListener('click', () => {
+  resetEditorAbxForm();
+  renderEditorAbxPane();
+});
+
+$('editorAbxForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return toast('Select a patient chart first');
+  const drug = $('editorAbxDrugInput')?.value.trim();
+  if (!drug) return toast('Enter antibiotic name & dose first');
+  const freq = $('editorAbxFreqSelect')?.value || 'q8h';
+  const startDate = isoToMmDdYyyy($('editorAbxDateInput')?.value || '') || getTodayDateStrings().mmddyyyy;
+  const startTime = $('editorAbxTimeInput')?.value.trim() || nowHhMm();
+  const plannedNum = parseInt($('editorAbxDaysInput')?.value || '', 10);
+  const plannedDays = Number.isFinite(plannedNum) && plannedNum > 0 ? plannedNum : null;
+
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  const nextActive = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+  }));
+  const wasEditing = editorAbxEditIdx !== null && Boolean(nextActive[editorAbxEditIdx]);
+  if (wasEditing) {
+    const prev = nextActive[editorAbxEditIdx];
+    nextActive[editorAbxEditIdx] = {
+      drug,
+      startDate,
+      plannedDays,
+      freq,
+      startTime,
+      doseOffset: prev.doseOffset || 0,
+    };
+  } else {
+    nextActive.push({ drug, startDate, plannedDays, freq, startTime, doseOffset: 0 });
+  }
+  resetEditorAbxForm();
+  await saveAbxStateToChart(note, nextActive, parsed.completedAntibiotics || []);
+  toast(wasEditing ? `Updated ${drug}` : `Added ${drug}`);
+});
+
+$('editorAbxActiveList')?.addEventListener('click', async (e) => {
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return;
+  const parsed = parseChart(getActiveAbxNoteContent(note), note);
+  const active = (parsed.trackedAntibiotics || []).map((it) => ({
+    drug: it.drug,
+    startDate: it.startDate,
+    plannedDays: it.plannedDays,
+    freq: it.freq,
+    startTime: it.startTime,
+    doseOffset: it.doseOffset || 0,
+    dayCount: it.dayCount,
+  }));
+  const completed = (parsed.completedAntibiotics || []).map((c) => ({ ...c }));
+
+  const editBtn = e.target.closest('.abx-edit-btn[data-idx]');
+  if (editBtn) {
+    const idx = parseInt(editBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    editorAbxEditIdx = idx;
+    if ($('editorAbxFormTitle')) $('editorAbxFormTitle').textContent = 'Edit Antibiotic';
+    if ($('editorAbxAddBtn')) $('editorAbxAddBtn').innerHTML = `${uiIcon('check')} Save Changes`;
+    if ($('editorAbxCancelEditBtn')) $('editorAbxCancelEditBtn').hidden = false;
+    if ($('editorAbxDrugInput')) $('editorAbxDrugInput').value = target.drug || '';
+    if ($('editorAbxFreqSelect')) $('editorAbxFreqSelect').value = target.freq || 'q8h';
+    if ($('editorAbxDaysInput')) $('editorAbxDaysInput').value = target.plannedDays ? String(target.plannedDays) : '';
+    if ($('editorAbxDateInput')) {
+      $('editorAbxDateInput').value = dateStringToIso(target.startDate) || getTodayDateStrings().yyyymmdd;
+    }
+    if ($('editorAbxTimeInput')) $('editorAbxTimeInput').value = target.startTime || '08:00';
+    renderEditorAbxPane();
+    $('editorAbxDrugInput')?.focus();
+    return;
+  }
+
+  const offsetBtn = e.target.closest('.abx-offset-btn[data-idx]');
+  if (offsetBtn) {
+    const idx = parseInt(offsetBtn.dataset.idx, 10);
+    const delta = parseInt(offsetBtn.dataset.delta || '0', 10);
+    if (!Number.isNaN(idx) && active[idx] && delta) {
+      active[idx].doseOffset = (active[idx].doseOffset || 0) + delta;
+      await saveAbxStateToChart(note, active, completed);
+      toast(delta > 0 ? `Added +1 dose to ${active[idx].drug}` : `Marked 1 dose held for ${active[idx].drug}`);
+    }
+    return;
+  }
+
+  const finishBtn = e.target.closest('.abx-finish-btn[data-idx]');
+  if (finishBtn) {
+    const idx = parseInt(finishBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    if (editorAbxEditIdx === idx) resetEditorAbxForm();
+    else if (editorAbxEditIdx !== null && idx < editorAbxEditIdx) editorAbxEditIdx--;
+    active.splice(idx, 1);
+    const todayStr = getTodayDateStrings().mmddyyyy;
+    const doneDays = target.dayCount !== null && target.dayCount !== undefined ? target.dayCount : 0;
+    completed.unshift({
+      drug: target.drug,
+      startDate: target.startDate || todayStr,
+      completedDate: todayStr,
+      completedDays: doneDays,
+      plannedDays: target.plannedDays || null,
+      freq: target.freq || '',
+    });
+    const finishLine = `Completed antibiotic: ${target.drug} (D${doneDays}${target.plannedDays ? `/${target.plannedDays}` : ''} · started ${target.startDate || todayStr})`;
+    await saveAbxStateToChart(note, active, completed, { logFinishLine: finishLine });
+    toast(`Finished ${target.drug} — archived & logged`);
+    return;
+  }
+
+  const removeBtn = e.target.closest('.abx-remove-btn[data-idx]');
+  if (removeBtn) {
+    const idx = parseInt(removeBtn.dataset.idx, 10);
+    const target = active[idx];
+    if (!target) return;
+    if (editorAbxEditIdx === idx) resetEditorAbxForm();
+    else if (editorAbxEditIdx !== null && idx < editorAbxEditIdx) editorAbxEditIdx--;
+    active.splice(idx, 1);
+    await saveAbxStateToChart(note, active, completed);
+    toast(`Removed ${target.drug}`);
+  }
+});
+
+$('editorAbxCompletedList')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.abx-del-completed-btn[data-idx]');
+  if (!btn) return;
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return;
+  const idx = parseInt(btn.dataset.idx, 10);
+  await deleteCompletedAbxAtIndex(note, idx);
+});
+
+// Chart Editor Diagnoses / Problem List tab (#chartProblemsPane)
+let editorProblemEditIdx = null;
+
+function resetEditorProblemForm() {
+  editorProblemEditIdx = null;
+  if ($('editorProblemFormTitle')) $('editorProblemFormTitle').textContent = 'Add Diagnosis';
+  if ($('editorProblemAddBtn')) $('editorProblemAddBtn').innerHTML = `${uiIcon('plus')} Add Diagnosis`;
+  if ($('editorProblemCancelEditBtn')) $('editorProblemCancelEditBtn').hidden = true;
+  if ($('editorProblemInput')) $('editorProblemInput').value = '';
+}
+
+async function saveProblemStateToChart(note, activeProblemsList, resolvedProblemsList) {
+  if (!note) return;
+  const baseContent =
+    currentMode === 'editor' && currentId === note.id && $('noteText')
+      ? $('noteText').value
+      : note.content || '';
+  const nextContent = syncFrontmatter(baseContent, {
+    assessment: formatWorkingProblems(activeProblemsList),
+    problems_resolved: formatResolvedProblems(resolvedProblemsList),
+  });
+
+  note.content = nextContent;
+  note.updated = Date.now();
+  await put(note);
+  syncSingleNoteInMemory(note);
+
+  if (currentId === note.id) {
+    if ($('noteText')) $('noteText').value = note.content;
+    lastSavedChartContent = note.content;
+    dirtyChart = false;
+    updateSaveStatusPill('saved');
+    populateProfileInputs(note, note.content, true);
+    refreshActiveEditorView();
+  }
+}
+
+function renderEditorProblemsPane() {
+  const note = notes.find((n) => n.id === currentId);
+  const activeEl = $('editorProblemsActiveList');
+  const activeCountEl = $('editorProblemsActiveCount');
+  const resEl = $('editorProblemsResolvedList');
+  const resCountEl = $('editorProblemsResolvedCount');
+  if (!activeEl || !resEl) return;
+
+  if (!note) {
+    activeEl.innerHTML = '<div class="abx-empty-note">Select a patient chart first.</div>';
+    if (activeCountEl) activeCountEl.textContent = '0';
+    if (resCountEl) resCountEl.textContent = '0';
+    resEl.innerHTML = '';
+    return;
+  }
+
+  const content = $('noteText') ? $('noteText').value : note.content || '';
+  const parsed = parseChart(content, note);
+  const active = parsed.activeProblems || parseWorkingProblems(parsed.assessment || '');
+  const resolved = parsed.resolvedProblems || [];
+
+  if (activeCountEl) activeCountEl.textContent = String(active.length);
+  if (!active.length) {
+    activeEl.innerHTML = '<div class="abx-empty-note">No active diagnoses logged. Add one below (supports multiple lines).</div>';
+  } else {
+    activeEl.innerHTML = active
+      .map(
+        (dx, idx) => `
+        <div class="abx-modal-row ${editorProblemEditIdx === idx ? 'is-editing' : ''}">
+          <div class="abx-modal-row-main">
+            <div class="abx-modal-row-title">${esc(dx)}</div>
+          </div>
+          <div class="abx-modal-row-actions">
+            <button type="button" class="ghost-action sm-btn problem-edit-btn" data-idx="${idx}" title="Edit diagnosis">Edit</button>
+            <button type="button" class="ghost-action sm-btn problem-order-btn" data-idx="${idx}" data-dir="-1" title="Move up" aria-label="Move ${esc(dx)} up" ${idx === 0 ? 'disabled' : ''}>↑</button>
+            <button type="button" class="ghost-action sm-btn problem-order-btn" data-idx="${idx}" data-dir="1" title="Move down" aria-label="Move ${esc(dx)} down" ${idx === active.length - 1 ? 'disabled' : ''}>↓</button>
+            <button type="button" class="btn-secondary sm-btn problem-resolve-btn" data-idx="${idx}" title="Mark problem resolved">Resolve</button>
+            <button type="button" class="ghost-action danger-ghost sm-btn problem-remove-btn" data-idx="${idx}" title="Delete diagnosis">Remove</button>
+          </div>
+        </div>`
+      )
+      .join('');
+  }
+
+  if (resCountEl) resCountEl.textContent = String(resolved.length);
+  if (!resolved.length) {
+    resEl.innerHTML = '<div class="cf-meta">No resolved problems recorded yet.</div>';
+  } else {
+    resEl.innerHTML = resolved
+      .map(
+        (item, idx) => `
+        <div class="abx-completed-row">
+          <span class="abx-completed-lbl">${esc(item.label)}</span>
+          <div class="abx-modal-row-actions">
+            <button type="button" class="ghost-action sm-btn problem-reopen-btn" data-idx="${idx}" title="Move back to active diagnoses">Reopen</button>
+            <button type="button" class="ghost-action danger-ghost sm-btn problem-del-resolved-btn" data-idx="${idx}" aria-label="Delete ${esc(item.text)} from resolved history">${uiIcon('x')}</button>
+          </div>
+        </div>`
+      )
+      .join('');
+  }
+}
+
+$('editorProblemCancelEditBtn')?.addEventListener('click', () => {
+  resetEditorProblemForm();
+  renderEditorProblemsPane();
+});
+
+$('editorProblemForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return toast('Select a patient chart first');
+  const rawInput = $('editorProblemInput')?.value || '';
+  const entered = parseWorkingProblems(rawInput);
+  if (!entered.length) return toast('Enter one or more diagnoses first');
+
+  const content = $('noteText') ? $('noteText').value : note.content || '';
+  const parsed = parseChart(content, note);
+  const active = [...(parsed.activeProblems || parseWorkingProblems(parsed.assessment || ''))];
+  const resolved = (parsed.resolvedProblems || []).map((it) => ({ ...it }));
+
+  const wasEditing = editorProblemEditIdx !== null && Boolean(active[editorProblemEditIdx]);
+  if (wasEditing) {
+    active.splice(editorProblemEditIdx, 1, ...entered);
+  } else {
+    const existingKeys = new Set(active.map((x) => x.toLowerCase()));
+    for (const dx of entered) {
+      if (!existingKeys.has(dx.toLowerCase())) {
+        existingKeys.add(dx.toLowerCase());
+        active.push(dx);
+      }
+    }
+  }
+  resetEditorProblemForm();
+  await saveProblemStateToChart(note, active, resolved);
+  toast(wasEditing ? 'Updated diagnosis' : `Added ${entered.length} diagnosis${entered.length > 1 ? 'es' : ''}`);
+});
+
+$('editorProblemsActiveList')?.addEventListener('click', async (e) => {
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return;
+  const content = $('noteText') ? $('noteText').value : note.content || '';
+  const parsed = parseChart(content, note);
+  const active = [...(parsed.activeProblems || parseWorkingProblems(parsed.assessment || ''))];
+  const resolved = (parsed.resolvedProblems || []).map((it) => ({ ...it }));
+
+  const editBtn = e.target.closest('.problem-edit-btn[data-idx]');
+  if (editBtn) {
+    const idx = parseInt(editBtn.dataset.idx, 10);
+    if (!active[idx]) return;
+    editorProblemEditIdx = idx;
+    if ($('editorProblemFormTitle')) $('editorProblemFormTitle').textContent = 'Edit Diagnosis';
+    if ($('editorProblemAddBtn')) $('editorProblemAddBtn').innerHTML = `${uiIcon('check')} Save Diagnosis`;
+    if ($('editorProblemCancelEditBtn')) $('editorProblemCancelEditBtn').hidden = false;
+    if ($('editorProblemInput')) $('editorProblemInput').value = active[idx];
+    renderEditorProblemsPane();
+    $('editorProblemInput')?.focus();
+    return;
+  }
+
+  const orderBtn = e.target.closest('.problem-order-btn[data-idx]');
+  if (orderBtn) {
+    const idx = parseInt(orderBtn.dataset.idx, 10);
+    const dir = parseInt(orderBtn.dataset.dir || '0', 10);
+    const swapIdx = idx + dir;
+    if (!Number.isNaN(idx) && dir && swapIdx >= 0 && swapIdx < active.length) {
+      const tmp = active[idx];
+      active[idx] = active[swapIdx];
+      active[swapIdx] = tmp;
+      if (editorProblemEditIdx === idx) editorProblemEditIdx = swapIdx;
+      else if (editorProblemEditIdx === swapIdx) editorProblemEditIdx = idx;
+      await saveProblemStateToChart(note, active, resolved);
+    }
+    return;
+  }
+
+  const resolveBtn = e.target.closest('.problem-resolve-btn[data-idx]');
+  if (resolveBtn) {
+    const idx = parseInt(resolveBtn.dataset.idx, 10);
+    const dx = active[idx];
+    if (!dx) return;
+    if (editorProblemEditIdx === idx) resetEditorProblemForm();
+    else if (editorProblemEditIdx !== null && idx < editorProblemEditIdx) editorProblemEditIdx--;
+    active.splice(idx, 1);
+    resolved.unshift({
+      text: dx,
+      resolvedDate: getTodayDateStrings().mmddyyyy,
+      note: '',
+    });
+    await saveProblemStateToChart(note, active, resolved);
+    toast(`Marked "${dx}" resolved`);
+    return;
+  }
+
+  const removeBtn = e.target.closest('.problem-remove-btn[data-idx]');
+  if (removeBtn) {
+    const idx = parseInt(removeBtn.dataset.idx, 10);
+    const dx = active[idx];
+    if (!dx) return;
+    if (editorProblemEditIdx === idx) resetEditorProblemForm();
+    else if (editorProblemEditIdx !== null && idx < editorProblemEditIdx) editorProblemEditIdx--;
+    active.splice(idx, 1);
+    await saveProblemStateToChart(note, active, resolved);
+    toast(`Removed "${dx}"`);
+  }
+});
+
+$('editorProblemsResolvedList')?.addEventListener('click', async (e) => {
+  const note = notes.find((n) => n.id === currentId);
+  if (!note) return;
+  const content = $('noteText') ? $('noteText').value : note.content || '';
+  const parsed = parseChart(content, note);
+  const active = [...(parsed.activeProblems || parseWorkingProblems(parsed.assessment || ''))];
+  const resolved = (parsed.resolvedProblems || []).map((it) => ({ ...it }));
+
+  const reopenBtn = e.target.closest('.problem-reopen-btn[data-idx]');
+  if (reopenBtn) {
+    const idx = parseInt(reopenBtn.dataset.idx, 10);
+    const item = resolved[idx];
+    if (!item) return;
+    resolved.splice(idx, 1);
+    if (!active.some((x) => x.toLowerCase() === item.text.toLowerCase())) {
+      active.push(item.text);
+    }
+    await saveProblemStateToChart(note, active, resolved);
+    toast(`Reopened "${item.text}"`);
+    return;
+  }
+
+  const delBtn = e.target.closest('.problem-del-resolved-btn[data-idx]');
+  if (delBtn) {
+    const idx = parseInt(delBtn.dataset.idx, 10);
+    if (Number.isNaN(idx) || !resolved[idx]) return;
+    const removed = resolved.splice(idx, 1)[0];
+    await saveProblemStateToChart(note, active, resolved);
+    toast(`Deleted "${removed.text}" from resolved history`);
+  }
 });
 
 // Clinical Calculators & Safety Audit modal actions

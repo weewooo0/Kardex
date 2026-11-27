@@ -497,6 +497,8 @@
             <div class="editor-tabs">
               <button type="button" id="editorTimelineTab" class="mode-btn active" aria-pressed="true"><svg class="ui-ico" aria-hidden="true"><use href="#ico-timeline"></use></svg> Chart Timeline</button>
               <button type="button" id="editorLabsTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-flask"></use></svg> Lab Results</button>
+              <button type="button" id="editorProblemsTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-stethoscope"></use></svg> Diagnoses</button>
+              <button type="button" id="editorAbxTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-pill"></use></svg> Antibiotics</button>
               <button type="button" id="editorRawTab" class="mode-btn" aria-pressed="false"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-code"></use></svg> Raw Markdown</button>
             </div>
           </div>
@@ -540,6 +542,90 @@
               </div>
             </div>
             <div id="chartLabsContent" class="labs-summary-content"></div>
+          </div>
+
+          <div id="chartProblemsPane" hidden>
+            <div class="editor-subpane-stack">
+              <div class="editor-subpane-head">
+                <span class="editor-subpane-title">Active Diagnoses / Working Impression (<span id="editorProblemsActiveCount">0</span>)</span>
+              </div>
+              <div id="editorProblemsActiveList" class="abx-modal-list"></div>
+
+              <form id="editorProblemForm" class="abx-form-card">
+                <div id="editorProblemFormTitle" class="abx-section-title mb-8">Add Diagnosis</div>
+                <div class="field mb-8">
+                  <label for="editorProblemInput" class="sr-only">Diagnosis or Working Impression (one per line)</label>
+                  <textarea id="editorProblemInput" rows="2" placeholder="Add one or more diagnoses (one per line or semicolon-separated)..."></textarea>
+                </div>
+                <div class="abx-form-actions">
+                  <button type="submit" id="editorProblemAddBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Diagnosis</button>
+                  <button type="button" id="editorProblemCancelEditBtn" class="ghost-action" hidden>Cancel Edit</button>
+                </div>
+              </form>
+
+              <details id="editorProblemsResolvedDetails" class="abx-completed-details">
+                <summary class="abx-completed-summary">
+                  <span>Resolved Problems (<span id="editorProblemsResolvedCount">0</span>)</span>
+                  <span class="profile-summary-badge">View ▾</span>
+                </summary>
+                <div id="editorProblemsResolvedList" class="abx-completed-list"></div>
+              </details>
+            </div>
+          </div>
+
+          <div id="chartAbxPane" hidden>
+            <div class="editor-subpane-stack">
+              <div class="editor-subpane-head">
+                <span class="editor-subpane-title">Active Antibiotics (<span id="editorAbxActiveCount">0</span>)</span>
+              </div>
+              <div id="editorAbxActiveList" class="abx-modal-list"></div>
+
+              <form id="editorAbxForm" class="abx-form-card">
+                <div id="editorAbxFormTitle" class="abx-section-title mb-8">Start / Add Antibiotic</div>
+                <div class="abx-form-grid">
+                  <div class="field abx-field-span2">
+                    <label for="editorAbxDrugInput">Antibiotic &amp; Dose</label>
+                    <input id="editorAbxDrugInput" type="text" placeholder="e.g. Meropenem 1g IV, Vancomycin 1g IV" required>
+                  </div>
+                  <div class="field">
+                    <label for="editorAbxFreqSelect">Schedule</label>
+                    <select id="editorAbxFreqSelect">
+                      <option value="q8h">q8h (3×/day)</option>
+                      <option value="q12h">q12h (2×/day)</option>
+                      <option value="q24h">q24h / OD (1×/day)</option>
+                      <option value="q6h">q6h (4×/day)</option>
+                      <option value="q4h">q4h (6×/day)</option>
+                      <option value="q48h">q48h (renal)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="editorAbxDaysInput">Planned Days (opt.)</label>
+                    <input id="editorAbxDaysInput" type="number" inputmode="numeric" min="1" max="90" placeholder="e.g. 7">
+                  </div>
+                  <div class="field">
+                    <label for="editorAbxDateInput">First-Dose Date</label>
+                    <input id="editorAbxDateInput" type="date">
+                  </div>
+                  <div class="field">
+                    <label for="editorAbxTimeInput">First-Dose Time</label>
+                    <input id="editorAbxTimeInput" type="time">
+                  </div>
+                </div>
+                <div id="editorAbxLivePreview" class="abx-live-preview"></div>
+                <div class="abx-form-actions">
+                  <button type="submit" id="editorAbxAddBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Add Antibiotic</button>
+                  <button type="button" id="editorAbxCancelEditBtn" class="ghost-action" hidden>Cancel Edit</button>
+                </div>
+              </form>
+
+              <details id="editorAbxCompletedDetails" class="abx-completed-details">
+                <summary class="abx-completed-summary">
+                  <span>Completed Courses (<span id="editorAbxCompletedCount">0</span>)</span>
+                  <span class="profile-summary-badge">View ▾</span>
+                </summary>
+                <div id="editorAbxCompletedList" class="abx-completed-list"></div>
+              </details>
+            </div>
           </div>
 
           <div id="chartRawPane" hidden>
@@ -712,7 +798,7 @@
           <span class="settings-nav-ico" aria-hidden="true"><svg class="ui-ico"><use href="#ico-sliders-h"></use></svg></span>
           <span class="settings-nav-text">
             <span class="settings-nav-title">Appearance</span>
-            <span class="settings-nav-sub">True Obsidian &amp; Ink &amp; Paper</span>
+            <span class="settings-nav-sub">Theme, voice &amp; sample tools</span>
           </span>
         </button>
         <button type="button" id="settingsTabClinical" class="settings-nav-btn" role="tab" data-settings-tab="clinical" aria-controls="settingsPanelClinical" aria-selected="false">
@@ -761,14 +847,39 @@
 
       <div class="settings-content">
         <div id="settingsPanelAppearance" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabAppearance">
-          <section id="appearanceSettingsCard" class="panel">
-            <div class="panel-head">
-              <h2>Appearance</h2>
-              <span id="themeStatusPill" class="status-meta" role="status" aria-live="polite">True Obsidian</span>
-            </div>
-            <div id="themePaletteGrid" class="theme-palette-grid" role="radiogroup" aria-label="Theme selection"></div>
-            <p class="fine">High-contrast Swiss monochrome surface modes reserve color strictly for clinical status signals.</p>
-          </section>
+          <div class="settings-stack">
+            <section id="appearanceSettingsCard" class="panel">
+              <div class="panel-head">
+                <h2>Appearance</h2>
+                <span id="themeStatusPill" class="status-meta" role="status" aria-live="polite">True Obsidian</span>
+              </div>
+              <div id="themePaletteGrid" class="theme-palette-grid" role="radiogroup" aria-label="Theme selection"></div>
+              <p class="fine">High-contrast Swiss monochrome surface modes reserve color strictly for clinical status signals.</p>
+            </section>
+
+            <section id="workspaceFeaturesCard" class="panel">
+              <div class="panel-head">
+                <h2>Workspace Features</h2>
+                <span id="workspaceFeaturesPill" class="status-meta" role="status" aria-live="polite">All enabled</span>
+              </div>
+              <div class="feature-toggle-list">
+                <label class="feature-toggle-row">
+                  <input type="checkbox" id="settingDictationToggle" checked>
+                  <div class="feature-toggle-copy">
+                    <span class="feature-toggle-title">Enable Voice Dictation</span>
+                    <span class="feature-toggle-desc">Show Dictate buttons in Rounds, Chart Editor, and Offline Voice settings.</span>
+                  </div>
+                </label>
+                <label class="feature-toggle-row">
+                  <input type="checkbox" id="settingSamplesToggle" checked>
+                  <div class="feature-toggle-copy">
+                    <span class="feature-toggle-title">Show Sample / Demo Buttons</span>
+                    <span class="feature-toggle-desc">Show Load Sample Census, Sample Lab/Relay, Sample Refs, and Sample Admitting Note actions.</span>
+                  </div>
+                </label>
+              </div>
+            </section>
+          </div>
         </div>
 
         <div id="settingsPanelClinical" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabClinical" hidden>
@@ -1319,7 +1430,10 @@
 
     <div class="modal-body">
       <label for="inboxPasteInput" class="lbl" style="margin-top: 0;">Paste Raw Lab Dump or Chat Relay</label>
-      <textarea id="inboxPasteInput" rows="4" spellcheck="false" placeholder="Paste messy Viber/Telegram update or raw lab results here..."></textarea>
+      <div class="textarea-overlay-wrap">
+        <textarea id="inboxPasteInput" rows="4" spellcheck="false" placeholder="Paste messy Viber/Telegram update or raw lab results here..."></textarea>
+        <button type="button" id="inboxPasteClipboardBtn" class="textarea-corner-btn" title="Paste from clipboard" aria-label="Paste from clipboard"><svg class="ui-ico" aria-hidden="true"><use href="#ico-clipboard-list"></use></svg><span>Paste</span></button>
+      </div>
       <div class="row mt-8 mb-10">
         <button type="button" id="inboxCaptureBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-plus"></use></svg> Capture to Inbox</button>
         <button type="button" id="inboxSampleBtn" class="ghost-action"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg> Sample Lab/Relay</button>
@@ -2000,7 +2114,7 @@
         </div>
 
         <div class="grid-profile-extra">
-          <div class="field"><label for="assessmentInput">Working Assessment / Diagnosis</label><input id="assessmentInput" placeholder="e.g. Community-Acquired Pneumonia; T2DM"></div>
+          <div class="field field-span-full"><label for="assessmentInput">Working Assessment / Diagnoses (one per line)</label><textarea id="assessmentInput" rows="3" placeholder="Community-Acquired Pneumonia&#10;Type 2 Diabetes Mellitus"></textarea></div>
           <div class="field"><label for="admittedInput">Date Admitted</label><input id="admittedInput" inputmode="numeric" enterkeyhint="next" placeholder="MM-DD-YYYY"></div>
           <div class="field"><label for="icuAdmittedInput">ICU Admitted</label><input id="icuAdmittedInput" inputmode="numeric" enterkeyhint="done" placeholder="MM-DD-YYYY"></div>
         </div>

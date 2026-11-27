@@ -1404,14 +1404,21 @@ main {
   align-items: center;
   gap: 8px;
   margin-top: 0;
-  margin-bottom: 10px;
+  margin-bottom: 0;
   padding-top: 2px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line-soft);
 }
 .ledger-footer + .ledger-drips,
+.ledger-footer + .ledger-params,
+.ledger-dx-accordion + .ledger-drips,
+.ledger-dx-accordion + .ledger-params,
 .ledger-footer + .ledger-params > .ledger-param:first-child {
   border-top: none;
+}
+.ledger-dx-accordion .ledger-impression {
+  margin: 0 0 12px;
+  font-size: 13.5px;
 }
 .ledger-btn-primary {
   flex: 1.25 1 0;
@@ -3279,7 +3286,7 @@ html.kb-open .modal-overlay {
 }
 .grid-profile-extra {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   align-items: end;
   margin-bottom: 12px;
@@ -3325,6 +3332,8 @@ html.kb-open .modal-overlay {
 }
 .editor-tabs::-webkit-scrollbar { display: none; }
 .editor-tabs .mode-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 9px 2px;
   margin-bottom: -1px;
   border-bottom: 2px solid transparent;
@@ -6537,6 +6546,147 @@ body.mode-editor header.app-header .header-actions {
   .tl-edit-subgrid-2 {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.field-span-full {
+  grid-column: 1 / -1;
+}
+#assessmentInput {
+  min-height: 76px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.ledger-dx-line {
+  line-height: 1.42;
+}
+.ledger-dx-line + .ledger-dx-line {
+  margin-top: 2px;
+}
+
+.editor-subpane-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 6px;
+}
+.editor-subpane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.editor-subpane-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mut);
+}
+.problem-order-btn {
+  min-width: 30px;
+  padding: 0 7px;
+  font-weight: 600;
+}
+.problem-order-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.textarea-overlay-wrap {
+  position: relative;
+  width: 100%;
+}
+.textarea-overlay-wrap textarea {
+  width: 100%;
+  padding-top: 10px;
+  padding-right: 78px;
+}
+.textarea-corner-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--txt);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.textarea-corner-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-ctrl);
+}
+.textarea-corner-btn .ui-ico {
+  width: 13px;
+  height: 13px;
+}
+
+.feature-toggle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.feature-toggle-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  cursor: pointer;
+}
+.feature-toggle-row:hover {
+  border-color: var(--line);
+}
+.feature-toggle-row input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin: 2px 0 0;
+  cursor: pointer;
+}
+.feature-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.feature-toggle-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--txt);
+}
+.feature-toggle-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mut);
+}
+
+body.hide-dictation-ui .dictate-btn,
+body.hide-dictation-ui #settingsTabVoice {
+  display: none !important;
+}
+body.hide-dictation-ui .editor-sec-pair {
+  grid-template-columns: minmax(0, 1fr);
+}
+body.hide-samples-ui #loadSyntheticBtn,
+body.hide-samples-ui #emptyLoadBtn,
+body.hide-samples-ui #librarySampleBtn,
+body.hide-samples-ui #libEmptySampleBtn,
+body.hide-samples-ui #loadSampleScratchBtn,
+body.hide-samples-ui #emptyLoadSampleScratchBtn,
+body.hide-samples-ui #inboxSampleBtn,
+body.hide-samples-ui #admitSamplePasteBtn {
+  display: none !important;
 }
 
 @media print {
