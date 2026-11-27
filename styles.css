@@ -233,8 +233,83 @@ body {
   color: var(--txt);
 }
 .vault-reconnect-banner[hidden],
+.vault-sync-live-banner[hidden],
+.vault-progress-wrap[hidden],
 .backup-warn-banner[hidden] {
   display: none !important;
+}
+.vault-sync-live-banner,
+.vault-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.vault-sync-live-head,
+.vault-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.vault-sync-live-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--txt);
+}
+.vault-sync-live-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--txt);
+}
+.vault-progress-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.vault-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--txt);
+  border-radius: 999px;
+  transition: width 0.14s ease;
+}
+.vault-progress-bar.is-indeterminate {
+  animation: vaultScanSlide 1.1s ease-in-out infinite;
+}
+@keyframes vaultScanSlide {
+  0% { transform: translateX(-60%); }
+  100% { transform: translateX(320%); }
+}
+.vault-progress-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--mut);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#vaultLastSummaryText {
+  text-align: right;
+  word-break: break-word;
+  max-width: 68%;
+}
+.list-load-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
 }
 .backup-warn-msg {
   flex: 1 1 180px;

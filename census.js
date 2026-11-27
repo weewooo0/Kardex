@@ -212,10 +212,17 @@ export function compileTemplateConfig(config = DEFAULT_TEMPLATE_CONFIG) {
 }
 
 export function metaOf(text) {
-  const m = String(text || '').match(/^---\s*\n([\s\S]*?)\n---/);
+  const clean = String(text || '').replace(/^\uFEFF/, '');
   const out = {};
-  if (m) {
-    for (const line of m[1].split('\n')) {
+  if (!clean.startsWith('---')) return out;
+  const firstNl = clean.indexOf('\n');
+  if (firstNl === -1) return out;
+  if (!/^---[ \t]*\r?$/.test(clean.slice(0, firstNl))) return out;
+  const rest = clean.slice(firstNl + 1);
+  const closeMatch = rest.match(/^([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  const frontBlock = closeMatch ? closeMatch[1] : (/^---[ \t]*(?:\r?\n|$)/.test(rest) ? '' : null);
+  if (frontBlock !== null) {
+    for (const line of frontBlock.split(/\r?\n/)) {
       const p = line.match(/^([^:]+):\s*(.*)$/);
       if (p) {
         out[p[1].trim().toLowerCase()] = p[2].trim().replace(/^["']|["']$/g, '');
@@ -223,6 +230,51 @@ export function metaOf(text) {
     }
   }
   return out;
+}
+
+const ROOM_TITLE_KEYWORD_RE = /^(?:unassigned|room|rm\.?|bed|ward|icu|nccu|micu|sicu|ccu|picu|nicu|er|or|pacu|stepdown|tele|iso|private|suite|pav|floor|unit|bay|obs|cvicu|tcu|hd|hdu)\b/i;
+
+function looksLikeRoomToken(s) {
+  const clean = String(s || '').trim();
+  if (!clean) return false;
+  if (ROOM_TITLE_KEYWORD_RE.test(clean)) return true;
+  return /\d/.test(clean) && clean.length <= 20;
+}
+
+export function parseRoomAndNameFromTitle(rawTitle) {
+  const stem = String(rawTitle || '')
+    .trim()
+    .replace(/\.(?:md|markdown|txt)$/i, '')
+    .trim();
+  if (!stem) return { room: '', name: '' };
+  if (/^(?:untitled|untitled note|unknown patient)$/i.test(stem)) {
+    return { room: '', name: '' };
+  }
+
+  const parts = stem.split(/\s+[-–—]\s+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const left = parts[0];
+    const right = parts.slice(1).join(' - ');
+    if (looksLikeRoomToken(left)) {
+      return { room: /^unassigned$/i.test(left) ? '' : left, name: right };
+    }
+    if (looksLikeRoomToken(right)) {
+      return { room: /^unassigned$/i.test(right) ? '' : right, name: left };
+    }
+    return { room: left, name: right };
+  }
+
+  const tightMatch = stem.match(
+    /^((?:(?:icu|nccu|micu|sicu|ccu|picu|nicu|ward|rm|room|bed|er)\s*-?\s*\d+[a-z]?|\d{2,4}[a-z]?))-(?=[A-Za-z])(.+)$/i
+  );
+  if (tightMatch) {
+    return { room: tightMatch[1].trim(), name: tightMatch[2].trim() };
+  }
+
+  if (looksLikeRoomToken(stem) && !stem.includes(',') && stem.length <= 12 && /\d/.test(stem)) {
+    return { room: stem, name: '' };
+  }
+  return { room: '', name: stem };
 }
 
 export function getTodayDateStrings(date = new Date()) {
@@ -1706,20 +1758,91 @@ export function extractClinicalMetricsFromBlock(blockText) {
   };
 }
 
-export function parseChart(content, note = {}) {
+export function parseChartHeader(content, note = {}) {
   const text = String(content || '');
   const meta = metaOf(text);
-  const today = getTodayDateStrings();
-  const segment = getLatestShiftSegment(text);
+  const fileDerived = parseRoomAndNameFromTitle(note?.sourceFileName || note?.title || '');
 
-  // Basic Profile
-  const name = note.name || meta.name || meta.patient || 'Unknown Patient';
-  const room = note.room || meta.room || meta.bed || meta.rm || 'Unassigned';
+  const name =
+    String(note?.name || meta.name || meta.patient || fileDerived.name || '').trim() ||
+    'Unknown Patient';
+  const room =
+    String(note?.room || meta.room || meta.bed || meta.rm || fileDerived.room || '').trim() ||
+    'Unassigned';
   const age = meta.age || '';
   const sex = meta.sex || meta.gender || '';
   const weight = meta.weight || meta.wt || meta.weight_kg || meta['weight (kg)'] || '';
   const service = meta.service || meta.dept || meta.specialty || '';
   const ap = meta.ap || meta.attending || '';
+  const assessment = meta.assessment || meta.impression || meta.dx || '';
+
+  const rawMetaAliases = String(meta.aliases || '')
+    .split(/[;,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const noteAliases = Array.isArray(note?.aliases)
+    ? note.aliases.map((s) => String(s || '').trim()).filter(Boolean)
+    : [];
+  const aliases = [...new Set([...noteAliases, ...rawMetaAliases])];
+
+  const rawCats = String(meta.categories || meta.tags || '')
+    .split(/[;,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const seenCats = new Set();
+  const categories = [];
+  for (const c of rawCats) {
+    const key = c.toLowerCase();
+    if (!seenCats.has(key)) {
+      seenCats.add(key);
+      categories.push(c);
+    }
+  }
+  const isCharity =
+    /^true(?:\s+#.*)?$/i.test(String(meta.charity || '').trim()) ||
+    categories.some((c) => c.toLowerCase() === 'charity');
+  if (isCharity && !categories.some((c) => c.toLowerCase() === 'charity')) {
+    categories.push('Charity');
+  }
+  const isCensus = /^true(?:\s+#.*)?$/i.test(String(meta.census || '').trim());
+
+  return {
+    meta,
+    name,
+    room,
+    age,
+    sex,
+    weight,
+    service,
+    ap,
+    aliases,
+    assessment,
+    categories,
+    isCharity,
+    isCensus,
+  };
+}
+
+export function parseChart(content, note = {}) {
+  const text = String(content || '');
+  const hdr = parseChartHeader(text, note);
+  const {
+    meta,
+    name,
+    room,
+    age,
+    sex,
+    weight,
+    service,
+    ap,
+    aliases,
+    categories,
+    isCharity,
+    isCensus,
+  } = hdr;
+  const today = getTodayDateStrings();
+  const segment = getLatestShiftSegment(text);
+
   const admitted = meta.admitted || meta['date admitted'] || '';
   const heightCm = meta.height_cm || meta.height || '';
   const icuAdmitted = meta.icu_admitted || meta['icu admitted'] || '';
@@ -1738,36 +1861,6 @@ export function parseChart(content, note = {}) {
   const trackedLines = parseTrackedLines(meta.lines || meta.lda || '', today.mmddyyyy);
   const trackedAntibiotics = parseTrackedAntibiotics(meta.antibiotics || meta.abx || '', new Date());
   const completedAntibiotics = parseCompletedAntibiotics(meta.antibiotics_completed || '');
-  const rawMetaAliases = String(meta.aliases || '')
-    .split(/[;,]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const noteAliases = Array.isArray(note.aliases)
-    ? note.aliases.map((s) => String(s || '').trim()).filter(Boolean)
-    : [];
-  const aliases = [...new Set([...noteAliases, ...rawMetaAliases])];
-
-  // Flags & categories: default census = true, charity = false
-  const rawCats = String(meta.categories || meta.tags || '')
-    .split(/[;,]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const seenCats = new Set();
-  const categories = [];
-  for (const c of rawCats) {
-    const key = c.toLowerCase();
-    if (!seenCats.has(key)) {
-      seenCats.add(key);
-      categories.push(c);
-    }
-  }
-  const isCharity =
-    String(meta.charity).toLowerCase() === 'true' ||
-    categories.some((c) => c.toLowerCase() === 'charity');
-  if (isCharity && !categories.some((c) => c.toLowerCase() === 'charity')) {
-    categories.push('Charity');
-  }
-  const isCensus = meta.census !== undefined ? String(meta.census).toLowerCase() === 'true' : true;
 
   const { latestDate, latestShift, latestDateBlock, latestShiftBlock } = segment;
 
@@ -1775,7 +1868,7 @@ export function parseChart(content, note = {}) {
   const isUpdatedToday = Boolean(latestDate && datesMatch(latestDate, today.mmddyyyy));
 
   // Extract Assessment / Impression
-  let assessment = meta.assessment || meta.impression || meta.dx || '';
+  let assessment = hdr.assessment || '';
   if (!assessment) {
     const lines = latestDateBlock.split('\n');
     for (const line of lines) {
@@ -4177,13 +4270,13 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
   const includeResolvedPending = options?.includeResolvedPending !== false;
   const includeVitalsLabs = options?.includeVitalsLabs !== false;
 
-  const parsedAll = (notes || []).map((n) => ({ note: n, ...parseChart(n.content, n) }));
+  const headerList = (notes || []).map((n) => ({ note: n, header: parseChartHeader(n.content, n) }));
 
-  const active = parsedAll
-    .filter((p) => p.isCensus && !p.isCharity)
-    .sort((a, b) => naturalBedCompare(a.room, b.room));
+  const active = headerList
+    .filter((item) => item.header.isCensus && !item.header.isCharity)
+    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room));
 
-  const charityCount = parsedAll.filter((p) => p.isCharity).length;
+  const charityCount = headerList.filter((item) => item.header.isCharity).length;
   const analyses = active.map((item) => ({
     noteId: item.note.id,
     ...analyzePatientHandover(item.note, targetDate),
@@ -4463,8 +4556,11 @@ export function formatHandoverReport(notes, dateStr = null, options = {}) {
 export function buildPrintableScutsheetData(notes, options = {}) {
   const includeCharity = Boolean(options.includeCharity);
   const parsed = (notes || [])
+    .filter((n) => {
+      const h = parseChartHeader(n.content, n);
+      return h.isCensus && (includeCharity || !h.isCharity);
+    })
     .map((n) => ({ note: n, ...parseChart(n.content, n) }))
-    .filter((p) => p.isCensus && (includeCharity || !p.isCharity))
     .sort((a, b) => naturalBedCompare(a.room, b.room));
 
   return {
@@ -4529,13 +4625,13 @@ export function formatHandoverPlainText(markdown) {
 
 export function formatDailyCensusReport(notes) {
   const today = getTodayDateStrings();
-  const parsed = notes.map((n) => ({ ...parseChart(n.content, n), id: n.id }));
+  const headers = (notes || []).map((n) => ({ note: n, header: parseChartHeader(n.content, n) }));
+  const charityCount = headers.filter((item) => item.header.isCharity).length;
 
-  const active = parsed
-    .filter((p) => p.isCensus && !p.isCharity)
+  const active = headers
+    .filter((item) => item.header.isCensus && !item.header.isCharity)
+    .map((item) => ({ ...parseChart(item.note.content, item.note), id: item.note.id }))
     .sort((a, b) => naturalBedCompare(a.room, b.room));
-
-  const charityCount = parsed.filter((p) => p.isCharity).length;
 
   let out = `# Daily Census — ${today.mmddyyyy}\n\n`;
   out += `**Total Active Census:** ${active.length} | **Charity Patients:** ${charityCount}\n\n`;

@@ -1,7 +1,7 @@
 // Pure on-device Lab Trending & Chat Relay Parser ("Dump-to-Chart")
 // Follows CLINICAL-WORKFLOW-STE.md §5 (File relay messages) and §7 (Lab results)
 
-import { parseChart, parseChartTimeline } from './census.js';
+import { parseChart, parseChartHeader, parseChartTimeline } from './census.js';
 
 export const LAB_SPECS = [
   // Chemistry
@@ -310,7 +310,7 @@ export function resolvePatientFromRelay(rawText, notes = []) {
   const candidates = [];
 
   for (const note of notes) {
-    const parsed = parseChart(note.content, note);
+    const parsed = parseChartHeader(note.content, note);
     const room = String(parsed.room || '').trim();
     let roomMatched = false;
 

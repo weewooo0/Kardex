@@ -68,6 +68,9 @@ import {
   compileTemplateConfig,
   renderCustomShiftTemplate,
   buildStructuredShiftUpdate,
+  metaOf,
+  parseRoomAndNameFromTitle,
+  parseChartHeader,
   syncFrontmatter,
   parseChartTimeline,
   updateShiftBlock,
@@ -134,11 +137,13 @@ import {
   buildConflictFileName,
   isUneditedSyntheticNote,
   queryDirPermission,
+  scanVaultEntries,
   listVaultMarkdownFiles,
   readVaultFile,
   writeVaultFile,
   deleteVaultFile,
   syncVaultDirectory,
+  formatVaultSyncSummary,
 } from './vault.js';
 
 const DB = 'companion-md', STORE = 'notes', META_STORE = 'meta';
@@ -229,12 +234,57 @@ function saveCustomCategories() {
   safeSetItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(customCategories));
 }
 
+const ROUNDS_PAGE_SIZE = 50;
+const LIBRARY_PAGE_SIZE = 50;
+let roundsRenderLimit = ROUNDS_PAGE_SIZE;
+let libraryRenderLimit = LIBRARY_PAGE_SIZE;
+let roundsSearchTimer = null;
+let librarySearchTimer = null;
+
+const chartHeaderCache = new Map();
+const parsedChartCache = new Map();
+
+function makeChartCacheSig(note) {
+  return `${note?.updated || 0}|${(note?.content || '').length}|${note?.title || ''}|${note?.sourceFileName || ''}|${note?.name || ''}|${note?.room || ''}`;
+}
+
+function getChartHeader(note) {
+  if (!note) return parseChartHeader('', {});
+  const sig = makeChartCacheSig(note);
+  const hit = chartHeaderCache.get(note.id);
+  if (hit && hit.sig === sig) return hit.header;
+  const header = parseChartHeader(note.content, note);
+  if (note.id) chartHeaderCache.set(note.id, { sig, header });
+  return header;
+}
+
+function getParsedChart(note) {
+  if (!note) return { ...parseChart('', {}), id: '', rawNote: {} };
+  const dayKey = getTodayDateStrings().mmddyyyy;
+  const sig = `${dayKey}|${makeChartCacheSig(note)}`;
+  const hit = parsedChartCache.get(note.id);
+  if (hit && hit.sig === sig) return hit.parsed;
+  const parsed = { ...parseChart(note.content, note), id: note.id, rawNote: note };
+  if (note.id) parsedChartCache.set(note.id, { sig, parsed });
+  return parsed;
+}
+
+function pruneChartCaches(validNotes = notes) {
+  const liveIds = new Set((validNotes || []).map((n) => n?.id).filter(Boolean));
+  for (const id of chartHeaderCache.keys()) {
+    if (!liveIds.has(id)) chartHeaderCache.delete(id);
+  }
+  for (const id of parsedChartCache.keys()) {
+    if (!liveIds.has(id)) parsedChartCache.delete(id);
+  }
+}
+
 function syncCategoriesFromNotes(notesList = notes) {
   let changed = false;
   const seen = new Set(customCategories.map((c) => c.toLowerCase()));
   for (const n of notesList || []) {
-    const p = parseChart(n.content, n);
-    for (const cat of p.categories || []) {
+    const h = getChartHeader(n);
+    for (const cat of h.categories || []) {
       const norm = normalizeCategoryName(cat);
       const key = norm.toLowerCase();
       if (norm && !seen.has(key)) {
@@ -651,7 +701,10 @@ let lastDutyKey = '';
 let vaultDirHandle = null;
 let vaultPermission = 'none'; // 'none' | 'granted' | 'prompt' | 'denied' | 'unsupported'
 let vaultLastSyncedAt = 0;
+let vaultLastSummary = '';
+let vaultLastHadError = false;
 let vaultSyncInFlight = false;
+let vaultSyncProgress = null;
 let vaultBannerDismissed = false;
 const vaultWriteQueues = new Map();
 
@@ -718,11 +771,80 @@ function rawPutNote(note) {
   });
 }
 
+function rawPutManyNotes(batch) {
+  return new Promise((res, rej) => {
+    if (!db) return rej(new Error('IndexedDB unavailable'));
+    if (!Array.isArray(batch) || !batch.length) return res();
+    const t = db.transaction(STORE, 'readwrite');
+    const store = t.objectStore(STORE);
+    for (const note of batch) {
+      store.put(note);
+    }
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+
+function renderVaultSyncProgress(progress = vaultSyncProgress) {
+  const wrap = $('vaultSyncProgressWrap');
+  const pText = $('vaultSyncProgressText');
+  const pCount = $('vaultSyncProgressCount');
+  const pBar = $('vaultSyncProgressBar');
+  const pDetail = $('vaultSyncProgressDetail');
+  const liveBanner = $('vaultSyncLiveBanner');
+  const liveText = $('vaultSyncLiveText');
+  const liveCount = $('vaultSyncLiveCount');
+  const liveBar = $('vaultSyncLiveBar');
+
+  const active = Boolean(vaultSyncInFlight && progress);
+  if (wrap) wrap.hidden = !active;
+  if (liveBanner) liveBanner.hidden = !active;
+  if (!active) return;
+
+  const isScanning = progress.phase === 'scanning';
+  const total = Number(progress.total || 0);
+  const processed = Number(progress.processed || 0);
+  const percent = isScanning
+    ? 0
+    : total > 0
+      ? Math.min(100, Math.round((processed / total) * 100))
+      : 100;
+
+  const headline = isScanning
+    ? `Scanning Obsidian folder… (${progress.found || 0} .md found)`
+    : `Syncing ${processed} / ${total} files`;
+  const countTxt = isScanning ? `${progress.found || 0}` : `${percent}%`;
+  const detailParts = isScanning
+    ? [progress.currentFile ? `Inspecting: ${progress.currentFile}` : 'Reading folder entries…']
+    : [
+        progress.currentFile || 'Completing…',
+        progress.pulled ? `${progress.pulled} pulled` : '',
+        progress.pushed ? `${progress.pushed} pushed` : '',
+        progress.conflicts ? `${progress.conflicts} conflict` : '',
+      ].filter(Boolean);
+
+  if (pText) pText.textContent = headline;
+  if (pCount) pCount.textContent = countTxt;
+  if (pDetail) pDetail.textContent = detailParts.join(' · ');
+  if (pBar) {
+    pBar.classList.toggle('is-indeterminate', isScanning);
+    pBar.style.width = isScanning ? '28%' : `${percent}%`;
+  }
+
+  if (liveText) liveText.textContent = headline;
+  if (liveCount) liveCount.textContent = countTxt;
+  if (liveBar) {
+    liveBar.classList.toggle('is-indeterminate', isScanning);
+    liveBar.style.width = isScanning ? '28%' : `${percent}%`;
+  }
+}
+
 function updateVaultUi() {
   const pill = $('vaultStatusPill');
   const folderEl = $('vaultFolderNameText');
   const countEl = $('vaultSyncedCountText');
   const lastEl = $('vaultLastSyncedText');
+  const summaryEl = $('vaultLastSummaryText');
   const linkBtn = $('linkVaultBtn');
   const syncBtn = $('syncVaultBtn');
   const unlinkBtn = $('unlinkVaultBtn');
@@ -730,10 +852,12 @@ function updateVaultUi() {
   const roundsSyncBtn = $('roundsSyncVaultBtn');
   const banner = $('vaultReconnectBanner');
   const bannerText = $('vaultReconnectText');
+  const reconnectBtn = $('vaultReconnectBtn');
 
   const supported = isDirectoryPickerSupported();
   const linkedCount = notes.filter((n) => Boolean(n?.sourceFileName)).length;
   if (countEl) countEl.textContent = String(linkedCount);
+  if (summaryEl) summaryEl.textContent = vaultLastSummary || '—';
 
   if (!supported) {
     if (pill) {
@@ -746,6 +870,7 @@ function updateVaultUi() {
     if (unlinkBtn) unlinkBtn.hidden = true;
     if (roundsSyncBtn) roundsSyncBtn.hidden = true;
     if (banner) banner.hidden = true;
+    renderVaultSyncProgress(null);
     if (noteEl) {
       noteEl.textContent =
         'Folder linking requires Chrome/Chromium 132+ on Android or Desktop. On iOS Safari or Firefox, use Import .md / Export .md.';
@@ -760,6 +885,7 @@ function updateVaultUi() {
     }
     if (folderEl) folderEl.textContent = 'Not linked';
     if (lastEl) lastEl.textContent = 'Never';
+    if (summaryEl) summaryEl.textContent = '—';
     if (linkBtn) {
       linkBtn.disabled = false;
       linkBtn.className = 'primary';
@@ -769,41 +895,66 @@ function updateVaultUi() {
     if (unlinkBtn) unlinkBtn.hidden = true;
     if (roundsSyncBtn) roundsSyncBtn.hidden = true;
     if (banner) banner.hidden = true;
+    renderVaultSyncProgress(null);
     return;
   }
 
   const folderName = vaultDirHandle.name || 'Obsidian Folder';
   if (folderEl) folderEl.textContent = folderName;
   if (lastEl) {
-    lastEl.textContent = vaultLastSyncedAt
-      ? new Date(vaultLastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : 'Pending sync';
+    lastEl.textContent = vaultSyncInFlight
+      ? 'Syncing now…'
+      : vaultLastSyncedAt
+        ? new Date(vaultLastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : 'Pending sync';
   }
   if (linkBtn) {
-    linkBtn.disabled = false;
+    linkBtn.disabled = vaultSyncInFlight;
     linkBtn.className = 'btn-secondary';
     linkBtn.innerHTML = `${uiIcon('drive')} Change Folder`;
   }
-  if (unlinkBtn) unlinkBtn.hidden = false;
-  if (roundsSyncBtn) roundsSyncBtn.hidden = false;
+  if (unlinkBtn) {
+    unlinkBtn.hidden = false;
+    unlinkBtn.disabled = vaultSyncInFlight;
+  }
+  if (roundsSyncBtn) {
+    roundsSyncBtn.hidden = false;
+    roundsSyncBtn.disabled = vaultSyncInFlight;
+  }
+  if (reconnectBtn) reconnectBtn.disabled = vaultSyncInFlight;
 
   const isGranted = vaultPermission === 'granted';
   if (pill) {
-    pill.textContent = isGranted ? 'CONNECTED' : 'RECONNECT NEEDED';
-    pill.className = `status-meta ${isGranted ? 'safe' : 'warn'}`;
+    if (vaultSyncInFlight) {
+      const pct = vaultSyncProgress?.phase === 'syncing' && vaultSyncProgress?.total
+        ? ` ${vaultSyncProgress.processed}/${vaultSyncProgress.total}`
+        : '';
+      pill.textContent = `SYNCING${pct}`;
+      pill.className = 'status-meta warn';
+    } else if (vaultLastHadError) {
+      pill.textContent = 'SYNC ERROR';
+      pill.className = 'status-meta block';
+    } else {
+      pill.textContent = isGranted ? 'CONNECTED' : 'RECONNECT NEEDED';
+      pill.className = `status-meta ${isGranted ? 'safe' : 'warn'}`;
+    }
   }
   if (syncBtn) {
     syncBtn.hidden = false;
-    syncBtn.innerHTML = isGranted
-      ? `${uiIcon('refresh')} Sync Now`
-      : `${uiIcon('refresh')} Reconnect &amp; Sync`;
+    syncBtn.disabled = vaultSyncInFlight;
+    syncBtn.innerHTML = vaultSyncInFlight
+      ? `${uiIcon('refresh')} Syncing…`
+      : isGranted
+        ? `${uiIcon('refresh')} Sync Now`
+        : `${uiIcon('refresh')} Reconnect &amp; Sync`;
   }
   if (banner) {
-    banner.hidden = isGranted || vaultBannerDismissed;
+    banner.hidden = vaultSyncInFlight || isGranted || vaultBannerDismissed;
     if (bannerText) {
       bannerText.textContent = `Obsidian folder "${folderName}" paused — tap to reconnect & sync.`;
     }
   }
+  renderVaultSyncProgress(vaultSyncProgress);
 }
 
 async function mirrorNoteToVault(note) {
@@ -824,8 +975,8 @@ async function mirrorNoteToVault(note) {
   if (!targetName) {
     const existingNames = new Set(notes.map((n) => n?.sourceFileName).filter(Boolean));
     try {
-      const diskFiles = await listVaultMarkdownFiles(vaultDirHandle);
-      for (const f of diskFiles) existingNames.add(f.name);
+      const { handles: diskHandles } = await scanVaultEntries(vaultDirHandle);
+      for (const h of diskHandles) existingNames.add(h.name);
     } catch {}
     targetName = computeVaultFileName(note.room, note.name, existingNames);
   }
@@ -847,6 +998,7 @@ async function mirrorNoteToVault(note) {
     const written = await writeVaultFile(vaultDirHandle, targetName, note.content);
     note.sourceFileName = written.name;
     note.sourceLastModified = written.lastModified;
+    note.sourceFileSize = typeof written.size === 'number' ? written.size : -1;
     note.sourceContentHash = written.hash;
     note.localDirtySync = false;
     await rawPutNote(note);
@@ -887,12 +1039,22 @@ async function put(note, { skipVaultMirror = false } = {}) {
 
 async function runVaultSync({ interactive = true } = {}) {
   if (!vaultDirHandle || !isDirectoryPickerSupported()) return null;
-  if (vaultSyncInFlight) return null;
+  if (vaultSyncInFlight) {
+    if (interactive) toast('Obsidian folder sync already in progress…');
+    return null;
+  }
   vaultSyncInFlight = true;
+  vaultLastHadError = false;
+  vaultSyncProgress = { phase: 'scanning', found: 0, processed: 0, total: 0, percent: 0, currentFile: '' };
+  updateVaultUi();
+
+  let lastUiTick = 0;
   try {
     vaultPermission = await queryDirPermission(vaultDirHandle, { request: interactive });
-    updateVaultUi();
     if (vaultPermission !== 'granted') {
+      vaultSyncInFlight = false;
+      vaultSyncProgress = null;
+      updateVaultUi();
       if (interactive) toast('Folder permission is required to sync with Obsidian');
       return null;
     }
@@ -901,10 +1063,30 @@ async function runVaultSync({ interactive = true } = {}) {
       dirHandle: vaultDirHandle,
       localNotes: notes,
       putNote: put,
+      putNotesBatch: rawPutManyNotes,
       generateId: uid,
+      onProgress: (prog) => {
+        const phaseChanged = prog.phase !== vaultSyncProgress?.phase;
+        vaultSyncProgress = prog;
+        const nowTs = Date.now();
+        if (phaseChanged || prog.processed === prog.total || nowTs - lastUiTick >= 60) {
+          lastUiTick = nowTs;
+          renderVaultSyncProgress(prog);
+          const pill = $('vaultStatusPill');
+          if (pill && prog.phase === 'syncing' && prog.total) {
+            pill.textContent = `SYNCING ${prog.processed}/${prog.total}`;
+          }
+        }
+      },
     });
     vaultLastSyncedAt = Date.now();
-    await setMeta('vaultSyncMeta', { folderName: vaultDirHandle.name || '', lastSyncedAt: vaultLastSyncedAt });
+    vaultLastSummary = formatVaultSyncSummary(res);
+    vaultLastHadError = Array.isArray(res.errors) && res.errors.length > 0;
+    await setMeta('vaultSyncMeta', {
+      folderName: vaultDirHandle.name || '',
+      lastSyncedAt: vaultLastSyncedAt,
+      lastSummary: vaultLastSummary,
+    });
     await refresh();
 
     if (currentId) {
@@ -916,22 +1098,20 @@ async function runVaultSync({ interactive = true } = {}) {
         refreshActiveEditorView();
       }
     }
-    updateVaultUi();
 
-    if (interactive || res.pulled > 0 || res.pushed > 0 || res.conflicts > 0) {
-      const parts = [];
-      if (res.pulled) parts.push(`${res.pulled} pulled`);
-      if (res.pushed) parts.push(`${res.pushed} pushed`);
-      if (res.conflicts) parts.push(`${res.conflicts} conflict copy saved`);
-      const summary = parts.length ? parts.join(' · ') : 'Up to date';
-      toast(`Obsidian Sync (${vaultDirHandle.name || 'Folder'}): ${summary}`);
+    if (interactive || res.pulled > 0 || res.pushed > 0 || res.conflicts > 0 || vaultLastHadError) {
+      toast(`Obsidian Sync (${vaultDirHandle.name || 'Folder'}): ${vaultLastSummary}`, { duration: 4800 });
     }
     return res;
   } catch (err) {
+    vaultLastHadError = true;
+    vaultLastSummary = `Error: ${err?.message || 'Sync failed'}`;
     toast(`Folder sync failed: ${err?.message || 'Error'}`);
     return null;
   } finally {
     vaultSyncInFlight = false;
+    vaultSyncProgress = null;
+    updateVaultUi();
   }
 }
 
@@ -967,17 +1147,23 @@ async function unlinkVaultFolder() {
   vaultDirHandle = null;
   vaultPermission = 'none';
   vaultLastSyncedAt = 0;
+  vaultLastSummary = '';
+  vaultLastHadError = false;
+  vaultSyncProgress = null;
   await delMeta('vaultDirHandle');
   await delMeta('vaultSyncMeta');
+  const toUnlink = [];
   for (const n of notes) {
     if (n.sourceFileName || n.sourceContentHash || n.localDirtySync) {
       n.sourceFileName = '';
       n.sourceLastModified = 0;
+      n.sourceFileSize = -1;
       n.sourceContentHash = '';
       n.localDirtySync = false;
-      await rawPutNote(n);
+      toUnlink.push(n);
     }
   }
+  if (toUnlink.length) await rawPutManyNotes(toUnlink);
   updateVaultUi();
   toast(`Unlinked "${folderName}"`);
 }
@@ -992,6 +1178,7 @@ async function initVaultLink() {
     const savedHandle = await getMeta('vaultDirHandle');
     const savedMeta = await getMeta('vaultSyncMeta');
     if (savedMeta?.lastSyncedAt) vaultLastSyncedAt = Number(savedMeta.lastSyncedAt) || 0;
+    if (typeof savedMeta?.lastSummary === 'string') vaultLastSummary = savedMeta.lastSummary;
     if (!savedHandle) {
       updateVaultUi();
       return;
@@ -1057,18 +1244,6 @@ const profile = () => ({
   aliases: $('aliasesInput').value.split(',').map((s) => s.trim()).filter(Boolean),
   room: $('roomInput').value.trim(),
 });
-
-function metaOf(text) {
-  const m = String(text).match(/^---\s*\n([\s\S]*?)\n---/);
-  const out = {};
-  if (m) {
-    for (const line of m[1].split('\n')) {
-      const p = line.match(/^([^:]+):\s*(.*)$/);
-      if (p) out[p[1].trim().toLowerCase()] = p[2].trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return out;
-}
 
 function toast(msg, opts = {}) {
   const t = $('toast');
@@ -1700,6 +1875,7 @@ async function setMode(mode) {
 /* ---------- rounds (scutsheet) UI ---------- */
 function setActiveRoundsFilter(nextFilter) {
   activeFilter = nextFilter;
+  roundsRenderLimit = ROUNDS_PAGE_SIZE;
   renderRoundsFilterChips();
   document.querySelectorAll('.census-summary .stat-card').forEach((card) => {
     card.setAttribute('aria-pressed', String(card.dataset.statFilter === activeFilter));
@@ -1707,20 +1883,47 @@ function setActiveRoundsFilter(nextFilter) {
   renderRounds();
 }
 
-function renderRoundsFilterChips(parsedPatients = null) {
+function getRoundsCensusSummary() {
+  const activeNotes = [];
+  const categoryCounts = new Map();
+  for (const n of notes) {
+    const h = getChartHeader(n);
+    if (h.isCensus && !h.isCharity) {
+      activeNotes.push(n);
+    }
+    for (const c of h.categories || []) {
+      const key = c.toLowerCase();
+      categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
+    }
+  }
+  const activeParsed = activeNotes.map((n) => getParsedChart(n));
+  const activeById = new Map(activeParsed.map((p) => [p.id, p]));
+  let needsUpdateCount = 0;
+  let openTasksCardsCount = 0;
+  let updatedTodayCount = 0;
+  for (const p of activeParsed) {
+    if (p.isUpdatedToday) updatedTodayCount++;
+    else needsUpdateCount++;
+    if ((p.pending || []).some((t) => !t.checked)) openTasksCardsCount++;
+  }
+  return {
+    totalCount: notes.length,
+    activeParsed,
+    activeById,
+    needsUpdateCount,
+    openTasksCardsCount,
+    updatedTodayCount,
+    categoryCounts,
+  };
+}
+
+function renderRoundsFilterChips(summaryOrParsed = null) {
   const host = $('roundsFilterChips');
   if (!host) return;
-  const parsed =
-    parsedPatients ||
-    notes.map((n) => ({
-      ...parseChart(n.content, n),
-      id: n.id,
-      rawNote: n,
-    }));
-
-  const active = parsed.filter((p) => p.isCensus && !p.isCharity);
-  const needsUpdateCount = active.filter((p) => !p.isUpdatedToday).length;
-  const openTasksCardsCount = active.filter((p) => p.pending.some((t) => !t.checked)).length;
+  const summary =
+    summaryOrParsed && !Array.isArray(summaryOrParsed) && typeof summaryOrParsed.totalCount === 'number'
+      ? summaryOrParsed
+      : getRoundsCensusSummary();
 
   const mkStaticChip = (filterKey, label, countId, countVal, warnZeroCheck = false) => {
     const isAct = activeFilter === filterKey;
@@ -1733,9 +1936,7 @@ function renderRoundsFilterChips(parsedPatients = null) {
       const catLower = cat.toLowerCase();
       const filterKey = `cat:${catLower}`;
       const isAct = activeFilter === filterKey;
-      const count = parsed.filter((p) =>
-        (p.categories || []).some((c) => c.toLowerCase() === catLower)
-      ).length;
+      const count = summary.categoryCounts.get(catLower) || 0;
       return `
         <div class="chip-group ${isAct ? 'active' : ''}">
           <button type="button" class="chip ${isAct ? 'active' : ''}" data-filter="${esc(filterKey)}" aria-pressed="${isAct}">${esc(cat)} <span class="chip-count">${count}</span></button>
@@ -1745,11 +1946,11 @@ function renderRoundsFilterChips(parsedPatients = null) {
     .join('');
 
   host.innerHTML = [
-    mkStaticChip('active', 'All Active', 'chipCountActive', active.length),
-    mkStaticChip('needs-update', 'Needs Update', 'chipCountNeedsUpdate', needsUpdateCount, true),
-    mkStaticChip('open-tasks', 'Open Tasks', 'chipCountOpenTasks', openTasksCardsCount),
+    mkStaticChip('active', 'All Active', 'chipCountActive', summary.activeParsed.length),
+    mkStaticChip('needs-update', 'Needs Update', 'chipCountNeedsUpdate', summary.needsUpdateCount, true),
+    mkStaticChip('open-tasks', 'Open Tasks', 'chipCountOpenTasks', summary.openTasksCardsCount),
     customHtml,
-    mkStaticChip('all', 'All Charts', 'chipCountAll', parsed.length),
+    mkStaticChip('all', 'All Charts', 'chipCountAll', summary.totalCount),
     `<button type="button" id="addRoundsCategoryBtn" class="chip add-cat-chip" title="Create a custom patient category tab">+ Tab</button>`,
   ].join('');
 
@@ -1773,68 +1974,107 @@ function renderRoundsFilterChips(parsedPatients = null) {
   }
 }
 
-function getFilteredSortedRoundsPatients(parsedPatients = null) {
-  const list =
-    parsedPatients ||
-    notes.map((n) => ({
-      ...parseChart(n.content, n),
-      id: n.id,
-      rawNote: n,
-    }));
+function getFilteredSortedRoundsEntries(summary = null) {
+  const s = summary || getRoundsCensusSummary();
+  let entries;
 
-  let filtered = list;
   if (activeFilter === 'active') {
-    filtered = filtered.filter((p) => p.isCensus && !p.isCharity);
+    entries = s.activeParsed.map((p) => ({
+      id: p.id,
+      note: p.rawNote,
+      header: getChartHeader(p.rawNote),
+      parsed: p,
+    }));
   } else if (activeFilter === 'needs-update') {
-    filtered = filtered.filter((p) => p.isCensus && !p.isCharity && !p.isUpdatedToday);
+    entries = s.activeParsed
+      .filter((p) => !p.isUpdatedToday)
+      .map((p) => ({ id: p.id, note: p.rawNote, header: getChartHeader(p.rawNote), parsed: p }));
   } else if (activeFilter === 'open-tasks') {
-    filtered = filtered.filter((p) => p.isCensus && !p.isCharity && p.pending.some((t) => !t.checked));
-  } else if (activeFilter === 'charity') {
-    filtered = filtered.filter((p) => p.isCharity);
-  } else if (activeFilter.startsWith('cat:')) {
-    const targetLower = activeFilter.slice(4);
-    filtered = filtered.filter((p) =>
-      (p.categories || []).some((c) => c.toLowerCase() === targetLower)
-    );
+    entries = s.activeParsed
+      .filter((p) => (p.pending || []).some((t) => !t.checked))
+      .map((p) => ({ id: p.id, note: p.rawNote, header: getChartHeader(p.rawNote), parsed: p }));
+  } else {
+    entries = [];
+    const targetLower = activeFilter.startsWith('cat:') ? activeFilter.slice(4) : '';
+    for (const n of notes) {
+      const h = getChartHeader(n);
+      if (activeFilter === 'charity' && !h.isCharity) continue;
+      if (targetLower && !(h.categories || []).some((c) => c.toLowerCase() === targetLower)) continue;
+      entries.push({
+        id: n.id,
+        note: n,
+        header: h,
+        parsed: s.activeById.get(n.id) || null,
+      });
+    }
   }
 
   if (searchQuery.trim()) {
     const q = searchQuery.toLowerCase().trim();
-    filtered = filtered.filter((p) => {
-      const hay = [
-        p.room,
-        p.name,
-        ...(p.aliases || []),
-        p.assessment,
-        p.service,
-        p.ap,
-        p.drips,
-        p.labs,
-        ...(p.medications || []),
-        ...(p.pending || []).map((t) => t.text),
+    entries = entries.filter((e) => {
+      const p = e.parsed;
+      if (p) {
+        const hay = [
+          p.room,
+          p.name,
+          ...(p.aliases || []),
+          p.assessment,
+          p.service,
+          p.ap,
+          p.drips,
+          p.labs,
+          ...(p.medications || []),
+          ...(p.pending || []).map((t) => t.text),
+        ]
+          .join('\n')
+          .toLowerCase();
+        return hay.includes(q);
+      }
+      const h = e.header;
+      const fastHay = [
+        e.note.title,
+        h.room,
+        h.name,
+        ...(h.aliases || []),
+        h.assessment,
+        h.service,
+        h.ap,
       ]
         .join('\n')
         .toLowerCase();
-      return hay.includes(q);
+      if (fastHay.includes(q)) return true;
+      return String(e.note.content || '').toLowerCase().includes(q);
     });
   }
 
-  filtered.sort((a, b) => {
+  entries.sort((a, b) => {
     if (roundsSortMode === 'needs-update') {
-      const staleDiff = Number(!a.isUpdatedToday) - Number(!b.isUpdatedToday);
+      const staleDiff =
+        Number(Boolean(a.parsed && !a.parsed.isUpdatedToday)) -
+        Number(Boolean(b.parsed && !b.parsed.isUpdatedToday));
       if (staleDiff !== 0) return -staleDiff;
+      if (!a.parsed && !b.parsed) {
+        const updDiff = (b.note.updated || 0) - (a.note.updated || 0);
+        if (updDiff !== 0) return updDiff;
+      }
     } else if (roundsSortMode === 'open-tasks') {
-      const openA = a.pending.filter((t) => !t.checked).length;
-      const openB = b.pending.filter((t) => !t.checked).length;
+      const openA = a.parsed ? a.parsed.pending.filter((t) => !t.checked).length : -1;
+      const openB = b.parsed ? b.parsed.pending.filter((t) => !t.checked).length : -1;
       if (openA !== openB) return openB - openA;
     } else if (roundsSortMode === 'ap') {
-      const cmp = (a.ap || 'zzz').localeCompare(b.ap || 'zzz');
+      const cmp = (a.header.ap || 'zzz').localeCompare(b.header.ap || 'zzz');
       if (cmp !== 0) return cmp;
     }
-    return naturalBedCompare(a.room, b.room);
+    return naturalBedCompare(a.header.room, b.header.room);
   });
 
-  return filtered;
+  return entries;
+}
+
+function getFilteredSortedRoundsPatients() {
+  return getFilteredSortedRoundsEntries()
+    .slice(0, roundsRenderLimit)
+    .map((e) => e.parsed || getParsedChart(e.note));
 }
 
 function formatApCompactHtml(pt) {
@@ -1947,15 +2187,13 @@ function renderRounds() {
     return;
   }
 
-  const parsedPatients = notes.map((n) => ({
-    ...parseChart(n.content, n),
-    id: n.id,
-    rawNote: n,
-  }));
+  const summary = getRoundsCensusSummary();
 
-  updateCensusStats(parsedPatients);
+  updateCensusStats(summary);
 
-  const filtered = getFilteredSortedRoundsPatients(parsedPatients);
+  const filteredEntries = getFilteredSortedRoundsEntries(summary);
+  const pageEntries = filteredEntries.slice(0, roundsRenderLimit);
+  const filtered = pageEntries.map((e) => e.parsed || getParsedChart(e.note));
 
   const expandAllBtn = $('roundsToggleExpandAllBtn');
   if (expandAllBtn) {
@@ -1964,11 +2202,19 @@ function renderRounds() {
     expandAllBtn.dataset.allOpen = String(allOpen);
   }
 
-  if (!filtered.length) {
+  if (!filteredEntries.length) {
     container.innerHTML = `<div class="ledger-empty">No patients match the current filter or search.</div>`;
     if (footerSummary) footerSummary.textContent = '0 SHOWN';
     return;
   }
+
+  const remainingRounds = filteredEntries.length - filtered.length;
+  const loadMoreHtml = remainingRounds > 0
+    ? `<div class="list-load-more-row">
+        <span class="cf-meta">Showing ${filtered.length} of ${filteredEntries.length} charts</span>
+        <button type="button" id="roundsLoadMoreBtn" class="btn-secondary">Show ${Math.min(ROUNDS_PAGE_SIZE, remainingRounds)} more</button>
+      </div>`
+    : '';
 
   container.innerHTML = filtered
     .map((pt) => {
@@ -2225,14 +2471,23 @@ function renderRounds() {
         </div>
       </article>`;
     })
-    .join('');
+    .join('') + loadMoreHtml;
+
+  const roundsLoadMoreBtn = $('roundsLoadMoreBtn');
+  if (roundsLoadMoreBtn) {
+    roundsLoadMoreBtn.onclick = () => {
+      roundsRenderLimit += ROUNDS_PAGE_SIZE;
+      renderRounds();
+    };
+  }
 
   if (footerSummary) {
-    const activeAll = parsedPatients.filter((p) => p.isCensus && !p.isCharity);
-    const updatedToday = activeAll.filter((p) => p.isUpdatedToday).length;
     const duty = getDutyDateStrings(new Date(), shiftSchedule);
     const shiftUpper = String(duty.shiftLabel || defaultShiftForHour()).toUpperCase();
-    footerSummary.textContent = `${filtered.length} SHOWN · ${updatedToday}/${activeAll.length} UPDATED FOR ${shiftUpper}`;
+    const shownLabel = remainingRounds > 0
+      ? `${filtered.length} OF ${filteredEntries.length}`
+      : `${filteredEntries.length}`;
+    footerSummary.textContent = `${shownLabel} SHOWN · ${summary.updatedTodayCount}/${summary.activeParsed.length} UPDATED FOR ${shiftUpper}`;
   }
 
   // Wire row expand/collapse & inline AP toggle
@@ -4193,29 +4448,48 @@ function updateInboxBadge() {
   badge.hidden = openCount === 0;
 }
 
-function buildGroupedPatientOptionsHtml(blankLabel = '') {
-  const sorted = [...notes]
-    .map((n) => ({ note: n, parsed: parseChart(n.content, n) }))
-    .sort((a, b) => naturalBedCompare(a.parsed.room, b.parsed.room));
+function buildGroupedPatientOptionsHtml(blankLabel = '', selectedId = '') {
+  const enriched = notes.map((n) => ({ note: n, header: getChartHeader(n) }));
 
-  const active = sorted.filter((s) => s.parsed.isCensus && !s.parsed.isCharity);
-  const charity = sorted.filter((s) => s.parsed.isCharity);
-  const discharged = sorted.filter((s) => !s.parsed.isCensus && !s.parsed.isCharity);
+  const active = enriched
+    .filter((s) => s.header.isCensus && !s.header.isCharity)
+    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room));
+  const charity = enriched
+    .filter((s) => s.header.isCharity)
+    .sort((a, b) => naturalBedCompare(a.header.room, b.header.room));
+  const allDischarged = enriched
+    .filter((s) => !s.header.isCensus && !s.header.isCharity)
+    .sort((a, b) => (b.note.updated || 0) - (a.note.updated || 0));
 
-  const mkOpt = ({ note, parsed }) =>
-    `<option value="${esc(note.id)}">${esc(parsed.room || 'Unassigned')} · ${esc(parsed.name)}</option>`;
+  const DISCHARGED_CAP = 50;
+  let discharged = allDischarged.slice(0, DISCHARGED_CAP);
+  if (selectedId && !discharged.some((s) => s.note.id === selectedId)) {
+    const selectedArchived = allDischarged.find((s) => s.note.id === selectedId);
+    if (selectedArchived) {
+      discharged = [selectedArchived, ...discharged.slice(0, DISCHARGED_CAP - 1)];
+    }
+  }
+  const omittedCount = Math.max(0, allDischarged.length - discharged.length);
+
+  const mkOpt = ({ note, header }) =>
+    `<option value="${esc(note.id)}">${esc(header.room || 'Unassigned')} · ${esc(header.name)}</option>`;
 
   const parts = blankLabel ? [`<option value="">${esc(blankLabel)}</option>`] : [];
   if (active.length) parts.push(`<optgroup label="Active Census">${active.map(mkOpt).join('')}</optgroup>`);
   if (charity.length) parts.push(`<optgroup label="Charity">${charity.map(mkOpt).join('')}</optgroup>`);
-  if (discharged.length) parts.push(`<optgroup label="Discharged">${discharged.map(mkOpt).join('')}</optgroup>`);
+  if (discharged.length) {
+    const moreNotice = omittedCount > 0
+      ? `<option value="" disabled>— +${omittedCount} older charts (open in Charts tab) —</option>`
+      : '';
+    parts.push(`<optgroup label="Discharged">${discharged.map(mkOpt).join('')}${moreNotice}</optgroup>`);
+  }
   return parts.join('');
 }
 
 function populateInboxTargets(selectedId = '') {
   const selectEl = $('inboxTargetSelect');
   if (!selectEl) return;
-  selectEl.innerHTML = buildGroupedPatientOptionsHtml('— Select target patient —');
+  selectEl.innerHTML = buildGroupedPatientOptionsHtml('— Select target patient —', selectedId);
   selectEl.value = selectedId && notes.some((n) => n.id === selectedId) ? selectedId : '';
 }
 
@@ -4522,7 +4796,7 @@ let calcScoreState = {};
 function populateCalcPatientSelect(selectedId = '') {
   const selectEl = $('calcPatientSelect');
   if (!selectEl) return;
-  selectEl.innerHTML = buildGroupedPatientOptionsHtml('— Standalone / No patient selected —');
+  selectEl.innerHTML = buildGroupedPatientOptionsHtml('— Standalone / No patient selected —', selectedId);
   selectEl.value = selectedId && notes.some((n) => n.id === selectedId) ? selectedId : '';
 }
 
@@ -5925,11 +6199,11 @@ function closeDictateModal(force = false) {
 
 /* ---------- editor notes list, navigation & selection ---------- */
 function getSortedNotesByBed() {
-  return [...notes].sort((a, b) => naturalBedCompare(a.room || metaOf(a.content).room, b.room || metaOf(b.content).room));
+  return [...notes].sort((a, b) => naturalBedCompare(getChartHeader(a).room, getChartHeader(b).room));
 }
 
 function getEditorNavNotes() {
-  const roundsNotes = getFilteredSortedRoundsPatients().map((p) => p.rawNote);
+  const roundsNotes = getFilteredSortedRoundsEntries().map((e) => e.note);
   if (roundsNotes.length && (!currentId || roundsNotes.some((n) => n.id === currentId))) {
     return roundsNotes;
   }
@@ -5941,7 +6215,7 @@ function populateEditorPatientSelect() {
   if (!sel) return;
   const navNotes = getEditorNavNotes();
   sel.innerHTML = notes.length
-    ? buildGroupedPatientOptionsHtml('')
+    ? buildGroupedPatientOptionsHtml('', currentId)
     : '<option value="">No charts</option>';
   if (currentId && notes.some((n) => n.id === currentId)) {
     sel.value = currentId;
@@ -5990,6 +6264,7 @@ function renderLibraryFilterChips() {
   host.querySelectorAll('.chip[data-lib-filter]').forEach((chip) => {
     chip.onclick = () => {
       libraryFilter = chip.dataset.libFilter || 'all';
+      libraryRenderLimit = LIBRARY_PAGE_SIZE;
       renderLibraryFilterChips();
       renderList();
     };
@@ -6002,33 +6277,33 @@ function renderLibraryFilterChips() {
 function renderList() {
   renderLibraryFilterChips();
   const q = librarySearchQuery.trim().toLowerCase();
-  const enriched = notes.map((n) => ({ note: n, parsed: parseChart(n.content, n) }));
+  const enriched = notes.map((n) => ({ note: n, header: getChartHeader(n) }));
 
-  let visible = enriched.filter(({ parsed }) => {
-    if (libraryFilter === 'active') return parsed.isCensus && !parsed.isCharity;
-    if (libraryFilter === 'charity') return parsed.isCharity;
-    if (libraryFilter === 'discharged') return !parsed.isCensus && !parsed.isCharity;
+  let visible = enriched.filter(({ header }) => {
+    if (libraryFilter === 'active') return header.isCensus && !header.isCharity;
+    if (libraryFilter === 'charity') return header.isCharity;
+    if (libraryFilter === 'discharged') return !header.isCensus && !header.isCharity;
     if (libraryFilter.startsWith('cat:')) {
       const targetLower = libraryFilter.slice(4);
-      return (parsed.categories || []).some((c) => c.toLowerCase() === targetLower);
+      return (header.categories || []).some((c) => c.toLowerCase() === targetLower);
     }
     return true;
   });
 
   if (q) {
-    visible = visible.filter(({ note, parsed }) =>
-      `${note.title || ''}\n${parsed.name}\n${parsed.room}\n${parsed.assessment}\n${note.content || ''}`
-        .toLowerCase()
-        .includes(q)
-    );
+    visible = visible.filter(({ note, header }) => {
+      const fastHay = `${note.title || ''}\n${header.name}\n${header.room}\n${header.assessment}\n${header.ap || ''}\n${header.service || ''}`.toLowerCase();
+      if (fastHay.includes(q)) return true;
+      return String(note.content || '').toLowerCase().includes(q);
+    });
   }
 
   visible.sort((a, b) => {
     if (librarySortMode === 'bed') {
-      return naturalBedCompare(a.parsed.room, b.parsed.room);
+      return naturalBedCompare(a.header.room, b.header.room);
     }
     if (librarySortMode === 'name') {
-      return (a.parsed.name || '').localeCompare(b.parsed.name || '');
+      return (a.header.name || '').localeCompare(b.header.name || '');
     }
     return (b.note.updated || 0) - (a.note.updated || 0);
   });
@@ -6055,21 +6330,32 @@ function renderList() {
     return;
   }
 
-  listEl.innerHTML = visible
-    .map(({ note: n, parsed }) => {
+  const pageItems = visible.slice(0, libraryRenderLimit);
+  const remainingLib = visible.length - pageItems.length;
+  const loadMoreHtml = remainingLib > 0
+    ? `<div class="list-load-more-row">
+        <span class="cf-meta">Showing ${pageItems.length} of ${visible.length} charts</span>
+        <button type="button" id="libraryLoadMoreBtn" class="btn-secondary">Show ${Math.min(LIBRARY_PAGE_SIZE, remainingLib)} more</button>
+      </div>`
+    : '';
+
+  listEl.innerHTML = pageItems
+    .map(({ note: n, header }) => {
+      const parsed = getParsedChart(n);
       const openTasks = parsed.pending.filter((t) => !t.checked).length;
-      const badge = !parsed.isCensus && !parsed.isCharity
+      const badge = !header.isCensus && !header.isCharity
         ? '<span class="status-meta">Discharged</span>'
-        : parsed.isCharity
+        : header.isCharity
           ? '<span class="status-tag charity">Charity</span>'
           : '<span class="status-meta safe">Active</span>';
-      const extraBadges = (parsed.categories || [])
-        .filter((c) => !(parsed.isCharity && c.toLowerCase() === 'charity'))
+      const extraBadges = (header.categories || [])
+        .filter((c) => !(header.isCharity && c.toLowerCase() === 'charity'))
         .map((c) => `<span class="status-tag category">${esc(c)}</span>`)
         .join('');
-      const dxPreview = parsed.assessment ? ` · ${esc(parsed.assessment.slice(0, 64))}${parsed.assessment.length > 64 ? '…' : ''}` : '';
-      const bedLabel = parsed.room ? formatRoomLabel(parsed.room) : '—';
-      const displayName = parsed.name || n.title || 'Untitled';
+      const dxStr = parsed.assessment || header.assessment || '';
+      const dxPreview = dxStr ? ` · ${esc(dxStr.slice(0, 64))}${dxStr.length > 64 ? '…' : ''}` : '';
+      const bedLabel = header.room ? formatRoomLabel(header.room) : '—';
+      const displayName = header.name || n.title || 'Untitled';
       return `
         <div class="item ${n.id === currentId ? 'active' : ''}">
           <button type="button" class="item-main-btn" data-id="${n.id}">
@@ -6082,11 +6368,19 @@ function renderList() {
           <div class="item-row-actions">
             ${badge}
             ${extraBadges}
-            <button type="button" class="ghost-action lib-toggle-census-btn" data-id="${n.id}" title="${parsed.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${parsed.isCensus ? 'Discharge' : 'Readmit'}</button>
+            <button type="button" class="ghost-action lib-toggle-census-btn" data-id="${n.id}" title="${header.isCensus ? 'Mark Discharged' : 'Readmit to Census'}">${header.isCensus ? 'Discharge' : 'Readmit'}</button>
           </div>
         </div>`;
     })
-    .join('');
+    .join('') + loadMoreHtml;
+
+  const libMoreBtn = $('libraryLoadMoreBtn');
+  if (libMoreBtn) {
+    libMoreBtn.onclick = () => {
+      libraryRenderLimit += LIBRARY_PAGE_SIZE;
+      renderList();
+    };
+  }
 
   listEl.querySelectorAll('.item-main-btn').forEach((btn) => {
     btn.onclick = async () => {
@@ -6099,8 +6393,8 @@ function renderList() {
     btn.onclick = async () => {
       const note = notes.find((x) => x.id === btn.dataset.id);
       if (!note) return;
-      const p = parseChart(note.content, note);
-      note.content = syncFrontmatter(note.content, { census: !p.isCensus });
+      const h = getChartHeader(note);
+      note.content = syncFrontmatter(note.content, { census: !h.isCensus });
       note.updated = Date.now();
       await put(note);
       if (currentId === note.id) {
@@ -6109,18 +6403,22 @@ function renderList() {
         lastSavedChartContent = note.content;
       }
       await refresh();
-      toast(!p.isCensus ? 'Patient readmitted to active census' : 'Patient marked Discharged (retained locally)');
+      toast(!h.isCensus ? 'Patient readmitted to active census' : 'Patient marked Discharged (retained locally)');
     };
   });
 }
 
 async function refresh() {
   notes = await all();
+  pruneChartCaches(notes);
   syncCategoriesFromNotes(notes);
-  renderList();
-  updateEditorEmptyAndNav();
   updateBackupReminderUi();
-  if (currentMode === 'rounds') {
+  updateVaultUi();
+  if (currentMode === 'library') {
+    renderList();
+  } else if (currentMode === 'editor') {
+    updateEditorEmptyAndNav();
+  } else if (currentMode === 'rounds') {
     renderRounds();
   }
 }
@@ -6199,8 +6497,8 @@ async function removeCustomCategory(catName) {
     customCategories.find((c) => c.toLowerCase() === targetLower) || String(catName || '').trim();
 
   const affectedNotes = notes.filter((n) => {
-    const p = parseChart(n.content, n);
-    return (p.categories || []).some((c) => c.toLowerCase() === targetLower);
+    const h = getChartHeader(n);
+    return (h.categories || []).some((c) => c.toLowerCase() === targetLower);
   });
   const msg = affectedNotes.length
     ? `Remove custom category "${canonical}"? This will also untag ${affectedNotes.length} patient chart(s).`
@@ -6386,7 +6684,9 @@ function renderProfileAbxList() {
 function populateProfileInputs(note = {}, content = '', preserveAliases = false) {
   const m = metaOf(content);
   const parsed = parseChart(content, note);
-  $('nameInput').value = m.name || m.patient || note.name || '';
+  const derivedName = parsed.name && parsed.name !== 'Unknown Patient' ? parsed.name : '';
+  const derivedRoom = parsed.room && parsed.room !== 'Unassigned' ? parsed.room : '';
+  $('nameInput').value = m.name || m.patient || note.name || derivedName;
   if (!preserveAliases) {
     const parsedAliases = String(m.aliases || '')
       .split(/[;,]/)
@@ -6395,7 +6695,7 @@ function populateProfileInputs(note = {}, content = '', preserveAliases = false)
     const mergedAliases = [...new Set([...(note.aliases || []), ...parsedAliases])];
     $('aliasesInput').value = mergedAliases.join(', ');
   }
-  $('roomInput').value = m.room || m.bed || note.room || '';
+  $('roomInput').value = m.room || m.bed || m.rm || note.room || derivedRoom;
   $('ageInput').value = m.age || '';
   $('sexInput').value = (m.sex || m.gender || '').toUpperCase();
   const rawWt = m.weight || m.wt || m.weight_kg || m['weight (kg)'] || '';
@@ -6429,8 +6729,7 @@ function populateProfileInputs(note = {}, content = '', preserveAliases = false)
   }
   renderProfileLinesList();
   renderProfileAbxList();
-  $('censusToggle').checked =
-    m.census !== undefined ? String(m.census).toLowerCase() === 'true' : true;
+  $('censusToggle').checked = parsed.isCensus;
   currentChartCategories = [...(parsed.categories || [])];
   renderProfileCategoryFlags();
   updateProfileSummary();
@@ -7395,7 +7694,7 @@ async function select(id, opts = {}) {
   if (detailsEl) detailsEl.open = !$('nameInput').value.trim();
   setEditorView('timeline');
   updateEditorEmptyAndNav();
-  renderList();
+  if (currentMode === 'library') renderList();
 }
 
 async function undoChartEdit() {
@@ -7491,6 +7790,7 @@ async function importFiles(files) {
   for (const f of files) {
     const text = await f.text();
     const m = metaOf(text);
+    const derived = parseRoomAndNameFromTitle(f.name);
     const parsedAliases = String(m.aliases || '')
       .split(/[;,]/)
       .map((s) => s.trim())
@@ -7500,9 +7800,9 @@ async function importFiles(files) {
       id,
       title: f.name.replace(/\.(md|markdown|txt)$/i, ''),
       content: text,
-      name: m.name || m.patient || '',
+      name: m.name || m.patient || derived.name || '',
       aliases: parsedAliases,
-      room: m.room || m.bed || '',
+      room: m.room || m.bed || m.rm || derived.room || '',
       updated: Date.now(),
     });
     importedIds.push(id);
@@ -7589,7 +7889,7 @@ async function runFullWorkspaceBackup() {
     captureInbox: inboxItems,
     customCategories,
     shiftSchedule,
-    appearance: { theme: currentThemeId, accent: currentAccentHex },
+    appearance: { theme: currentThemeId },
     clinicalPrefs: { planMode: currentPlanMode, unitSystem: currentUnitSystem, handoverFormat: currentHandoverFormat },
     templateConfig,
     rawUpdateTemplate: getSavedUpdateTemplate(),
@@ -8000,12 +8300,19 @@ if ($('emptyBrowseChartsBtn')) $('emptyBrowseChartsBtn').onclick = () => setMode
 if ($('librarySortSelect')) {
   $('librarySortSelect').onchange = () => {
     librarySortMode = $('librarySortSelect').value || 'recent';
+    libraryRenderLimit = LIBRARY_PAGE_SIZE;
     renderList();
   };
 }
 $('librarySearchInput').oninput = (e) => {
   librarySearchQuery = e.target.value;
-  renderList();
+  libraryRenderLimit = LIBRARY_PAGE_SIZE;
+  clearTimeout(librarySearchTimer);
+  if (notes.length > 100) {
+    librarySearchTimer = setTimeout(() => renderList(), 120);
+  } else {
+    renderList();
+  }
 };
 if ($('librarySampleBtn')) $('librarySampleBtn').onclick = loadSampleCensus;
 if ($('exportAllMdBtn')) $('exportAllMdBtn').onclick = exportAllChartsMarkdown;
@@ -8107,13 +8414,20 @@ if ($('profileAddCatInput')) {
 if ($('roundsSortSelect')) {
   $('roundsSortSelect').onchange = () => {
     roundsSortMode = $('roundsSortSelect').value || 'bed';
+    roundsRenderLimit = ROUNDS_PAGE_SIZE;
     renderRounds();
   };
 }
 
 $('bedSearchInput').oninput = (e) => {
   searchQuery = e.target.value;
-  renderRounds();
+  roundsRenderLimit = ROUNDS_PAGE_SIZE;
+  clearTimeout(roundsSearchTimer);
+  if (notes.length > 100) {
+    roundsSearchTimer = setTimeout(() => renderRounds(), 120);
+  } else {
+    renderRounds();
+  }
 };
 
 $('copyCensusBtn').onclick = async () => {

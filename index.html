@@ -362,6 +362,14 @@
       </div>
     </div>
 
+    <div id="vaultSyncLiveBanner" class="vault-sync-live-banner" role="status" aria-live="polite" hidden>
+      <div class="vault-sync-live-head">
+        <span id="vaultSyncLiveText" class="vault-sync-live-text">Syncing Obsidian folder…</span>
+        <span id="vaultSyncLiveCount" class="vault-sync-live-count">0%</span>
+      </div>
+      <div class="vault-progress-track"><div id="vaultSyncLiveBar" class="vault-progress-bar"></div></div>
+    </div>
+
     <div id="storageRiskBanner" class="storage-warn-banner" role="status" aria-live="polite" hidden>
       <span class="storage-warn-msg"><svg class="ui-ico" aria-hidden="true"><use href="#ico-alert"></use></svg> <strong>Browser Tab Storage:</strong> Mobile browsers can clear tab data after inactivity. <strong>Add to Home Screen</strong> or export a local backup.</span>
       <div class="row">
@@ -1070,6 +1078,15 @@
                 <div class="storage-stat-row"><span class="cf-meta">Source Folder</span><span id="vaultFolderNameText" class="cf-meta">Not linked</span></div>
                 <div class="storage-stat-row"><span class="cf-meta">Synced Charts</span><span id="vaultSyncedCountText" class="cf-meta">0</span></div>
                 <div class="storage-stat-row"><span class="cf-meta">Last Synced</span><span id="vaultLastSyncedText" class="cf-meta">Never</span></div>
+                <div class="storage-stat-row"><span class="cf-meta">Last Result</span><span id="vaultLastSummaryText" class="cf-meta">—</span></div>
+              </div>
+              <div id="vaultSyncProgressWrap" class="vault-progress-wrap" hidden>
+                <div class="vault-progress-head">
+                  <span id="vaultSyncProgressText" class="cf-meta">Scanning folder…</span>
+                  <span id="vaultSyncProgressCount" class="vault-sync-live-count">0%</span>
+                </div>
+                <div class="vault-progress-track"><div id="vaultSyncProgressBar" class="vault-progress-bar"></div></div>
+                <div id="vaultSyncProgressDetail" class="vault-progress-detail"></div>
               </div>
               <div class="settings-actions">
                 <button type="button" id="linkVaultBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-drive"></use></svg> Link Folder</button>
