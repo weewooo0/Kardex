@@ -134,6 +134,7 @@ import {
   isDirectoryPickerSupported,
   hashContent,
   computeVaultFileName,
+  resolveUniqueVaultFileName,
   buildConflictFileName,
   isUneditedSyntheticNote,
   queryDirPermission,
@@ -143,6 +144,7 @@ import {
   writeVaultFile,
   deleteVaultFile,
   syncVaultDirectory,
+  syncActiveVaultNotes,
   formatVaultSyncSummary,
 } from './vault.js';
 
@@ -181,6 +183,7 @@ const ACCENT_KEY = 'cm.accent';
 const PLAN_MODE_KEY = 'cm.planMode';
 const UNIT_SYSTEM_KEY = 'cm.unitSystem';
 const HANDOVER_FORMAT_KEY = 'cm.handoverFormat';
+const VAULT_ACTIVE_ONLY_KEY = 'kardex_vault_active_only';
 const VALID_SETTINGS_TABS = new Set(['appearance', 'clinical', 'shifts', 'template', 'ai', 'voice', 'storage']);
 
 const RESERVED_CATEGORY_NAMES = new Set([
@@ -706,6 +709,7 @@ let vaultLastHadError = false;
 let vaultSyncInFlight = false;
 let vaultSyncProgress = null;
 let vaultBannerDismissed = false;
+let vaultActiveOnly = safeGetItem(VAULT_ACTIVE_ONLY_KEY, '0') === '1';
 const vaultWriteQueues = new Map();
 
 function openDB() {
@@ -845,8 +849,10 @@ function updateVaultUi() {
   const countEl = $('vaultSyncedCountText');
   const lastEl = $('vaultLastSyncedText');
   const summaryEl = $('vaultLastSummaryText');
+  const activeOnlyToggle = $('vaultActiveOnlyToggle');
   const linkBtn = $('linkVaultBtn');
   const syncBtn = $('syncVaultBtn');
+  const scanBtn = $('scanVaultAllBtn');
   const unlinkBtn = $('unlinkVaultBtn');
   const noteEl = $('vaultSupportNote');
   const roundsSyncBtn = $('roundsSyncVaultBtn');
@@ -858,6 +864,10 @@ function updateVaultUi() {
   const linkedCount = notes.filter((n) => Boolean(n?.sourceFileName)).length;
   if (countEl) countEl.textContent = String(linkedCount);
   if (summaryEl) summaryEl.textContent = vaultLastSummary || '—';
+  if (activeOnlyToggle) {
+    activeOnlyToggle.checked = vaultActiveOnly;
+    activeOnlyToggle.disabled = vaultSyncInFlight || !supported;
+  }
 
   if (!supported) {
     if (pill) {
@@ -867,6 +877,7 @@ function updateVaultUi() {
     if (folderEl) folderEl.textContent = 'Not supported in this browser';
     if (linkBtn) linkBtn.disabled = true;
     if (syncBtn) syncBtn.hidden = true;
+    if (scanBtn) scanBtn.hidden = true;
     if (unlinkBtn) unlinkBtn.hidden = true;
     if (roundsSyncBtn) roundsSyncBtn.hidden = true;
     if (banner) banner.hidden = true;
@@ -892,6 +903,7 @@ function updateVaultUi() {
       linkBtn.innerHTML = `${uiIcon('drive')} Link Folder`;
     }
     if (syncBtn) syncBtn.hidden = true;
+    if (scanBtn) scanBtn.hidden = true;
     if (unlinkBtn) unlinkBtn.hidden = true;
     if (roundsSyncBtn) roundsSyncBtn.hidden = true;
     if (banner) banner.hidden = true;
@@ -920,6 +932,10 @@ function updateVaultUi() {
   if (roundsSyncBtn) {
     roundsSyncBtn.hidden = false;
     roundsSyncBtn.disabled = vaultSyncInFlight;
+    const roundsSyncLbl = roundsSyncBtn.querySelector('span');
+    if (roundsSyncLbl) {
+      roundsSyncLbl.textContent = vaultActiveOnly ? 'Sync Active Patients' : 'Sync Obsidian Folder';
+    }
   }
   if (reconnectBtn) reconnectBtn.disabled = vaultSyncInFlight;
 
@@ -945,8 +961,12 @@ function updateVaultUi() {
     syncBtn.innerHTML = vaultSyncInFlight
       ? `${uiIcon('refresh')} Syncing…`
       : isGranted
-        ? `${uiIcon('refresh')} Sync Now`
+        ? `${uiIcon('refresh')} ${vaultActiveOnly ? 'Sync Active' : 'Sync Now'}`
         : `${uiIcon('refresh')} Reconnect &amp; Sync`;
+  }
+  if (scanBtn) {
+    scanBtn.hidden = !vaultActiveOnly;
+    scanBtn.disabled = vaultSyncInFlight;
   }
   if (banner) {
     banner.hidden = vaultSyncInFlight || isGranted || vaultBannerDismissed;
@@ -974,11 +994,7 @@ async function mirrorNoteToVault(note) {
   let targetName = note.sourceFileName || '';
   if (!targetName) {
     const existingNames = new Set(notes.map((n) => n?.sourceFileName).filter(Boolean));
-    try {
-      const { handles: diskHandles } = await scanVaultEntries(vaultDirHandle);
-      for (const h of diskHandles) existingNames.add(h.name);
-    } catch {}
-    targetName = computeVaultFileName(note.room, note.name, existingNames);
+    targetName = await resolveUniqueVaultFileName(vaultDirHandle, note.room, note.name, existingNames);
   }
 
   try {
@@ -1037,18 +1053,37 @@ async function put(note, { skipVaultMirror = false } = {}) {
   }
 }
 
-async function runVaultSync({ interactive = true } = {}) {
+async function runVaultSync({ interactive = true, forceScan = false } = {}) {
   if (!vaultDirHandle || !isDirectoryPickerSupported()) return null;
   if (vaultSyncInFlight) {
     if (interactive) toast('Obsidian folder sync already in progress…');
     return null;
   }
+  const hasLinkedActive = notes.some((n) => Boolean(n?.sourceFileName) && getChartHeader(n).isCensus);
+  const useFastActive = vaultActiveOnly && !forceScan && hasLinkedActive;
+
   vaultSyncInFlight = true;
   vaultLastHadError = false;
-  vaultSyncProgress = { phase: 'scanning', found: 0, processed: 0, total: 0, percent: 0, currentFile: '' };
+  vaultSyncProgress = useFastActive
+    ? { phase: 'syncing', processed: 0, total: 0, percent: 0, currentFile: 'Checking active patients…' }
+    : { phase: 'scanning', found: 0, processed: 0, total: 0, percent: 0, currentFile: '' };
   updateVaultUi();
 
   let lastUiTick = 0;
+  const handleSyncProgress = (prog) => {
+    const phaseChanged = prog.phase !== vaultSyncProgress?.phase;
+    vaultSyncProgress = prog;
+    const nowTs = Date.now();
+    if (phaseChanged || prog.processed === prog.total || nowTs - lastUiTick >= 60) {
+      lastUiTick = nowTs;
+      renderVaultSyncProgress(prog);
+      const pill = $('vaultStatusPill');
+      if (pill && prog.phase === 'syncing' && prog.total) {
+        pill.textContent = `SYNCING ${prog.processed}/${prog.total}`;
+      }
+    }
+  };
+
   try {
     vaultPermission = await queryDirPermission(vaultDirHandle, { request: interactive });
     if (vaultPermission !== 'granted') {
@@ -1059,26 +1094,32 @@ async function runVaultSync({ interactive = true } = {}) {
       return null;
     }
 
-    const res = await syncVaultDirectory({
-      dirHandle: vaultDirHandle,
-      localNotes: notes,
-      putNote: put,
-      putNotesBatch: rawPutManyNotes,
-      generateId: uid,
-      onProgress: (prog) => {
-        const phaseChanged = prog.phase !== vaultSyncProgress?.phase;
-        vaultSyncProgress = prog;
-        const nowTs = Date.now();
-        if (phaseChanged || prog.processed === prog.total || nowTs - lastUiTick >= 60) {
-          lastUiTick = nowTs;
-          renderVaultSyncProgress(prog);
-          const pill = $('vaultStatusPill');
-          if (pill && prog.phase === 'syncing' && prog.total) {
-            pill.textContent = `SYNCING ${prog.processed}/${prog.total}`;
-          }
-        }
-      },
-    });
+    let res;
+    if (useFastActive) {
+      res = await syncActiveVaultNotes({
+        dirHandle: vaultDirHandle,
+        localNotes: notes,
+        putNote: put,
+        putNotesBatch: rawPutManyNotes,
+        generateId: uid,
+        onProgress: handleSyncProgress,
+      });
+    } else {
+      const inactiveCache = vaultActiveOnly ? (await getMeta('vaultInactiveIndex')) || {} : null;
+      res = await syncVaultDirectory({
+        dirHandle: vaultDirHandle,
+        localNotes: notes,
+        putNote: put,
+        putNotesBatch: rawPutManyNotes,
+        generateId: uid,
+        activeOnly: vaultActiveOnly,
+        inactiveCache,
+        onProgress: handleSyncProgress,
+      });
+      if (vaultActiveOnly && res?.inactiveCache) {
+        await setMeta('vaultInactiveIndex', res.inactiveCache);
+      }
+    }
     vaultLastSyncedAt = Date.now();
     vaultLastSummary = formatVaultSyncSummary(res);
     vaultLastHadError = Array.isArray(res.errors) && res.errors.length > 0;
@@ -1128,9 +1169,10 @@ async function linkVaultFolder() {
     vaultDirHandle = handle;
     vaultPermission = 'granted';
     vaultBannerDismissed = false;
+    await delMeta('vaultInactiveIndex');
     await setMeta('vaultDirHandle', handle);
     updateVaultUi();
-    await runVaultSync({ interactive: true });
+    await runVaultSync({ interactive: true, forceScan: true });
   } catch (err) {
     if (err?.name !== 'AbortError') {
       toast(`Could not link folder: ${err?.message || 'Permission denied'}`);
@@ -1152,6 +1194,7 @@ async function unlinkVaultFolder() {
   vaultSyncProgress = null;
   await delMeta('vaultDirHandle');
   await delMeta('vaultSyncMeta');
+  await delMeta('vaultInactiveIndex');
   const toUnlink = [];
   for (const n of notes) {
     if (n.sourceFileName || n.sourceContentHash || n.localDirtySync) {
@@ -8140,7 +8183,16 @@ if ($('storageRiskDismissBtn')) {
 if ($('settingsBackupBtn')) $('settingsBackupBtn').onclick = runFullWorkspaceBackup;
 if ($('linkVaultBtn')) $('linkVaultBtn').onclick = linkVaultFolder;
 if ($('syncVaultBtn')) $('syncVaultBtn').onclick = () => runVaultSync({ interactive: true });
+if ($('scanVaultAllBtn')) $('scanVaultAllBtn').onclick = () => runVaultSync({ interactive: true, forceScan: true });
 if ($('unlinkVaultBtn')) $('unlinkVaultBtn').onclick = unlinkVaultFolder;
+if ($('vaultActiveOnlyToggle')) {
+  $('vaultActiveOnlyToggle').onchange = () => {
+    vaultActiveOnly = Boolean($('vaultActiveOnlyToggle').checked);
+    safeSetItem(VAULT_ACTIVE_ONLY_KEY, vaultActiveOnly ? '1' : '0');
+    updateVaultUi();
+    toast(vaultActiveOnly ? 'Active-only fast re-sync enabled (census: true)' : 'Full-folder Obsidian sync enabled');
+  };
+}
 if ($('vaultReconnectBtn')) $('vaultReconnectBtn').onclick = () => runVaultSync({ interactive: true });
 if ($('vaultReconnectDismissBtn')) {
   $('vaultReconnectDismissBtn').onclick = () => {

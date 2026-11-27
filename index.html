@@ -1080,6 +1080,12 @@
                 <div class="storage-stat-row"><span class="cf-meta">Last Synced</span><span id="vaultLastSyncedText" class="cf-meta">Never</span></div>
                 <div class="storage-stat-row"><span class="cf-meta">Last Result</span><span id="vaultLastSummaryText" class="cf-meta">—</span></div>
               </div>
+              <div class="profile-flags mt-10">
+                <label class="tpl-id-chip">
+                  <input type="checkbox" id="vaultActiveOnlyToggle">
+                  <span>Active patients only (<code>census: true</code>) — fast re-sync</span>
+                </label>
+              </div>
               <div id="vaultSyncProgressWrap" class="vault-progress-wrap" hidden>
                 <div class="vault-progress-head">
                   <span id="vaultSyncProgressText" class="cf-meta">Scanning folder…</span>
@@ -1091,6 +1097,7 @@
               <div class="settings-actions">
                 <button type="button" id="linkVaultBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-drive"></use></svg> Link Folder</button>
                 <button type="button" id="syncVaultBtn" class="primary" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Sync Now</button>
+                <button type="button" id="scanVaultAllBtn" class="btn-secondary" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-search"></use></svg> Scan Folder for New Active</button>
                 <button type="button" id="unlinkVaultBtn" class="ghost-action danger-ghost" hidden>Unlink</button>
               </div>
               <p id="vaultSupportNote" class="fine">Link a flat Obsidian Patients folder for automatic two-way <code>.md</code> sync (Android Chrome 132+ &amp; Desktop Chromium). New charts save as <code>Room - Name.md</code> and keep existing filenames stable across bed transfers.</p>
