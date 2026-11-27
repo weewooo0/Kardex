@@ -127,8 +127,21 @@ import {
   formatCompletedAntibiotics,
   buildPrintableScutsheetData,
 } from './census.js';
+import {
+  isDirectoryPickerSupported,
+  hashContent,
+  computeVaultFileName,
+  buildConflictFileName,
+  isUneditedSyntheticNote,
+  queryDirPermission,
+  listVaultMarkdownFiles,
+  readVaultFile,
+  writeVaultFile,
+  deleteVaultFile,
+  syncVaultDirectory,
+} from './vault.js';
 
-const DB = 'companion-md', STORE = 'notes';
+const DB = 'companion-md', STORE = 'notes', META_STORE = 'meta';
 const $ = (id) => document.getElementById(id);
 function uiIcon(name, cls = 'ui-ico') {
   return `<svg class="${cls}" aria-hidden="true"><use href="#ico-${name}"></use></svg>`;
@@ -428,6 +441,7 @@ function setSettingsTab(tabId, { persist = true, focus = false } = {}) {
     updateApiKeyStatusPill();
   } else if (next === 'storage') {
     refreshStorageAndPwaStatus();
+    updateVaultUi();
   }
 }
 
@@ -633,13 +647,23 @@ let calcChartHasDrip = false;
 let shiftPreviewDirty = false;
 let lastDutyKey = '';
 
-/* ---------- local storage (IndexedDB) ---------- */
+/* ---------- local storage (IndexedDB v2 + Linked Obsidian Folder) ---------- */
+let vaultDirHandle = null;
+let vaultPermission = 'none'; // 'none' | 'granted' | 'prompt' | 'denied' | 'unsupported'
+let vaultLastSyncedAt = 0;
+let vaultSyncInFlight = false;
+let vaultBannerDismissed = false;
+const vaultWriteQueues = new Map();
+
 function openDB() {
   return new Promise((resolve, reject) => {
-    const r = indexedDB.open(DB, 1);
+    const r = indexedDB.open(DB, 2);
     r.onupgradeneeded = () => {
       if (!r.result.objectStoreNames.contains(STORE)) {
         r.result.createObjectStore(STORE, { keyPath: 'id' });
+      }
+      if (!r.result.objectStoreNames.contains(META_STORE)) {
+        r.result.createObjectStore(META_STORE, { keyPath: 'key' });
       }
     };
     r.onsuccess = () => {
@@ -654,7 +678,37 @@ function openDB() {
   });
 }
 
-function put(note) {
+function getMeta(key) {
+  return new Promise((res) => {
+    if (!db || !db.objectStoreNames.contains(META_STORE)) return res(null);
+    const t = db.transaction(META_STORE, 'readonly');
+    const q = t.objectStore(META_STORE).get(key);
+    q.onsuccess = () => res(q.result ? q.result.value : null);
+    q.onerror = () => res(null);
+  });
+}
+
+function setMeta(key, value) {
+  return new Promise((res, rej) => {
+    if (!db || !db.objectStoreNames.contains(META_STORE)) return res();
+    const t = db.transaction(META_STORE, 'readwrite');
+    t.objectStore(META_STORE).put({ key, value });
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+
+function delMeta(key) {
+  return new Promise((res, rej) => {
+    if (!db || !db.objectStoreNames.contains(META_STORE)) return res();
+    const t = db.transaction(META_STORE, 'readwrite');
+    t.objectStore(META_STORE).delete(key);
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+
+function rawPutNote(note) {
   return new Promise((res, rej) => {
     if (!db) return rej(new Error('IndexedDB unavailable'));
     const t = db.transaction(STORE, 'readwrite');
@@ -662,6 +716,295 @@ function put(note) {
     t.oncomplete = res;
     t.onerror = () => rej(t.error);
   });
+}
+
+function updateVaultUi() {
+  const pill = $('vaultStatusPill');
+  const folderEl = $('vaultFolderNameText');
+  const countEl = $('vaultSyncedCountText');
+  const lastEl = $('vaultLastSyncedText');
+  const linkBtn = $('linkVaultBtn');
+  const syncBtn = $('syncVaultBtn');
+  const unlinkBtn = $('unlinkVaultBtn');
+  const noteEl = $('vaultSupportNote');
+  const roundsSyncBtn = $('roundsSyncVaultBtn');
+  const banner = $('vaultReconnectBanner');
+  const bannerText = $('vaultReconnectText');
+
+  const supported = isDirectoryPickerSupported();
+  const linkedCount = notes.filter((n) => Boolean(n?.sourceFileName)).length;
+  if (countEl) countEl.textContent = String(linkedCount);
+
+  if (!supported) {
+    if (pill) {
+      pill.textContent = 'UNSUPPORTED';
+      pill.className = 'status-meta warn';
+    }
+    if (folderEl) folderEl.textContent = 'Not supported in this browser';
+    if (linkBtn) linkBtn.disabled = true;
+    if (syncBtn) syncBtn.hidden = true;
+    if (unlinkBtn) unlinkBtn.hidden = true;
+    if (roundsSyncBtn) roundsSyncBtn.hidden = true;
+    if (banner) banner.hidden = true;
+    if (noteEl) {
+      noteEl.textContent =
+        'Folder linking requires Chrome/Chromium 132+ on Android or Desktop. On iOS Safari or Firefox, use Import .md / Export .md.';
+    }
+    return;
+  }
+
+  if (!vaultDirHandle) {
+    if (pill) {
+      pill.textContent = 'NOT LINKED';
+      pill.className = 'status-meta';
+    }
+    if (folderEl) folderEl.textContent = 'Not linked';
+    if (lastEl) lastEl.textContent = 'Never';
+    if (linkBtn) {
+      linkBtn.disabled = false;
+      linkBtn.className = 'primary';
+      linkBtn.innerHTML = `${uiIcon('drive')} Link Folder`;
+    }
+    if (syncBtn) syncBtn.hidden = true;
+    if (unlinkBtn) unlinkBtn.hidden = true;
+    if (roundsSyncBtn) roundsSyncBtn.hidden = true;
+    if (banner) banner.hidden = true;
+    return;
+  }
+
+  const folderName = vaultDirHandle.name || 'Obsidian Folder';
+  if (folderEl) folderEl.textContent = folderName;
+  if (lastEl) {
+    lastEl.textContent = vaultLastSyncedAt
+      ? new Date(vaultLastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : 'Pending sync';
+  }
+  if (linkBtn) {
+    linkBtn.disabled = false;
+    linkBtn.className = 'btn-secondary';
+    linkBtn.innerHTML = `${uiIcon('drive')} Change Folder`;
+  }
+  if (unlinkBtn) unlinkBtn.hidden = false;
+  if (roundsSyncBtn) roundsSyncBtn.hidden = false;
+
+  const isGranted = vaultPermission === 'granted';
+  if (pill) {
+    pill.textContent = isGranted ? 'CONNECTED' : 'RECONNECT NEEDED';
+    pill.className = `status-meta ${isGranted ? 'safe' : 'warn'}`;
+  }
+  if (syncBtn) {
+    syncBtn.hidden = false;
+    syncBtn.innerHTML = isGranted
+      ? `${uiIcon('refresh')} Sync Now`
+      : `${uiIcon('refresh')} Reconnect &amp; Sync`;
+  }
+  if (banner) {
+    banner.hidden = isGranted || vaultBannerDismissed;
+    if (bannerText) {
+      bannerText.textContent = `Obsidian folder "${folderName}" paused — tap to reconnect & sync.`;
+    }
+  }
+}
+
+async function mirrorNoteToVault(note) {
+  if (!note || !vaultDirHandle || !isDirectoryPickerSupported()) return;
+  if (isUneditedSyntheticNote(note)) return;
+
+  if (vaultPermission !== 'granted') {
+    if (!note.localDirtySync) {
+      note.localDirtySync = true;
+      await rawPutNote(note);
+    }
+    vaultBannerDismissed = false;
+    updateVaultUi();
+    return;
+  }
+
+  let targetName = note.sourceFileName || '';
+  if (!targetName) {
+    const existingNames = new Set(notes.map((n) => n?.sourceFileName).filter(Boolean));
+    try {
+      const diskFiles = await listVaultMarkdownFiles(vaultDirHandle);
+      for (const f of diskFiles) existingNames.add(f.name);
+    } catch {}
+    targetName = computeVaultFileName(note.room, note.name, existingNames);
+  }
+
+  try {
+    const existingDisk = await readVaultFile(vaultDirHandle, targetName);
+    const localHash = hashContent(note.content);
+    if (
+      existingDisk &&
+      note.sourceContentHash &&
+      existingDisk.hash !== note.sourceContentHash &&
+      existingDisk.hash !== localHash
+    ) {
+      const conflictName = buildConflictFileName(targetName, new Date());
+      await writeVaultFile(vaultDirHandle, conflictName, existingDisk.content);
+      toast(`Obsidian conflict saved to "${conflictName}"`);
+    }
+
+    const written = await writeVaultFile(vaultDirHandle, targetName, note.content);
+    note.sourceFileName = written.name;
+    note.sourceLastModified = written.lastModified;
+    note.sourceContentHash = written.hash;
+    note.localDirtySync = false;
+    await rawPutNote(note);
+
+    const idx = notes.findIndex((n) => n.id === note.id);
+    if (idx !== -1) notes[idx] = note;
+    vaultLastSyncedAt = Date.now();
+    setMeta('vaultSyncMeta', { folderName: vaultDirHandle.name || '', lastSyncedAt: vaultLastSyncedAt }).catch(() => {});
+    updateVaultUi();
+  } catch (err) {
+    if (err?.name === 'NotAllowedError') {
+      vaultPermission = 'prompt';
+      note.localDirtySync = true;
+      await rawPutNote(note);
+      vaultBannerDismissed = false;
+      updateVaultUi();
+    }
+  }
+}
+
+function enqueueVaultMirror(note) {
+  if (!note?.id) return Promise.resolve();
+  const prev = vaultWriteQueues.get(note.id) || Promise.resolve();
+  const next = prev.catch(() => {}).then(() => mirrorNoteToVault(note));
+  vaultWriteQueues.set(note.id, next);
+  return next;
+}
+
+async function put(note, { skipVaultMirror = false } = {}) {
+  if (!skipVaultMirror && vaultDirHandle && !isUneditedSyntheticNote(note)) {
+    note.localDirtySync = true;
+  }
+  await rawPutNote(note);
+  if (!skipVaultMirror) {
+    await enqueueVaultMirror(note);
+  }
+}
+
+async function runVaultSync({ interactive = true } = {}) {
+  if (!vaultDirHandle || !isDirectoryPickerSupported()) return null;
+  if (vaultSyncInFlight) return null;
+  vaultSyncInFlight = true;
+  try {
+    vaultPermission = await queryDirPermission(vaultDirHandle, { request: interactive });
+    updateVaultUi();
+    if (vaultPermission !== 'granted') {
+      if (interactive) toast('Folder permission is required to sync with Obsidian');
+      return null;
+    }
+
+    const res = await syncVaultDirectory({
+      dirHandle: vaultDirHandle,
+      localNotes: notes,
+      putNote: put,
+      generateId: uid,
+    });
+    vaultLastSyncedAt = Date.now();
+    await setMeta('vaultSyncMeta', { folderName: vaultDirHandle.name || '', lastSyncedAt: vaultLastSyncedAt });
+    await refresh();
+
+    if (currentId) {
+      const updatedCurr = notes.find((n) => n.id === currentId);
+      if (updatedCurr && !dirtyChart) {
+        $('noteText').value = updatedCurr.content;
+        lastSavedChartContent = updatedCurr.content;
+        populateProfileInputs(updatedCurr, updatedCurr.content, true);
+        refreshActiveEditorView();
+      }
+    }
+    updateVaultUi();
+
+    if (interactive || res.pulled > 0 || res.pushed > 0 || res.conflicts > 0) {
+      const parts = [];
+      if (res.pulled) parts.push(`${res.pulled} pulled`);
+      if (res.pushed) parts.push(`${res.pushed} pushed`);
+      if (res.conflicts) parts.push(`${res.conflicts} conflict copy saved`);
+      const summary = parts.length ? parts.join(' · ') : 'Up to date';
+      toast(`Obsidian Sync (${vaultDirHandle.name || 'Folder'}): ${summary}`);
+    }
+    return res;
+  } catch (err) {
+    toast(`Folder sync failed: ${err?.message || 'Error'}`);
+    return null;
+  } finally {
+    vaultSyncInFlight = false;
+  }
+}
+
+async function linkVaultFolder() {
+  if (!isDirectoryPickerSupported()) {
+    return toast('Folder linking requires Chrome/Chromium 132+ on Android or Desktop');
+  }
+  try {
+    const handle = await window.showDirectoryPicker({
+      id: 'kardex-obsidian-vault',
+      mode: 'readwrite',
+    });
+    if (!handle) return;
+    vaultDirHandle = handle;
+    vaultPermission = 'granted';
+    vaultBannerDismissed = false;
+    await setMeta('vaultDirHandle', handle);
+    updateVaultUi();
+    await runVaultSync({ interactive: true });
+  } catch (err) {
+    if (err?.name !== 'AbortError') {
+      toast(`Could not link folder: ${err?.message || 'Permission denied'}`);
+    }
+  }
+}
+
+async function unlinkVaultFolder() {
+  if (!vaultDirHandle) return;
+  const folderName = vaultDirHandle.name || 'Obsidian Folder';
+  if (!confirm(`Unlink "${folderName}"? Existing charts stay safely in both Kardex and your Obsidian folder.`)) {
+    return;
+  }
+  vaultDirHandle = null;
+  vaultPermission = 'none';
+  vaultLastSyncedAt = 0;
+  await delMeta('vaultDirHandle');
+  await delMeta('vaultSyncMeta');
+  for (const n of notes) {
+    if (n.sourceFileName || n.sourceContentHash || n.localDirtySync) {
+      n.sourceFileName = '';
+      n.sourceLastModified = 0;
+      n.sourceContentHash = '';
+      n.localDirtySync = false;
+      await rawPutNote(n);
+    }
+  }
+  updateVaultUi();
+  toast(`Unlinked "${folderName}"`);
+}
+
+async function initVaultLink() {
+  if (!isDirectoryPickerSupported()) {
+    vaultPermission = 'unsupported';
+    updateVaultUi();
+    return;
+  }
+  try {
+    const savedHandle = await getMeta('vaultDirHandle');
+    const savedMeta = await getMeta('vaultSyncMeta');
+    if (savedMeta?.lastSyncedAt) vaultLastSyncedAt = Number(savedMeta.lastSyncedAt) || 0;
+    if (!savedHandle) {
+      updateVaultUi();
+      return;
+    }
+    vaultDirHandle = savedHandle;
+    vaultPermission = await queryDirPermission(savedHandle, { request: false });
+    updateVaultUi();
+    if (vaultPermission === 'granted') {
+      await runVaultSync({ interactive: false });
+    }
+  } catch {
+    updateVaultUi();
+  }
 }
 
 function remove(id) {
@@ -7495,6 +7838,22 @@ if ($('storageRiskDismissBtn')) {
   };
 }
 if ($('settingsBackupBtn')) $('settingsBackupBtn').onclick = runFullWorkspaceBackup;
+if ($('linkVaultBtn')) $('linkVaultBtn').onclick = linkVaultFolder;
+if ($('syncVaultBtn')) $('syncVaultBtn').onclick = () => runVaultSync({ interactive: true });
+if ($('unlinkVaultBtn')) $('unlinkVaultBtn').onclick = unlinkVaultFolder;
+if ($('vaultReconnectBtn')) $('vaultReconnectBtn').onclick = () => runVaultSync({ interactive: true });
+if ($('vaultReconnectDismissBtn')) {
+  $('vaultReconnectDismissBtn').onclick = () => {
+    vaultBannerDismissed = true;
+    if ($('vaultReconnectBanner')) $('vaultReconnectBanner').hidden = true;
+  };
+}
+if ($('roundsSyncVaultBtn')) {
+  $('roundsSyncVaultBtn').onclick = () => {
+    closeAllMenus();
+    runVaultSync({ interactive: true });
+  };
+}
 if ($('checkSwUpdateBtn')) {
   $('checkSwUpdateBtn').onclick = async () => {
     if (!swRegistration) return toast('Service worker inactive in this browser session');
@@ -7972,15 +8331,32 @@ $('copyUpdateBtn').onclick = () => {
 
 $('deleteBtn').onclick = async () => {
   if (!currentId) return;
-  const deletedNote = notes.find((n) => n.id === currentId);
-  if (!deletedNote || !confirm('Delete this patient chart from this device?')) return;
+  const deletedNote = { ...(notes.find((n) => n.id === currentId) || {}) };
+  if (!deletedNote.id || !confirm('Delete this patient chart from this device?')) return;
+
+  let deleteDiskFile = false;
+  if (deletedNote.sourceFileName && vaultDirHandle && isDirectoryPickerSupported()) {
+    deleteDiskFile = confirm(
+      `Also delete "${deletedNote.sourceFileName}" from your linked Obsidian folder?\n\nOK = Delete from Kardex & Obsidian folder\nCancel = Remove from Kardex only (keep .md file)`
+    );
+  }
+
   if ($('editorMoreMenu')) $('editorMoreMenu').open = false;
   clearTimeout(chartAutosaveTimer);
   dirtyChart = false;
   updateSaveStatusPill('saved');
   await remove(currentId);
+  if (deleteDiskFile) {
+    try {
+      const perm = await queryDirPermission(vaultDirHandle, { request: true });
+      if (perm === 'granted') {
+        await deleteVaultFile(vaultDirHandle, deletedNote.sourceFileName);
+      }
+    } catch {}
+  }
   currentId = null;
   await refresh();
+  updateVaultUi();
   $('noteText').value = '';
   renderEditorNoteTitle('', '', 'Untitled note');
   await setMode('rounds');
@@ -10397,6 +10773,7 @@ setInterval(updateDutyClockUi, 60000);
 
   await refresh();
   await refreshStorageAndPwaStatus({ requestPersist: true });
+  await initVaultLink();
   if (notes.length) {
     await select(notes[0].id, { skipFlush: true });
   }

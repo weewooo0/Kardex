@@ -327,6 +327,7 @@
           <button type="button" id="copyCensusBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-copy"></use></svg><span>Copy Census</span></button>
           <button type="button" id="handoverBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-handover"></use></svg><span>Handover Report</span></button>
           <button type="button" id="roundsPrintScutsheetBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-file-lines"></use></svg><span>Print Scutsheet</span></button>
+          <button type="button" id="roundsSyncVaultBtn" class="popover-menu-item" role="menuitem" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg><span>Sync Obsidian Folder</span></button>
           <button type="button" id="roundsBackupMenuBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-save"></use></svg><span>Backup Workspace</span></button>
           <button type="button" id="loadSyntheticBtn" class="popover-menu-item" role="menuitem"><svg class="ui-ico" aria-hidden="true"><use href="#ico-sparkles"></use></svg><span>Load Sample Census</span></button>
         </div>
@@ -350,6 +351,14 @@
       <div class="row tight">
         <button type="button" id="backupBannerNowBtn" class="btn-secondary sm-btn">Backup</button>
         <button type="button" id="backupBannerDismissBtn" class="ghost-action" aria-label="Dismiss backup reminder"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
+      </div>
+    </div>
+
+    <div id="vaultReconnectBanner" class="vault-reconnect-banner" role="status" aria-live="polite" hidden>
+      <span id="vaultReconnectText" class="backup-warn-msg">Obsidian folder paused — tap to reconnect &amp; sync.</span>
+      <div class="row tight">
+        <button type="button" id="vaultReconnectBtn" class="btn-secondary sm-btn">Reconnect &amp; Sync</button>
+        <button type="button" id="vaultReconnectDismissBtn" class="ghost-action" aria-label="Dismiss folder reconnect banner"><svg class="ui-ico" aria-hidden="true"><use href="#ico-x"></use></svg></button>
       </div>
     </div>
 
@@ -1052,6 +1061,24 @@
 
         <div id="settingsPanelStorage" class="settings-subpanel" role="tabpanel" aria-labelledby="settingsTabStorage" hidden>
           <div class="settings-stack">
+            <section id="vaultSyncCard" class="panel">
+              <div class="panel-head">
+                <h2>Linked Obsidian Folder</h2>
+                <span id="vaultStatusPill" class="status-meta" role="status" aria-live="polite">NOT LINKED</span>
+              </div>
+              <div class="storage-status-box">
+                <div class="storage-stat-row"><span class="cf-meta">Source Folder</span><span id="vaultFolderNameText" class="cf-meta">Not linked</span></div>
+                <div class="storage-stat-row"><span class="cf-meta">Synced Charts</span><span id="vaultSyncedCountText" class="cf-meta">0</span></div>
+                <div class="storage-stat-row"><span class="cf-meta">Last Synced</span><span id="vaultLastSyncedText" class="cf-meta">Never</span></div>
+              </div>
+              <div class="settings-actions">
+                <button type="button" id="linkVaultBtn" class="primary"><svg class="ui-ico" aria-hidden="true"><use href="#ico-drive"></use></svg> Link Folder</button>
+                <button type="button" id="syncVaultBtn" class="primary" hidden><svg class="ui-ico" aria-hidden="true"><use href="#ico-refresh"></use></svg> Sync Now</button>
+                <button type="button" id="unlinkVaultBtn" class="ghost-action danger-ghost" hidden>Unlink</button>
+              </div>
+              <p id="vaultSupportNote" class="fine">Link a flat Obsidian Patients folder for automatic two-way <code>.md</code> sync (Android Chrome 132+ &amp; Desktop Chromium). New charts save as <code>Room - Name.md</code> and keep existing filenames stable across bed transfers.</p>
+            </section>
+
             <section id="storagePwaCard" class="panel">
               <div class="panel-head">
                 <h2>Local Storage, PWA &amp; Updates</h2>

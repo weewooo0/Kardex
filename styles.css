@@ -216,10 +216,12 @@ body {
   font-weight: 500;
 }
 
-.backup-warn-banner {
+.backup-warn-banner,
+.vault-reconnect-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
@@ -229,6 +231,10 @@ body {
   margin-bottom: 10px;
   font-size: 12.5px;
   color: var(--txt);
+}
+.vault-reconnect-banner[hidden],
+.backup-warn-banner[hidden] {
+  display: none !important;
 }
 .backup-warn-msg {
   flex: 1 1 180px;
